@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 9)
+**Last updated:** 2026-09-10 (rev 10)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -1329,6 +1329,13 @@ one that names its holes.
   ADRs are intentions, and this line is here so nobody reads them as descriptions.
 - ADR-014's two numbers (12 and 6) have no measurement behind them at all. Step 1.8 is where they
   stop being guesses.
+- `min_context_tokens` is now **32,000**, derived rather than guessed: the largest realistic prompt
+  today is the synthesizer's at ~12,008 tokens (12 worker summaries per ADR-014 plus an 8,000-token
+  artifact budget), and the planner's is ~5,456 (the measured 3,956-token catalogue plus prompt and
+  schema). Doubled for headroom and rounded. **It is a lower bound the system provably exceeds, not
+  the true requirement** — step 1.8 replaces it with LangSmith's real per-call token counts. Verified
+  locally against the context lengths `--suggest` records as comments in `config/models.toml`: zero
+  violations across all four chains.
 - `pack()`'s token count is an ESTIMATE (`CHARS_PER_TOKEN_ESTIMATE = 3.6`), not a tokenizer. The
   tier's model is configurable and OpenRouter fronts many providers, so the tokenizer that will count
   these characters is unknown at pack time. It leans high on purpose. Calibration path: LangSmith
@@ -1402,6 +1409,25 @@ time the project was used correctly, because populating the registry is the inte
 test that encodes a transient state as a permanent invariant punishes progress; the assertion now
 checks that the config's `version` string and its chains tell the same story, which is invariant.
 The general form: before asserting a fact about a file, ask whether that file is designed to change.
+
+**Closed by verification on 2026-09-10, with real credentials** (the network checks that had never
+executed in the project's life, per the note above — this is what closed them):
+
+| Check | Result |
+|---|---|
+| `openrouter` | authenticated; **338** endpoints support structured outputs |
+| `langsmith` | reachable, project `dynaflows` |
+| `tier capability` | every configured model in all four chains honours `json_schema` |
+| `handshake` | structured output honoured, **through the full ADR-010 ladder** |
+
+The handshake is the one that matters most. It is not a bare HTTP call: it runs registry → cache →
+breaker → semaphore → timeout → invoker → provider → parse, so the whole chokepoint is exercised
+end to end by `make doctor`. `probe_structured` was rewritten in step 1.2 to go through the gateway
+precisely so that this check tests the shipped path (AP-11) rather than a parallel one.
+
+**What this does NOT close:** every response so far has been a success. The error classifier in
+`gateway/invoker.py` — which decides whether a failure retries, falls through or aborts — has still
+never seen a real 429, 401 or timeout.
 
 **Closed by verification on 2026-09-10** (Phase 0):
 - *"the deterministic tier can be 100% green with no network and no provider"* — 37 tests, 0.09s.

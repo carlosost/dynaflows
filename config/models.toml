@@ -33,11 +33,20 @@ enforce_verifier_family_diversity = true
 # hold at least this many tokens, or a fallback fails on the exact prompts its
 # primary was chosen for.
 #
-# 0 disables the check, and 0 is the honest default: the right number is the
-# largest prompt a tier actually sends, which nobody has measured yet. Playbook
-# 4.5 -- implement and test the mechanism, treat the threshold as provisional.
-# doctor reports the disabled state as WARN so it stays visible.
-min_context_tokens = 0
+# DERIVED 2026-09-10, from measured values rather than taste. This is a lower
+# bound the system provably exceeds, not the true requirement -- tighten it at
+# step 1.8 from LangSmith's real per-call token counts (playbook 4.5).
+#
+#   enhancer  (small)     ~   600  short instruction
+#   planner   (frontier)  ~ 5,456  catalogue 3,956 (measured) + prompt + schema
+#   worker    (mid)       ~ 3,000  context pack 2,000 + objective + inputs
+#   synthesizer (mid_high)~12,008  12 summaries (ADR-014) + 8,000 artifact budget
+#   ------------------------------------------------------------------------
+#   largest today ~12,008; x2 headroom ~24,016; floor set at 32,000
+#
+# 0 disables the check. doctor reports the disabled state as WARN, never OK,
+# so a skipped check never reads as a passing one.
+min_context_tokens = 32000
 
 # Chains are ordered: index 0 is preferred, later entries are fallbacks.
 # Every entry in a chain must satisfy the constraints above.
