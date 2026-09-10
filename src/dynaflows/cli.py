@@ -6,7 +6,7 @@ Phase 0 ships two commands and no workflow: `doctor` proves the environment,
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
@@ -151,6 +151,88 @@ def context(
         + (f" · truncated {packed.truncated_id}" if packed.truncated_id else "")
         + "[/]"
     )
+
+
+@app.command()
+def run(
+    prompt: Annotated[str, typer.Argument(help="What you want the workflow to do.")],
+    thread: Annotated[str, typer.Option(help="Thread id. Reuse it to resume.")] = "",
+    stop_before: Annotated[
+        str, typer.Option(help="Halt before this node (step 1.3 stand-in for the gates).")
+    ] = "",
+) -> None:
+    """Execute the workflow graph.
+
+    Step 1.3: every node is a pass-through, so this proves the topology, the
+    reducers and the checkpointer -- not the workflow. It exists now rather
+    than in 1.8 because a graph whose only caller is a test is the AP-11 shape,
+    and steps 1.4-1.7 fill the same nodes this command already drives.
+    """
+    import asyncio
+    import uuid
+
+    from dynaflows.contracts.state import initial_state
+    from dynaflows.graph import build_graph, open_checkpointer
+
+    settings = get_settings()
+    thread_id = thread or f"run-{uuid.uuid4().hex[:8]}"
+
+    async def _go() -> dict[str, Any]:
+        async with open_checkpointer(settings.state_db) as saver:
+            graph = build_graph(saver, interrupt_before=(stop_before,) if stop_before else ())
+            cfg = {"configurable": {"thread_id": thread_id}}
+            state = initial_state(uuid.uuid4().hex[:8], thread_id, prompt)
+            await graph.ainvoke(state, cfg)
+            snapshot = await graph.aget_state(cfg)
+            return {"next": snapshot.next, "values": snapshot.values}
+
+    outcome = asyncio.run(_go())
+    console.print(f"[dim]thread[/] {thread_id}")
+    if outcome["next"]:
+        console.print(f"[yellow]HALTED[/] before {', '.join(outcome['next'])}")
+        console.print(f"[dim]resume with:[/] dynaflows resume {thread_id}")
+        return
+    report = outcome["values"].get("evaluation")
+    console.print("[green]Completed.[/]")
+    if report is not None:
+        console.print(
+            f"[dim]{report.task_count} task(s), {report.ok_count} ok, "
+            f"{report.failed_count} failed, passed={report.passed}[/]"
+        )
+
+
+@app.command()
+def resume(
+    thread: Annotated[str, typer.Argument(help="The thread id to continue.")],
+) -> None:
+    """Continue a halted or crashed run from its last checkpoint (ADR-008)."""
+    import asyncio
+
+    from dynaflows.graph import build_graph, open_checkpointer
+
+    settings = get_settings()
+
+    async def _go() -> dict[str, Any]:
+        async with open_checkpointer(settings.state_db) as saver:
+            graph = build_graph(saver)
+            cfg = {"configurable": {"thread_id": thread}}
+            before = await graph.aget_state(cfg)
+            if not before.created_at:
+                return {"missing": True}
+            # None as input means "continue from the checkpoint" rather than
+            # "start again" -- the whole point of resume.
+            await graph.ainvoke(None, cfg)
+            snapshot = await graph.aget_state(cfg)
+            return {"next": snapshot.next, "values": snapshot.values}
+
+    outcome = asyncio.run(_go())
+    if outcome.get("missing"):
+        console.print(f"[red]No checkpoint for thread {thread}.[/]")
+        raise typer.Exit(code=1)
+    if outcome["next"]:
+        console.print(f"[yellow]HALTED[/] before {', '.join(outcome['next'])}")
+        return
+    console.print("[green]Completed.[/]")
 
 
 @app.command()

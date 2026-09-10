@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 10)
+**Last updated:** 2026-09-10 (rev 11)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -394,6 +394,28 @@ Worker nodes write a **structured summary plus an `ArtifactRef`** to state. Raw 
 `ArtifactRef(sha, path, kind, tokens, preview)` where `preview` is capped at 280 characters.
 
 The checkpointer is `AsyncSqliteSaver` at `.dynaflows/state.db` with `PRAGMA journal_mode=WAL`.
+
+**Amendment, 2026-09-10 (step 1.3). Checkpointed types must be registered, or resume dies on an
+upgrade.**
+
+Running the skeleton printed, to stderr and only to stderr:
+
+> Deserializing unregistered type `dynaflows.contracts.state.GateOutcome` from checkpoint. **This
+> will be blocked in a future version.**
+
+That is AP-05 in its purest form — works today, silently stops working after a dependency upgrade,
+no error until it is too late — and the casualty is this ADR's entire promise. Not "some runs fail":
+**every checkpoint ever written becomes unreadable**, so no interrupted run can ever be resumed.
+
+Fixed by registering our types with the checkpoint serialiser, and two decisions inside the fix are
+worth keeping:
+
+- Registered as **class references**, not `(module, name)` strings. A string list can name a class
+  that was renamed or deleted and nothing notices; an import fails on the spot.
+- Proven under `LANGGRAPH_STRICT_MSGPACK=true`, which makes the future behaviour the present. A test
+  round-trips a full state through a real checkpoint with strict mode on, and an architecture test
+  asserts the allowlist covers every Pydantic model and enum defined in the contracts modules — so a
+  new state type that nobody registers fails the suite now rather than an upgrade later.
 
 **Consequences.**
 - Checkpoint size is bounded by plan size, not by output size.
@@ -1121,6 +1143,7 @@ crash-exposure window without ever asking whether re-execution is safe.
 | F-01 Playbook indexer + repository | `memory/features/feature-01-playbook-index.md` | 1 (step 1.1) | **Done** (2026-09-10) |
 | F-02 Prompt enhancer + gate G1 | `memory/features/feature-02-enhancer.md` | 1 | Not started |
 | F-03 Planner + gate G2 | `memory/features/feature-03-planner.md` | 1 | Not started |
+| F-12 Graph skeleton, state contract, resume | `memory/features/feature-12-graph-skeleton.md` | 1 (step 1.3) | **Done** (2026-09-10) |
 | F-04 Fan-out workers + resiliency | `memory/features/feature-04-fanout.md` | 1 | Not started |
 | F-11 Gateway response cache (ADR-013) | `memory/features/feature-11-call-cache.md` | 1 (step 1.2) | **Done** (2026-09-10) |
 | F-05 Structural evaluator + synthesizer | `memory/features/feature-05-synthesis.md` | 1 | Not started |
@@ -1348,6 +1371,14 @@ one that names its holes.
   fakes; only real traffic closes it.
 - The cache's ADR-013 limitation is now live code: a provider changing the model behind a pinned id
   serves stale responses indefinitely. `dynaflows cache --clear` is the remedy and it is manual.
+- `MAX_FANOUT = 12` is now enforced by `Plan`'s schema, and `PlanTask.depends_on` is rejected
+  outright while OQ-02 is open — a dependency that is silently ignored produces a plan running in the
+  wrong order with no error anywhere.
+- `FAN_OUT_KEYS` binds the reducer annotations to a declared list, and the pair of architecture tests
+  keeps them in step. **It does not detect a NEW fan-out node writing a key nobody declared** — only
+  LangGraph's runtime `InvalidUpdateError` catches that, which is why a real six-way fan-out runs in
+  the deterministic tier rather than only the annotations being inspected. Recorded so the check is
+  not mistaken for complete.
 - ADR-016 is currently unenforced. The lint and `tests/architecture/test_worker_write_boundary.py`
   it names arrive in step 1.6, with their subject. Until then it is a rule with nothing reading code,
   which is precisely the state AP-19 says not to mistake for a guarantee.
