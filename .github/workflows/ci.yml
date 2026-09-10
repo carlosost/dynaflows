@@ -18,10 +18,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -55,7 +55,23 @@ jobs:
           make install
           make test
 
-      # Offline doctor: no credentials in CI, so only the local checks run.
-      # It still proves the CLI is installed and importable from the artifact.
-      - name: Doctor (offline)
-        run: uv run dynaflows doctor --offline
+      # [6] The CLI must work when run from the INSTALLED artifact, not just
+      # under the test runner (AP-13). Two assertions, and note the second is
+      # inverted on purpose.
+      - name: CLI runs from the installed artifact
+        run: |
+          set -euo pipefail
+          uv run dynaflows version
+
+          # CI has no credentials, by design and permanently. `doctor` MUST
+          # fail here -- that is the environment check doing its job (AP-05).
+          # An earlier version of this workflow asserted the opposite and could
+          # never have passed. Asserting the FAILURE is the useful test: it
+          # proves the checks execute against the shipped package and that the
+          # exit code is honest, and it breaks loudly if doctor ever starts
+          # passing without credentials.
+          if uv run dynaflows doctor --offline; then
+            echo "::error::doctor passed with no credentials; the environment check is broken"
+            exit 1
+          fi
+          echo "doctor correctly refused to pass without credentials"

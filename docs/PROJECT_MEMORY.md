@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 6)
+**Last updated:** 2026-09-10 (rev 7)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -1300,6 +1300,22 @@ one that names its holes.
   synthesis can usefully degrade to, which is a measurement nobody has taken.
 - ADR-012's probe ran on aarch64 Linux, not on the macOS arm64 host this project is developed on.
   Closed only when `dynaflows doctor` has run there.
+
+**Learned on 2026-09-10, third pass — the CI step that could never have passed.** The workflow ran
+`dynaflows doctor --offline` and required exit 0, on a runner that has no credentials and never will.
+`doctor` was correct; the assertion was impossible. It went unnoticed because CI had not run against
+a commit that reached that step until the repository had a remote.
+
+The general form is worth more than the fix: **a check whose expected result was never derived from
+the environment it runs in is not a check.** CI's environment differs from a developer's in exactly
+one important way here — no secrets — and the step was written as if that difference did not exist.
+The corrected step asserts the *failure* instead, which is a real test: it proves the checks execute
+against the installed package, that the exit code is honest, and it breaks loudly if `doctor` ever
+starts passing without credentials.
+
+Also corrected: `actions/checkout` and `astral-sh/setup-uv` were pinned to majors that GitHub had
+already moved off Node 20 for. The available majors were checked with `git ls-remote --tags` rather
+than recalled (AP-19 habit 3), and both are now on v7.
 
 **Learned on 2026-09-10, second pass — three bugs, one root cause: data crossing a boundary that
 interprets it.** `models --suggest` printed through Rich, which read the TOML header `[tiers.small]`
