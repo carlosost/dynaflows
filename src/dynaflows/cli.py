@@ -172,9 +172,15 @@ def run(
     import uuid
 
     from dynaflows.contracts.state import initial_state
+    from dynaflows.gateway.telemetry import configure_tracing
     from dynaflows.graph import build_graph, open_checkpointer
 
     settings = get_settings()
+    # ADR-011. LangChain and LangGraph read os.environ directly, and
+    # `get_settings()` is pure -- it does not export anything. Without this
+    # call a run emits NO traces while `doctor` keeps reporting LangSmith as
+    # OK, which is the silent-failure shape the whole ADR exists to prevent.
+    configure_tracing(settings)
     thread_id = thread or f"run-{uuid.uuid4().hex[:8]}"
 
     async def _go() -> dict[str, Any]:
@@ -208,9 +214,11 @@ def resume(
     """Continue a halted or crashed run from its last checkpoint (ADR-008)."""
     import asyncio
 
+    from dynaflows.gateway.telemetry import configure_tracing
     from dynaflows.graph import build_graph, open_checkpointer
 
     settings = get_settings()
+    configure_tracing(settings)  # ADR-011; see the note in `run`.
 
     async def _go() -> dict[str, Any]:
         async with open_checkpointer(settings.state_db) as saver:
