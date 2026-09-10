@@ -17,3 +17,8 @@ wheels/
 
 # secrets
 .env
+
+# tool caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/

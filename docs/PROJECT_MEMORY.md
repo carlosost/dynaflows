@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-08-31
+**Last updated:** 2026-09-10
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -283,6 +283,32 @@ purest form. Model ids live in `config/models.toml`, one file, versioned, hashed
   DoD includes recording a baseline of cost/latency/schema-failure-rate per tier on a fixed
   10-request evaluation set.
 
+**Amendment, 2026-09-10 (Phase 0). `config/models.toml` ships with empty chains, on purpose.**
+
+Phase 0 intended to seed each tier with candidate ids. It does not, and the reason is worth keeping.
+The provider catalogue could not be reached from the build environment, which left exactly two
+options: write ids from memory, or write none. Ids from memory is AP-05 in its purest form — a
+renamed or retired id is ignored silently, with no error and no log line, and it invalidates every
+baseline recorded against it. A config that is *honestly empty* fails loudly; a config that is
+*confidently wrong* does not.
+
+So the tier→model decision moved from a static guess to a command:
+
+- `dynaflows models` lists the live catalogue, already filtered to endpoints that support
+  `response_format: json_schema`.
+- `dynaflows models --suggest` prints a pasteable TOML block with prices and context lengths.
+- `dynaflows doctor` re-validates every configured id against that live list and fails if any has
+  disappeared or lost structured-output support.
+
+This makes OQ-01 answerable by running something rather than by asserting something, which is the
+§1.3 rule (reject — and choose — with a measurement) applied to configuration. `doctor` reports an
+unpopulated registry as **WARN, not FAIL**: "not configured yet" and "misconfigured" need different
+actions and must not share a counter (AP-20).
+
+Cost order is explicitly *not* the recommendation `--suggest` makes. Tier assignment follows the
+fan-out multiplier, and the verifier's family diversity is a constraint price cannot express; both
+are stated in the tool's own output so the next person does not read the cheapest column as advice.
+
 ---
 
 ### ADR-007: Every `interrupt()` lives alone in a pure node
@@ -558,6 +584,7 @@ additive-only (§2.4) and require an amended ADR.
 from typing import Annotated, Literal, TypedDict
 from operator import add
 
+
 class WorkflowState(TypedDict):
     # --- identity -------------------------------------------------------
     run_id: str
@@ -566,7 +593,7 @@ class WorkflowState(TypedDict):
     # --- stage 1: enhancement ------------------------------------------
     raw_prompt: str
     enhanced_prompt: str | None
-    prompt_gate: GateOutcome | None          # approve | edit | reject
+    prompt_gate: GateOutcome | None  # approve | edit | reject
 
     # --- stage 2: planning ---------------------------------------------
     plan: Plan | None
@@ -583,7 +610,7 @@ class WorkflowState(TypedDict):
     synthesis: ArtifactRef | None
 
     # --- accounting -----------------------------------------------------
-    cost: Annotated[CostLedger, merge_cost]   # custom reducer, monotonic
+    cost: Annotated[CostLedger, merge_cost]  # custom reducer, monotonic
 ```
 
 **Invariant.** Any key written by more than one concurrent branch carries a reducer. A key without
@@ -594,17 +621,18 @@ asserts this over the annotated type at import time — it cannot be forgotten.
 
 ```python
 class PlanTask(BaseModel):
-    task_id: str                      # stable, plan-local; used as trace key
-    capability: CapabilityId          # MUST exist in the worker catalog
-    objective: str                    # what this worker must produce
-    inputs: list[str]                 # file paths / refs, resolved before dispatch
-    playbook_anchors: list[str]       # ADR-009 primary retrieval path
+    task_id: str  # stable, plan-local; used as trace key
+    capability: CapabilityId  # MUST exist in the worker catalog
+    objective: str  # what this worker must produce
+    inputs: list[str]  # file paths / refs, resolved before dispatch
+    playbook_anchors: list[str]  # ADR-009 primary retrieval path
     tier_override: Tier | None = None
-    depends_on: list[str] = []        # Phase 1: MUST be empty (see OQ-02)
+    depends_on: list[str] = []  # Phase 1: MUST be empty (see OQ-02)
+
 
 class Plan(BaseModel):
-    tasks: list[PlanTask]             # 1..MAX_FANOUT
-    rationale: str                    # shown at gate G2
+    tasks: list[PlanTask]  # 1..MAX_FANOUT
+    rationale: str  # shown at gate G2
     estimated_tokens: int
     estimated_cost_usd: float
 ```
@@ -615,19 +643,21 @@ class Plan(BaseModel):
 class WorkerResult(BaseModel):
     task_id: str
     status: Literal["ok", "degraded", "failed"]
-    summary: str                      # <= 1200 chars, goes into state
-    artifact: ArtifactRef | None      # raw output, ADR-008
+    summary: str  # <= 1200 chars, goes into state
+    artifact: ArtifactRef | None  # raw output, ADR-008
     model_id: str
     tier: Tier
     fallback_depth: int
     tokens_in: int
     tokens_out: int
     cost_usd: float
-    error: ErrorEnvelope | None       # typed, never a bare string (§1.4)
+    error: ErrorEnvelope | None  # typed, never a bare string (§1.4)
+
 
 class ErrorEnvelope(BaseModel):
-    code: Literal["RATE_LIMIT", "TIMEOUT", "SCHEMA_INVALID",
-                  "BUDGET_EXCEEDED", "MODEL_UNAVAILABLE", "UNKNOWN"]
+    code: Literal[
+        "RATE_LIMIT", "TIMEOUT", "SCHEMA_INVALID", "BUDGET_EXCEEDED", "MODEL_UNAVAILABLE", "UNKNOWN"
+    ]
     message: str
     attempts: int
 ```
@@ -675,8 +705,9 @@ adjacency structure nothing queries.
 class PlaybookRepository(Protocol):
     def by_anchor(self, anchors: list[str]) -> list[Chunk]: ...
     def search(self, query: str, k: int) -> list[Chunk]: ...
-    def catalog(self) -> str: ...          # heading paths + anchors, for the planner prompt
+    def catalog(self) -> str: ...  # heading paths + anchors, for the planner prompt
     def source_drift(self) -> list[str]: ...  # paths whose sha changed since indexing
+
 
 def get_playbook_repository(db_path: Path | None = None) -> PlaybookRepository:
     """Sole construction path. Returns SqlitePlaybookRepository in production,
@@ -730,7 +761,7 @@ crash-exposure window without ever asking whether re-execution is safe.
 
 | Feature | Spec file | Phase | Status |
 |---|---|---|---|
-| F-00 Foundation, doctor, gateway hello-world | `memory/features/feature-00-foundation.md` | 0 | Not started |
+| F-00 Foundation, doctor, model registry | `memory/features/feature-00-foundation.md` | 0 | **Done** (2026-09-10) |
 | F-01 Playbook indexer + repository | `memory/features/feature-01-playbook-index.md` | 1 | Not started |
 | F-02 Prompt enhancer + gate G1 | `memory/features/feature-02-enhancer.md` | 1 | Not started |
 | F-03 Planner + gate G2 | `memory/features/feature-03-planner.md` | 1 | Not started |
@@ -861,8 +892,14 @@ one that names its holes.
 - ADR-006's tier assignments are reasoning, not benchmark results. OQ-01 is the measurement.
 - ADR-008's claim that WAL + serialized writes is adequate at our fan-out is **unverified**. It is an
   intention, not a tested property, until the Phase 1 checkpoint-pressure measurement exists.
-- The `dynaflows doctor` capability probe is described but its behaviour against OpenRouter's live model
-  list has not been run. Per AP-19 habit 3, this claim is unverified until executed.
+- The `dynaflows doctor` **network** checks — OpenRouter auth, the live capability probe, LangSmith
+  connectivity, and the schema-enforced handshake — have **never been executed**. They were written
+  against the documented API shapes, not against a response. No credentials existed in the build
+  environment. Per AP-19 habit 3 they stay unverified until someone runs `make doctor` with real
+  keys, and that run is the true Phase 0 exit gate. The offline checks (`--offline`) have been run
+  and do work.
+- ADR-008's checkpointer path is untested against a real fan-out; only that SQLite is writable and
+  has FTS5 is confirmed.
 - **Idempotency is unresolved (OQ-07).** ADR-007 makes *gate* re-execution safe. It says nothing about
   a `worker` node re-executing after a crash and re-issuing a billed provider call. §3.3 says this
   needs an idempotency key; this document does not yet specify one. Named here rather than left to be
@@ -871,6 +908,14 @@ one that names its holes.
   synthesis can usefully degrade to, which is a measurement nobody has taken.
 - ADR-012's probe ran on aarch64 Linux, not on the macOS arm64 host this project is developed on.
   Closed only when `dynaflows doctor` has run there.
+
+**Closed by verification on 2026-09-10** (Phase 0):
+- *"the deterministic tier can be 100% green with no network and no provider"* — 37 tests, 0.09s.
+- *"ADR-010's gateway boundary is enforceable by lint"* — `scripts/lint_architecture.py`, and
+  `tests/architecture/test_gateway_boundary.py` proves the linter actually catches a violation
+  rather than merely passing on clean code.
+- *"SQLite FTS5 + bm25 is present"* — now re-checked by `doctor` on whatever machine runs it, not
+  only in a one-off probe.
 
 **Closed by verification on 2026-08-31** (moved out of the gap list, kept for the record):
 - *"`AsyncSqliteSaver` exists and is importable"* — was an assumption in ADR-008. Now checked.

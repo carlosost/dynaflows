@@ -1,0 +1,38 @@
+{
+  "$comment": [
+    "Hooks per GENERAL_ENGINEERING_PLAYBOOK.md 5.2. Claude Code CLI only.",
+    "Path is extracted with python3 rather than jq: the playbook's own note is",
+    "that a hook which fails because a tool is missing is worse than no hook,",
+    "because it trains you to ignore hook output. The extractor never fails",
+    "loudly -- it prints an empty line and exits 0, so `case` matches nothing."
+  ],
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"import json,sys; e=json.load(sys.stdin); print((e.get('tool_input') or {}).get('file_path') or (e.get('tool_response') or {}).get('filePath') or '')\" 2>/dev/null | { read -r f; case \"$f\" in */src/dynaflows/*.py) uv run python scripts/lint_architecture.py \"$f\" ;; esac; }",
+            "statusMessage": "ADR-010: checking the gateway boundary..."
+          },
+          {
+            "type": "command",
+            "command": "python3 -c \"import json,sys; e=json.load(sys.stdin); print((e.get('tool_input') or {}).get('file_path') or (e.get('tool_response') or {}).get('filePath') or '')\" 2>/dev/null | { read -r f; base=\"$(basename \"$f\" .py)\"; case \"$f\" in */src/dynaflows/*.py) if [ \"$base\" != \"__init__\" ] && [ -f \"tests/unit/test_${base}.py\" ]; then uv run pytest -q \"tests/unit/test_${base}.py\"; fi ;; esac; }",
+            "statusMessage": "Running the matching unit test..."
+          },
+          {
+            "type": "command",
+            "command": "python3 -c \"import json,sys; e=json.load(sys.stdin); print((e.get('tool_input') or {}).get('file_path') or (e.get('tool_response') or {}).get('filePath') or '')\" 2>/dev/null | { read -r f; case \"$f\" in *.toml) uv run python -c \"import tomllib,sys; tomllib.load(open(sys.argv[1],'rb')); print('TOML OK:', sys.argv[1])\" \"$f\" || echo \"TOML INVALID: $f\" ;; *.json) python3 -c \"import json,sys; json.load(open(sys.argv[1])); print('JSON OK:', sys.argv[1])\" \"$f\" || echo \"JSON INVALID: $f\" ;; esac; }",
+            "statusMessage": "Validating config syntax..."
+          },
+          {
+            "type": "command",
+            "command": "python3 -c \"import json,sys; e=json.load(sys.stdin); print((e.get('tool_input') or {}).get('file_path') or (e.get('tool_response') or {}).get('filePath') or '')\" 2>/dev/null | { read -r f; case \"$f\" in */.env.example|*/settings.py) uv run python -c \"import re,pathlib; ex=set(re.findall(r'^#?\\s*([A-Z_]+)=', pathlib.Path('.env.example').read_text(), re.M)); req=set(re.findall(r'\\\"([A-Z_]+)\\\"', re.search(r'REQUIRED_VARS[^)]*\\)', pathlib.Path('src/dynaflows/settings.py').read_text(), re.S).group(0))); missing=req-ex; print('DRIFT: REQUIRED_VARS not in .env.example:', missing) if missing else print('env contract OK')\" ;; esac; }",
+            "statusMessage": "Checking .env.example matches REQUIRED_VARS..."
+          }
+        ]
+      }
+    ]
+  }
+}

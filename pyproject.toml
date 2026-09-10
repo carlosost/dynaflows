@@ -1,17 +1,84 @@
 [project]
 name = "dynaflows"
 version = "0.1.0"
-description = "Add your description here"
+description = "A CLI that reconstructs Claude Code's dynamic-workflow patterns on LangGraph, with per-node model routing and full tracing."
 readme = "README.md"
 authors = [
     { name = "Carlos Ost", email = "carlos.ost@gmail.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+
+# Pinned with upper bounds. ADR-012: this set was verified by an actual
+# `uv lock` + `uv sync` + import probe, not assumed.
+dependencies = [
+    "langgraph>=1.2.11,<2",
+    "langgraph-checkpoint-sqlite>=3.1.1,<4",
+    "langchain-core>=1.6.1,<2",
+    "langchain-openai>=1.6.0,<2",
+    "langsmith>=0.11.2,<0.12",
+    "pydantic>=2.13.5,<3",
+    "tenacity>=9.1.4,<10",
+    "rich>=15.0.0,<16",
+    "typer>=0.27.2,<0.28",
+    "markdown-it-py>=4.2.0,<5",
+    "aiosqlite>=0.22.1,<1",
+    "httpx>=0.28.1,<0.29",
+]
 
 [project.scripts]
-dynaflows = "dynaflows:main"
+dynaflows = "dynaflows.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "anyio>=4.6",
+    "respx>=0.22",
+    "ruff>=0.9",
+    "mypy>=1.14",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]
 build-backend = "uv_build"
+
+# --------------------------------------------------------------------------
+# Test tiers. Playbook 2.2: two tiers, different semantics, different gating.
+# `make test` runs the deterministic tier only and must be 100% green.
+# --------------------------------------------------------------------------
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers --strict-config"
+testpaths = ["tests"]
+markers = [
+    "deterministic: no network, no provider, no filesystem outside tmp. Hard gate, must be 100%.",
+    "system: real dependencies and real provider calls. Never a pre-merge gate.",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests", "scripts"]
+
+# docs/ is NOT ours to reformat. ruff formats Python inside markdown fences,
+# which silently rewrote docs/GENERAL_ENGINEERING_PLAYBOOK.md on the first
+# `make lint`. That file is the authoritative standard AND (from Phase 1) the
+# runtime retrieval corpus, so a formatter editing it is a drift source that
+# would make `dynaflows index --check` fail after every lint run.
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "TID"]
+
+[tool.ruff.lint.per-file-ignores]
+# ADR-010 names the gateway as the one legal home for a provider SDK.
+# The precise enforcement is scripts/lint_architecture.py; this rule is a
+# cheap second line of defence for everywhere else.
+"src/dynaflows/gateway/*" = ["TID251"]
+"tests/architecture/*" = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"openai".msg = "ADR-010: provider SDKs are imported only inside src/dynaflows/gateway/."
+"langchain_openai".msg = "ADR-010: provider SDKs are imported only inside src/dynaflows/gateway/."
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src", "scripts"]

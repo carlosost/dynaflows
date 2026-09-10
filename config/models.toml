@@ -1,0 +1,49 @@
+# ---------------------------------------------------------------------------
+# Tier -> model chain registry.  ADR-006.
+#
+# STATUS: DELIBERATELY UNPOPULATED.  OQ-01 is open.
+#
+# No model ids are written here by guesswork.  A stale or renamed provider id
+# fails the way AP-05 describes: silently, with no error and no log line, and
+# it invalidates every LangSmith baseline recorded against it.
+#
+# To populate:   dynaflows models --suggest        (needs OPENROUTER_API_KEY)
+#
+# That command queries the live model list, keeps only endpoints that support
+# `response_format: json_schema`, and prints a TOML block to paste below.
+# `dynaflows doctor` then re-validates every id against the live list and
+# fails if any is missing or has lost structured-output support.
+#
+# Bump `version` on every edit.  It is hashed into plan_hash, so a plan is
+# never compared across incompatible model sets.
+# ---------------------------------------------------------------------------
+
+version = "0-unpopulated"
+
+[constraints]
+# ADR-006: a price-ordered chain that degrades to a model without json_schema
+# support turns a recoverable rate limit into a wrong answer.
+require_structured_outputs = true
+
+# ADR-006: the verifier must not share a model family with the worker it
+# checks, or it shares the worker's failure modes and rubber-stamps.
+enforce_verifier_family_diversity = true
+
+# Chains are ordered: index 0 is preferred, later entries are fallbacks.
+# Every entry in a chain must satisfy the constraints above.
+
+[tiers.small]
+purpose = "prompt enhancer, router. Multiplier 1. Instruction-following and latency."
+chain = []
+
+[tiers.mid]
+purpose = "workers. Multiplier N — dominates total run cost."
+chain = []
+
+[tiers.mid_high]
+purpose = "synthesizer, verifier. Long context and adversarial reading."
+chain = []
+
+[tiers.frontier]
+purpose = "planner. Multiplier 1, but decides the cost and correctness of N worker calls."
+chain = []
