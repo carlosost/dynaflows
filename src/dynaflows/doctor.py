@@ -82,6 +82,37 @@ def check_state_dir(settings: Settings) -> Check:
     )
 
 
+def check_playbook_index(settings: Settings) -> Check:
+    """Present, populated, and matching the corpus on disk.
+
+    AP-19 habit 2: a generated artifact plus a drift check makes staleness
+    impossible rather than unlikely. An index silently one edit behind is the
+    document-that-lies failure in database form -- retrieval would keep
+    returning text that is no longer in the playbook.
+    """
+    from dynaflows.playbook import store
+    from dynaflows.playbook.repository import SqlitePlaybookRepository
+
+    if not settings.playbook_root.is_dir():
+        return Check("playbook index", Status.FAIL, f"corpus missing: {settings.playbook_root}")
+    try:
+        connection = store.connect(settings.playbook_db)
+    except sqlite3.Error as exc:
+        return Check("playbook index", Status.FAIL, str(exc))
+    try:
+        repository = SqlitePlaybookRepository(connection, settings.playbook_root)
+        total = repository.count()
+        report = repository.drift()
+    finally:
+        connection.close()
+
+    if total == 0:
+        return Check("playbook index", Status.WARN, "empty -- run `dynaflows index`")
+    if not report.clean:
+        return Check("playbook index", Status.FAIL, f"{report.summary()} -- run `dynaflows index`")
+    return Check("playbook index", Status.OK, f"{total} chunks, matches every source")
+
+
 def check_models_config(settings: Settings) -> Check:
     try:
         registry = get_model_registry(settings.models_config)
@@ -227,6 +258,7 @@ def run_checks(settings: Settings | None = None, *, offline: bool = False) -> It
     settings = settings or get_settings()
     yield check_required_env(settings)
     yield check_state_dir(settings)
+    yield check_playbook_index(settings)
     yield check_models_config(settings)
     if offline:
         return

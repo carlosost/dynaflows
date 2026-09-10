@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 7)
+**Last updated:** 2026-09-10 (rev 8)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -443,6 +443,36 @@ extracted into an adjacency table for optional 1-hop expansion.
 **Index integrity.** `sources(path, file_sha256)` is stored alongside the chunks. `dynaflows index --check`
 recomputes and exits non-zero on drift. Wired as a CI step and as a `PostToolUse` hook — this is
 playbook AP-19's "generated file plus a drift check makes staleness impossible rather than unlikely."
+
+**Amendment 2, 2026-09-10 — the catalogue is ~4,000 tokens, not ~1,500. The ADR was wrong.**
+
+This ADR asserted the planner catalogue would be "roughly 1.5k tokens, *not* the document". Built and
+measured, it is **3,956** — and 6,040 before two redundant columns were removed. AP-19 says a design
+document that asserts what the code does not do is worse than one that is missing, because it is
+believed; the number is corrected here rather than the code contorted to reach a figure invented
+before anything existed.
+
+Measured on 2026-09-10, 84 chunks:
+
+| Source | Chunks | Catalogue tokens |
+|---|---:|---:|
+| `GENERAL_ENGINEERING_PLAYBOOK.md` | 52 | ~2,497 |
+| `PROJECT_MEMORY.md` | 32 | ~1,459 |
+| **Total** | **84** | **~3,956** |
+
+Two economies were applied first, and both are worth keeping as rules: a catalogue row lists only
+*formal* anchors (`AP-`, `ADR-`, `§`), because a slug restates the heading printed two columns over
+and billing twice for one fact is pure waste; and the heading path is trimmed to its last two levels,
+because the document title and top-level part are constant across most rows and carry no signal.
+
+**Is ~4k acceptable?** At frontier-tier pricing this is well under a tenth of a cent per planner
+call, and 84 lines is scannable. The argument for the catalogue was never that it is small in
+absolute terms — it is that it is *bounded and structural* where the corpus is not. That still holds.
+
+**The threshold to watch** (§4.5): the catalogue grows with the PMA, which is append-only by design
+and already a third of it. When it becomes a real cost, the lever is to exclude `PROJECT_MEMORY.md`
+from the runtime corpus — it is the document the *developer* reads, and the planner may not need
+every ADR to route a task. That is a decision to make with data, not now.
 
 **Amendment, 2026-09-10 — the Phase 1 corpus is `docs/` only (resolves OQ-05).**
 
@@ -1066,7 +1096,7 @@ crash-exposure window without ever asking whether re-execution is safe.
 | Feature | Spec file | Phase | Status |
 |---|---|---|---|
 | F-00 Foundation, doctor, model registry | `memory/features/feature-00-foundation.md` | 0 | **Done** (2026-09-10) |
-| F-01 Playbook indexer + repository | `memory/features/feature-01-playbook-index.md` | 1 | Not started |
+| F-01 Playbook indexer + repository | `memory/features/feature-01-playbook-index.md` | 1 (step 1.1) | **Done** (2026-09-10) |
 | F-02 Prompt enhancer + gate G1 | `memory/features/feature-02-enhancer.md` | 1 | Not started |
 | F-03 Planner + gate G2 | `memory/features/feature-03-planner.md` | 1 | Not started |
 | F-04 Fan-out workers + resiliency | `memory/features/feature-04-fanout.md` | 1 | Not started |
@@ -1277,6 +1307,11 @@ one that names its holes.
   ADRs are intentions, and this line is here so nobody reads them as descriptions.
 - ADR-014's two numbers (12 and 6) have no measurement behind them at all. Step 1.8 is where they
   stop being guesses.
+- `pack()`'s token count is an ESTIMATE (`CHARS_PER_TOKEN_ESTIMATE = 3.6`), not a tokenizer. The
+  tier's model is configurable and OpenRouter fronts many providers, so the tokenizer that will count
+  these characters is unknown at pack time. It leans high on purpose. Calibration path: LangSmith
+  reports real token counts per call, so step 1.8 compares estimate to actual and replaces the
+  constant with a measured one.
 - ADR-016 is currently unenforced. The lint and `tests/architecture/test_worker_write_boundary.py`
   it names arrive in step 1.6, with their subject. Until then it is a rule with nothing reading code,
   which is precisely the state AP-19 says not to mistake for a guarantee.

@@ -97,6 +97,16 @@ class Settings:
     def playbook_db(self) -> Path:
         return self.home / "playbook.db"
 
+    @property
+    def playbook_root(self) -> Path:
+        """The runtime retrieval corpus. ADR-009 amendment: docs/ only.
+
+        A single root, not a configurable list. The second root arrives with a
+        notes vault, and so does the knob -- adding it now would be a setting
+        nothing sets.
+        """
+        return self.project_root / "docs"
+
 
 def _flag(env: Mapping[str, str], key: str, default: bool) -> bool:
     raw = env.get(key)

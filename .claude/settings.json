@@ -30,6 +30,11 @@
             "type": "command",
             "command": "python3 -c \"import json,sys; e=json.load(sys.stdin); print((e.get('tool_input') or {}).get('file_path') or (e.get('tool_response') or {}).get('filePath') or '')\" 2>/dev/null | { read -r f; case \"$f\" in */.env.example|*/settings.py) uv run python -c \"import re,pathlib; ex=set(re.findall(r'^#?\\s*([A-Z_]+)=', pathlib.Path('.env.example').read_text(), re.M)); req=set(re.findall(r'\\\"([A-Z_]+)\\\"', re.search(r'REQUIRED_VARS[^)]*\\)', pathlib.Path('src/dynaflows/settings.py').read_text(), re.S).group(0))); missing=req-ex; print('DRIFT: REQUIRED_VARS not in .env.example:', missing) if missing else print('env contract OK')\" ;; esac; }",
             "statusMessage": "Checking .env.example matches REQUIRED_VARS..."
+          },
+          {
+            "type": "command",
+            "command": "python3 -c \"import json,sys; e=json.load(sys.stdin); print((e.get('tool_input') or {}).get('file_path') or (e.get('tool_response') or {}).get('filePath') or '')\" 2>/dev/null | { read -r f; case \"$f\" in */docs/*.md) uv run dynaflows index --check ;; esac; }",
+            "statusMessage": "ADR-009: checking the playbook index for drift..."
           }
         ]
       }

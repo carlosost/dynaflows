@@ -55,7 +55,17 @@ jobs:
           make install
           make test
 
-      # [6] The CLI must work when run from the INSTALLED artifact, not just
+      # [6] ADR-009: the index is a generated artifact, so build it and then
+      # require the drift check to agree with the build. Building FIRST is the
+      # point -- on a clean checkout there is no index, so `--check` alone
+      # would report every file as unindexed and fail for the wrong reason.
+      - name: Playbook index builds and matches its sources
+        run: |
+          set -euo pipefail
+          uv run dynaflows index
+          uv run dynaflows index --check
+
+      # [7] The CLI must work when run from the INSTALLED artifact, not just
       # under the test runner (AP-13). Two assertions, and note the second is
       # inverted on purpose.
       - name: CLI runs from the installed artifact

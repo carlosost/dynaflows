@@ -71,6 +71,89 @@ def doctor(
 
 
 @app.command()
+def index(
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Report drift and exit non-zero. Builds nothing."),
+    ] = False,
+) -> None:
+    """Build the retrieval index over docs/, or verify it still matches.
+
+    `--check` is the drift guard AP-19 asks for: a generated artifact plus a
+    check that it still matches its source makes staleness impossible rather
+    than unlikely. Wire it into CI and a save hook.
+    """
+    from dynaflows.playbook import store
+    from dynaflows.playbook.repository import SqlitePlaybookRepository, index_corpus
+
+    settings = get_settings()
+    connection = store.connect(settings.playbook_db)
+    try:
+        repository = SqlitePlaybookRepository(connection, settings.playbook_root)
+        if check:
+            report = repository.drift()
+            if report.clean:
+                console.print(f"[green]OK[/] {repository.count()} chunks, {report.summary()}")
+                return
+            console.print(f"[red]DRIFT[/] {report.summary()}")
+            raise typer.Exit(code=1)
+
+        total = index_corpus(connection, settings.playbook_root)
+    except DynaflowsError as exc:
+        console.print(f"[red]{exc}[/]")
+        raise typer.Exit(code=1) from exc
+    finally:
+        connection.close()
+
+    console.print(
+        f"[green]Indexed[/] {total} chunks from {settings.playbook_root.name}/ "
+        f"→ {settings.playbook_db}"
+    )
+
+
+@app.command()
+def context(
+    anchors: Annotated[list[str], typer.Argument(help="Anchors, e.g. AP-11 ADR-006 §4.5")],
+    budget: Annotated[int, typer.Option(help="Token budget for the pack.")] = 2000,
+    search: Annotated[str, typer.Option(help="Also BM25-search this text.")] = "",
+) -> None:
+    """Print exactly what a worker would receive for these anchors.
+
+    This is the production caller for `pack()`. It exists now, in the same step
+    as the packer, so there is never a window where the assembly code is
+    exercised only by its own tests (AP-11) -- and step 1.6's worker will call
+    the same function rather than growing a second one.
+    """
+    from dynaflows.playbook import store
+    from dynaflows.playbook.pack import pack
+    from dynaflows.playbook.repository import SqlitePlaybookRepository
+
+    settings = get_settings()
+    connection = store.connect(settings.playbook_db)
+    try:
+        repository = SqlitePlaybookRepository(connection, settings.playbook_root)
+        chunks = repository.by_anchor(anchors)
+        hits = len(chunks)
+        if search:
+            chunks += repository.search(search, k=5)
+        packed = pack(chunks, budget)
+    finally:
+        connection.close()
+
+    if not packed.included_ids and not packed.dropped_ids:
+        console.print(f"[yellow]No chunk matches {anchors}.[/] Try `dynaflows index` first.")
+        raise typer.Exit(code=1)
+
+    console.print(packed.text, markup=False, highlight=False, soft_wrap=True)
+    console.print(
+        f"\n[dim]{packed.tokens}/{budget} tokens · {hits} anchor hit(s) · "
+        f"{len(packed.included_ids)} included · {len(packed.dropped_ids)} dropped"
+        + (f" · truncated {packed.truncated_id}" if packed.truncated_id else "")
+        + "[/]"
+    )
+
+
+@app.command()
 def models(
     suggest: Annotated[
         bool, typer.Option("--suggest", help="Print a models.toml block from the live catalogue.")

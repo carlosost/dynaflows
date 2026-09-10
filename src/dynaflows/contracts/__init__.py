@@ -11,6 +11,15 @@ own test.
 """
 
 from dynaflows.contracts.errors import DynaflowsError, ErrorCode, ErrorEnvelope
+from dynaflows.contracts.playbook import Chunk, ContextPack, DriftReport
 from dynaflows.contracts.tiers import Tier
 
-__all__ = ["DynaflowsError", "ErrorCode", "ErrorEnvelope", "Tier"]
+__all__ = [
+    "Chunk",
+    "ContextPack",
+    "DriftReport",
+    "DynaflowsError",
+    "ErrorCode",
+    "ErrorEnvelope",
+    "Tier",
+]

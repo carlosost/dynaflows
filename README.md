@@ -48,8 +48,36 @@ make doctor
 | `tier capability` | Every configured model still exists and still honours `json_schema` |
 | `handshake` | One real, traced, schema-enforced call — the whole path, end to end |
 
-`make doctor` will report `models.toml` as **unpopulated** on a fresh clone.
-That is correct and deliberate — see below.
+On a fresh clone `make doctor` reports `models.toml` as **unpopulated** and the
+playbook index as **empty**. Both are correct — see below, and run:
+
+```sh
+uv run dynaflows index          # build the retrieval index over docs/
+uv run dynaflows index --check  # verify it still matches its sources
+```
+
+## Runtime context
+
+The tool reads `docs/` as a retrieval corpus at run time, so the standards it is
+held to are also the standards it applies. Retrieval is **lookup first**:
+
+| Layer | Call | Why |
+|---|---|---|
+| 1 | `by_anchor(["AP-11", "§4.5"])` | Exact, deterministic, no LLM. The planner names anchors, so one call routes context for every worker. |
+| 2 | `search("idempotency retry")` | BM25 over SQLite FTS5 — no new dependency. The fallback, and how you find *mentions*. |
+| 3 | `pack(chunks, budget)` | Deterministic assembly. Records what was included, dropped and truncated, all of which reach the trace. |
+
+Anchors come from **headings only**: `by_anchor("AP-11")` returns the section
+that *defines* AP-11, not the dozen that mention it. There are no embeddings and
+no vector store — the corpus is ~84 sections with human-authored stable ids, and
+an index would add staleness and nondeterminism to a system whose whole value is
+traceability. ADR-009 records the reversal condition.
+
+To see exactly what a worker would receive:
+
+```sh
+uv run dynaflows context AP-11 §4.5 --budget 2000
+```
 
 ## Choosing models
 
@@ -91,11 +119,12 @@ config/models.toml            tier → model chains (ADR-006)
 docs/PROJECT_MEMORY.md        source of truth
 scripts/lint_architecture.py  ADR-010 enforcement
 src/dynaflows/
-  cli.py                      doctor, models
+  cli.py                      doctor, models, index, context
   doctor.py                   the Phase 0 gate
   settings.py                 env + the AP-05 startup check
-  contracts/                  Tier, ErrorEnvelope
+  contracts/                  Tier, ErrorEnvelope, Chunk, ContextPack, DriftReport
   gateway/                    the ONLY place a provider SDK is imported
+  playbook/                   chunker, FTS5 store, repository, packer
 tests/unit/                   deterministic tier
 tests/architecture/           ADR enforcement tests
 ```
