@@ -18,7 +18,7 @@
 # never compared across incompatible model sets.
 # ---------------------------------------------------------------------------
 
-version = "0-unpopulated"
+version = "1"
 
 [constraints]
 # ADR-006: a price-ordered chain that degrades to a model without json_schema
@@ -29,21 +29,55 @@ require_structured_outputs = true
 # checks, or it shares the worker's failure modes and rubber-stamps.
 enforce_verifier_family_diversity = true
 
+# ADR-006: context length is a capability. Every model in every chain must
+# hold at least this many tokens, or a fallback fails on the exact prompts its
+# primary was chosen for.
+#
+# 0 disables the check, and 0 is the honest default: the right number is the
+# largest prompt a tier actually sends, which nobody has measured yet. Playbook
+# 4.5 -- implement and test the mechanism, treat the threshold as provisional.
+# doctor reports the disabled state as WARN so it stays visible.
+min_context_tokens = 0
+
 # Chains are ordered: index 0 is preferred, later entries are fallbacks.
 # Every entry in a chain must satisfy the constraints above.
 
 [tiers.small]
 purpose = "prompt enhancer, router. Multiplier 1. Instruction-following and latency."
-chain = []
+chain = [
+    "nex-agi/nex-n2.5-mini:free",  # in $0.00 out $0.00 ctx 262k
+    "nex-agi/nex-n2.5-pro:free",  # in $0.00 out $0.00 ctx 262k
+    "dots-studio/dots-3-note-preview:free",  # in $0.00 out $0.00 ctx 512k
+    "liquid/lfm-2.5-2.6b:free",  # in $0.00 out $0.00 ctx 131k
+    "nvidia/nemotron-3-super-120b-a12b:free",  # in $0.00 out $0.00 ctx 1000k
+]
 
 [tiers.mid]
 purpose = "workers. Multiplier N — dominates total run cost."
-chain = []
+chain = [
+    "nex-agi/nex-n2.5-mini:free",  # in $0.00 out $0.00 ctx 262k
+    "nex-agi/nex-n2.5-pro:free",  # in $0.00 out $0.00 ctx 262k
+    "dots-studio/dots-3-note-preview:free",  # in $0.00 out $0.00 ctx 512k
+    "liquid/lfm-2.5-2.6b:free",  # in $0.00 out $0.00 ctx 131k
+    "nvidia/nemotron-3-super-120b-a12b:free",  # in $0.00 out $0.00 ctx 1000k
+]
 
 [tiers.mid_high]
 purpose = "synthesizer, verifier. Long context and adversarial reading."
-chain = []
+chain = [
+    "meta-llama/llama-4-scout",  # in $0.10 out $0.30 ctx 10000k
+    "x-ai/grok-4.20-multi-agent",  # in $1.25 out $2.50 ctx 2000k
+    "x-ai/grok-4.20",  # in $1.25 out $2.50 ctx 2000k
+    "openai/gpt-6-astra",  # in $5.00 out $25.00 ctx 1050k
+    "openai/gpt-6-astra:batch",  # in $5.00 out $25.00 ctx 1050k
+]
 
 [tiers.frontier]
 purpose = "planner. Multiplier 1, but decides the cost and correctness of N worker calls."
-chain = []
+chain = [
+    "openai/o1-pro",  # in $150.00 out $600.00 ctx 200k
+    "openai/gpt-4",  # in $30.00 out $60.00 ctx 8k
+    "openai/gpt-5.2-pro",  # in $21.00 out $168.00 ctx 400k
+    "openai/o3-pro",  # in $20.00 out $80.00 ctx 200k
+    "openai/o1",  # in $15.00 out $60.00 ctx 200k
+]

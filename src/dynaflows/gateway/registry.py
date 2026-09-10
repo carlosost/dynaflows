@@ -9,6 +9,7 @@ in the deterministic tier.
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,6 +63,7 @@ class ModelRegistry:
     version: str
     require_structured_outputs: bool
     enforce_verifier_family_diversity: bool
+    min_context_tokens: int
     tiers: dict[Tier, TierChain]
 
     def chain(self, tier: Tier) -> TierChain:
@@ -83,13 +85,51 @@ class ModelRegistry:
         verifier = self.tiers[Tier.MID_HIGH]
         if not (worker.is_populated and verifier.is_populated):
             return None
-        shared = set(worker.families) & {model_family(verifier.preferred)}
+        shared = set(worker.families) & set(verifier.families)
         if shared:
             return (
-                f"verifier tier preferred model '{verifier.preferred}' shares family "
-                f"'{shared.pop()}' with the worker chain; ADR-006 requires a different family"
+                f"verifier chain shares family {sorted(shared)!r} with the worker chain; "
+                f"ADR-006 requires a different family. A verifier that falls back into the "
+                f"worker's family inherits its blind spots exactly when it matters most."
             )
         return None
+
+
+def context_violations(registry: ModelRegistry, context: Mapping[str, int]) -> list[str]:
+    """Chain entries whose context window is below the configured floor.
+
+    ADR-006 requires capability-homogeneous chains, and context length is a
+    capability: an 8k fallback behind a 200k primary fails on the exact prompts
+    the primary was chosen for.
+
+    The floor is ABSOLUTE, not a ratio of the primary. A ratio was tried first
+    and was wrong: it makes a deliberately large primary punish every sane
+    fallback, and a gate that fires on ordinary work gets disabled -- after
+    which nothing is protected (playbook 5.2, Pattern 5).
+
+    `min_context_tokens = 0` disables the check. That is the honest default
+    until the number is measured: 4.5 says implement and test the mechanism
+    first, and treat the threshold as provisional until real traffic sets it.
+
+    Pure by design -- it takes the model->context map rather than fetching it,
+    so the rule is provable in the deterministic tier. Network lives in the
+    caller.
+    """
+    floor = registry.min_context_tokens
+    if floor <= 0:
+        return []
+    violations: list[str] = []
+    for tier, chain in registry.tiers.items():
+        for model_id in chain.chain:
+            size = context.get(model_id)
+            if size is None:
+                continue  # absence is the tier-capability check's finding, not ours
+            if size < floor:
+                violations.append(
+                    f"{tier.value}: '{model_id}' has {size // 1000}k context, "
+                    f"below the {floor // 1000}k floor"
+                )
+    return violations
 
 
 def load_registry(path: Path) -> ModelRegistry:
@@ -129,6 +169,7 @@ def load_registry(path: Path) -> ModelRegistry:
         enforce_verifier_family_diversity=bool(
             constraints.get("enforce_verifier_family_diversity", True)
         ),
+        min_context_tokens=int(constraints.get("min_context_tokens", 0)),
         tiers=tiers,
     )
 

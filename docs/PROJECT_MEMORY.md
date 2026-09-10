@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10
+**Last updated:** 2026-09-10 (rev 2)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -308,6 +308,34 @@ actions and must not share a counter (AP-20).
 Cost order is explicitly *not* the recommendation `--suggest` makes. Tier assignment follows the
 fan-out multiplier, and the verifier's family diversity is a constraint price cannot express; both
 are stated in the tool's own output so the next person does not read the cheapest column as advice.
+
+**Amendment 2, same day, after the first real `--suggest` output was pasted into a config.**
+
+Three defects surfaced the moment a human used the command as intended. All three are recorded
+because each is a different failure of the same kind — a rule that had never been exercised.
+
+1. **`--suggest` recommended the planner by descending price.** Most expensive is a legacy-premium
+   heuristic, not a capability signal, and it proposed a chain whose primary cost $150/$600 per
+   million tokens with an 8k-context fallback behind it. Nothing in the provider catalogue measures
+   reasoning quality, so the command now **refuses to choose the frontier tier**: it prints
+   candidates commented out and says why the decision is not derivable from this data. It also
+   excludes `:free` endpoints from the worker tier — those are rate-limited hard, and the worker
+   tier is the one that runs N times, so "free" there buys 429s rather than savings. That is OQ-03
+   arriving early, from the direction nobody was watching.
+
+2. **The family-diversity rule only checked the verifier's *preferred* model.** A verifier that fell
+   back into the worker's family passed silently — precisely when the fallback mattered. The rule now
+   compares whole chains.
+
+3. **Context length was not treated as a capability.** ADR-006 required capability-homogeneous
+   chains and checked only structured-output support, so an 8k fallback behind a 200k primary was
+   legal. It is now checked — with a caveat worth keeping: the first implementation used a *ratio*
+   of the primary's context, which made a deliberately large primary flag every ordinary fallback.
+   A gate that fires on ordinary work gets disabled, and then nothing is protected (§5.2, Pattern 5).
+   It is now an absolute `min_context_tokens` floor, **defaulting to 0 = disabled**, which §4.5
+   prescribes directly: implement and test the mechanism, treat the threshold as provisional until
+   real traffic sets it. `doctor` reports the disabled state as WARN, never OK — a skipped check must
+   not read as a passing one.
 
 ---
 
@@ -908,6 +936,13 @@ one that names its holes.
   synthesis can usefully degrade to, which is a measurement nobody has taken.
 - ADR-012's probe ran on aarch64 Linux, not on the macOS arm64 host this project is developed on.
   Closed only when `dynaflows doctor` has run there.
+
+**Learned on 2026-09-10, and worth more than the fixes:** a deterministic-tier test asserted that
+the shipped `config/models.toml` was *unpopulated*. It passed continuously and then failed the first
+time the project was used correctly, because populating the registry is the intended next step. A
+test that encodes a transient state as a permanent invariant punishes progress; the assertion now
+checks that the config's `version` string and its chains tell the same story, which is invariant.
+The general form: before asserting a fact about a file, ask whether that file is designed to change.
 
 **Closed by verification on 2026-09-10** (Phase 0):
 - *"the deterministic tier can be 100% green with no network and no provider"* — 37 tests, 0.09s.

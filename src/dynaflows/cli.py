@@ -105,23 +105,38 @@ def models(
         console.print(table)
         return
 
-    # --suggest is a starting point, not a recommendation. ADR-006 assigns
-    # tiers by fan-out multiplier and requires verifier family diversity;
-    # cost order alone cannot express either. 4.5: measure before you trust.
-    cheapest = by_cost[:limit]
-    dearest = sorted(by_cost, key=lambda m: -m.prompt_usd_per_mtok)[:limit]
-    longest = sorted(available, key=lambda m: -m.context_length)[:limit]
+    # --suggest must not make a decision it cannot justify from this data.
+    # Price tells you cost. It does not tell you reasoning quality, and it does
+    # not tell you rate limits -- both of which decide two of the four tiers.
+    free = [m for m in by_cost if m.id.endswith(":free")]
+    paid = [m for m in by_cost if not m.id.endswith(":free")]
+
+    small = (free + paid)[:limit]
+    # Workers run N times per plan. A :free endpoint is rate-limited hard, so
+    # at fan-out it produces 429s, not savings (OQ-03).
+    mid = paid[:limit]
+    mid_families = {m.family for m in mid}
+    # ADR-006: diversity by construction, not by hoping the user notices.
+    mid_high = [
+        m for m in sorted(paid, key=lambda m: -m.context_length) if m.family not in mid_families
+    ][:limit]
 
     console.print("[dim]# Paste into config/models.toml and bump `version`.[/]")
-    console.print("[dim]# Cost order is a starting point only -- ADR-006 assigns tiers by[/]")
-    console.print("[dim]# fan-out multiplier, and mid_high must not share a family with mid.[/]")
-    for tier, candidates in (
-        (Tier.SMALL, cheapest),
-        (Tier.MID, cheapest),
-        (Tier.MID_HIGH, longest),
-        (Tier.FRONTIER, dearest),
+    console.print(
+        "[dim]# Order within a chain is preference, then fallback. Every fallback must[/]"
+    )
+    console.print("[dim]# hold >= min_context_ratio of its primary's context, or doctor fails.[/]")
+
+    for tier, candidates, note in (
+        (Tier.SMALL, small, "cheapest available; the enhancer and router are easy tasks"),
+        (
+            Tier.MID,
+            mid,
+            "cheapest PAID; :free endpoints are rate-limited and this tier runs N times",
+        ),
+        (Tier.MID_HIGH, mid_high, "longest context, family-disjoint from mid per ADR-006"),
     ):
-        console.print(f"\n[bold][tiers.{tier.value}][/]")
+        console.print(f"\n[bold][tiers.{tier.value}][/]  [dim]# {note}[/]")
         console.print("chain = [")
         for model in candidates:
             console.print(
@@ -131,6 +146,27 @@ def models(
                 f"ctx {model.context_length // 1000}k[/]"
             )
         console.print("]")
+
+    # The planner is the one tier this command refuses to choose for you.
+    console.print("\n[bold][tiers.frontier][/]")
+    console.print(
+        "[yellow]# NOT SUGGESTED. The planner needs reasoning quality, and nothing in the[/]"
+    )
+    console.print("[yellow]# catalogue measures that. Sorting by price would suggest the most[/]")
+    console.print(
+        "[yellow]# expensive model, which is a legacy-premium heuristic, not a good one.[/]"
+    )
+    console.print("[yellow]# Uncomment one or two deliberately. ADR-006: this tier runs ONCE[/]")
+    console.print("[yellow]# per plan but decides the cost and correctness of N worker calls.[/]")
+    console.print("chain = [")
+    for model in sorted(paid, key=lambda m: -m.context_length)[:limit]:
+        console.print(
+            f'    # "{model.id}",'
+            f"  [dim]# in ${model.prompt_usd_per_mtok:.2f} "
+            f"out ${model.completion_usd_per_mtok:.2f} "
+            f"ctx {model.context_length // 1000}k[/]"
+        )
+    console.print("]")
 
 
 def main() -> None:

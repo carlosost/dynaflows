@@ -16,7 +16,7 @@ from enum import StrEnum
 
 from dynaflows.contracts.errors import DynaflowsError
 from dynaflows.contracts.tiers import Tier
-from dynaflows.gateway.registry import get_model_registry
+from dynaflows.gateway.registry import context_violations, get_model_registry
 from dynaflows.gateway.telemetry import check_langsmith, configure_tracing
 from dynaflows.settings import REQUIRED_VARS, Settings, check_env, get_settings
 
@@ -162,6 +162,48 @@ def check_tier_capability(settings: Settings) -> Check:
     return Check("tier capability", Status.OK, "every configured model supports json_schema")
 
 
+def check_context_homogeneity(settings: Settings) -> Check:
+    """A fallback must be able to handle prompts the primary handles.
+
+    ADR-006 requires capability-homogeneous chains, and context length is a
+    capability. An 8k fallback behind a 400k primary does not degrade
+    gracefully under a rate limit -- it fails on the exact prompt the primary
+    was chosen for, which is the failure ADR-006 exists to prevent.
+
+    The floor is absolute and defaults to 0 (disabled), because the right
+    number is a measurement nobody has taken yet (playbook 4.5). Disabled is
+    reported as WARN, not OK -- a skipped check must not read as a passing one.
+    """
+    from dynaflows.gateway.probe import catalogue
+
+    try:
+        registry = get_model_registry(settings.models_config)
+    except DynaflowsError as exc:
+        return Check("context homogeneity", Status.FAIL, str(exc))
+    if registry.unpopulated:
+        return Check("context homogeneity", Status.WARN, "skipped -- tiers unpopulated")
+    if registry.min_context_tokens <= 0:
+        return Check(
+            "context homogeneity",
+            Status.WARN,
+            "min_context_tokens is 0 (disabled) -- set it in config/models.toml once "
+            "you know the largest prompt a tier actually sends (4.5)",
+        )
+    try:
+        context = {m.id: m.context_length for m in catalogue(settings)}
+    except DynaflowsError as exc:
+        return Check("context homogeneity", Status.FAIL, str(exc))
+
+    offenders = context_violations(registry, context)
+    if offenders:
+        return Check("context homogeneity", Status.FAIL, "; ".join(offenders))
+    return Check(
+        "context homogeneity",
+        Status.OK,
+        f"every configured model holds >= {registry.min_context_tokens // 1000}k context",
+    )
+
+
 def check_handshake(settings: Settings) -> Check:
     """One real, traced, schema-enforced call. The end-to-end proof."""
     from dynaflows.gateway.probe import probe_structured
@@ -191,4 +233,5 @@ def run_checks(settings: Settings | None = None, *, offline: bool = False) -> It
     yield check_langsmith_connectivity(settings)
     yield check_openrouter(settings)
     yield check_tier_capability(settings)
+    yield check_context_homogeneity(settings)
     yield check_handshake(settings)
