@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 3)
+**Last updated:** 2026-09-10 (rev 4)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -607,6 +607,137 @@ measurement is above.
 
 ---
 
+### ADR-013: Billed provider calls go through a content-addressed response cache
+
+**Date:** 2026-09-10
+**Status:** Accepted — resolves OQ-07
+
+**Context.**
+LangGraph writes checkpoints at superstep boundaries, not inside nodes. A worker reads state,
+assembles context, calls the provider — 10 to 60 seconds, and money — and returns a result. The
+checkpoint recording that result is written *after* the node returns. If the process dies in
+between (Ctrl-C, sleep, OOM, a crash in a sibling branch), the provider may have completed and
+billed the call while nothing recorded it; on resume LangGraph re-runs the node from its first line
+(ADR-007) and calls again. At N=16, a crash three-quarters through re-issues about twelve calls.
+
+Playbook §3.3 requires an idempotency key on every mutating operation. A billed LLM call is mutating
+in the sense that matters: an irreversible external effect, and a client that cannot distinguish
+"already did this" from "haven't done this."
+
+Three options were considered.
+
+| Option | Mechanism | Assessment |
+|---|---|---|
+| Provider-side `Idempotency-Key` header | Ask OpenRouter to dedupe | OpenRouter proxies many upstreams; support is per-provider and not a guarantee. Free to send, cannot be relied on. |
+| **Local content-addressed cache** | Hash the call, check before, write immediately after | ~50 lines. Shrinks the double-pay window from a whole node to the gap between HTTP response and local INSERT. |
+| Nothing | Accept double billing | At the mid tier a 4k-in/1k-out call is ≈$0.0003; a crashed 16-worker run wastes half a cent. |
+
+**Decision.**
+The gateway keeps a content-addressed response cache in `.dynaflows/calls.db`.
+
+**The honest justification is not crash-safety.** Half a cent does not buy a subsystem. The cache is
+built because it makes the system *developable*: tuning the synthesizer prompt without re-paying and
+re-waiting for sixteen worker calls, comparing two evaluator rubrics against fixed worker outputs,
+replayable system-tier tests. The measurement that decides it is not "how often will I crash" but
+"how many times will I re-run a plan while tuning the nodes downstream of the workers" — dozens, and
+most of them on the day something is wrong. Crash-safety is a side effect, and the weaker argument.
+
+Binding details:
+
+1. **Separate database from the checkpointer.** `calls.db`, not `state.db`. Different lifecycle:
+   clearing the cache to force fresh calls must never destroy resumable runs.
+2. **The key** is `sha256` over a canonical serialization of `model_id`, the full message list, the
+   JSON schema, the sampling parameters, `extra_body`, and an explicit `variant: int`. It must NOT
+   include `run_id`, `task_id`, `thread_id` or any timestamp, or nothing ever hits.
+3. **`variant` is how sampling diversity is requested.** Caching a sampled response and replaying it
+   is deliberate — determinism on replay is the feature. Phase 5's Tournament and Generate-and-Filter
+   want different outputs from an identical prompt, and they get them by incrementing `variant`, not
+   by disabling the cache.
+4. **The raw provider response is stored, not a parsed form.** Storing a derived representation
+   invites the AP-01 family of defects, where the stored form has already lost something the caller
+   needs. Parse on read.
+5. **Only validated successes are cached.** A 429, a timeout, or a schema failure that survived the
+   repair attempt is never written. Caching a transient error would make it permanent — the worst
+   available outcome and an easy mistake.
+6. **The write happens in the gateway**, immediately after the response is parsed and validated,
+   before returning to the node.
+7. **A hit is visible or the cost numbers lie.** Every hit is stamped `cache_hit=true` in the
+   LangSmith metadata, and the ledger keeps two counters — `usd_spent` and `usd_avoided` — never
+   merged. This is AP-20's shape again: money not spent and money spent are different facts and a
+   single number answers neither question.
+8. **`--no-cache` exists**, and so does `dynaflows cache clear`.
+
+**Consequences.**
+- Two identical worker calls in one plan collapse to one provider call. For workers this is correct
+  (same task, same context, same answer). Where it is not wanted, `variant` is the mechanism.
+- **Known limitation, recorded rather than solved:** a provider can change the model behind a pinned
+  id without changing the id — AP-05's exact shape — and the cache will then serve responses from
+  the old behaviour indefinitely. Ids are pinned and `doctor` validates their existence, but neither
+  detects a silent behavioural change. `dynaflows cache clear` is the remedy, and it is manual.
+- Cache growth is unbounded. No eviction is implemented, because no measurement exists to size one
+  (§4.5). Revisit when `calls.db` becomes inconvenient, which is a fact that will announce itself.
+- N workers writing cache rows at fan-in put the same pressure on SQLite's single writer as the
+  checkpointer does. WAL mode; short transactions; no open transaction across a provider call.
+
+**Alternatives considered.**
+*Cache in `state.db` alongside checkpoints.* Rejected: it couples two lifecycles that need to be
+cleared independently.
+*Skip the cache and rely on the provider header.* Rejected: unverifiable per-provider behaviour is
+not a foundation, and it delivers none of the iteration-speed benefit that actually justifies this.
+
+---
+
+### ADR-014: Fan-out width and request concurrency are separate limits
+
+**Date:** 2026-09-10
+**Status:** Accepted — resolves OQ-03
+
+**Context.**
+OQ-03 was originally framed as "what is `MAX_FANOUT`, and does it derive from the rate limit or the
+checkpoint write cost?" The framing contained an error, now corrected: with ADR-010's process-global
+semaphore in the gateway, a plan of 32 tasks against a semaphore of 6 runs six in flight and queues
+twenty-six. **The rate limit binds the semaphore, not the plan width.** They are different questions.
+
+What actually bounds fan-out width, lowest ceiling first:
+
+| Ceiling | Nature | Status |
+|---|---|---|
+| Plan quality | A planner emitting 40 tasks for a 6-task problem produces shallow, overlapping tasks | The one that actually bites; not technical |
+| Wall clock vs. gate G2 | A 40-minute run turns the human gate into a rubber stamp before walking away | Judgement |
+| Checkpoint write throughput | N branches writing pending-writes rows through SQLite's single writer (ADR-008) | **Unmeasured** |
+| Cost | At worker-tier prices, N=64 is ≈2 cents | Not binding |
+
+**Decision.**
+
+- `MAX_FANOUT = 12` — the upper bound on `Plan.tasks`, enforced by the schema and stated in the
+  planner's prompt.
+- `OPENROUTER_MAX_CONCURRENT = 6` — the gateway semaphore, per API key, process-global.
+- LangGraph's own `max_concurrency` is set equal to `MAX_FANOUT`, i.e. the graph does not limit.
+  The gateway is the single limiter, because the provider rate-limits requests per key across the
+  process and only the gateway sees all of them (ADR-010).
+
+Both numbers are **placeholders, not measurements** (§4.5). Twelve is chosen to be wide enough to
+exercise every fan-out failure mode — partial failure, real 429s, checkpoint pressure — while
+keeping a debug cycle short enough that someone will actually run it twice.
+
+**When a plan exceeds the bound, it is rejected, never truncated.** One re-plan attempt with the
+violation stated in the prompt; if the second plan also exceeds, the run stops at G2 and shows the
+human. Silently dropping tasks would produce a synthesis that is incomplete without saying so, which
+is AP-20's confusion in another costume — a task dropped for capacity and a task that failed are
+different facts and must not share a fate.
+
+**Consequences.**
+- Rate limits still decide *which models* are viable at the worker tier: an endpoint capped at 20 rpm
+  delivers 20 requests per minute regardless of the semaphore, so a 12-task plan spends most of a
+  minute waiting. This is the concrete reason `:free` endpoints are excluded from the mid tier.
+- Interaction with ADR-013: once a crashed run resumes from cache for free, a wider fan-out becomes
+  much less expensive to get wrong. Revisit `MAX_FANOUT` upward only after the cache exists.
+- **The measurement that replaces these numbers** is Phase 1 step 1.8: p95 checkpoint write latency
+  at fan-in for N = 4, 8, 16, 32, and the observed 429 rate at semaphore 2, 4, 6, 8. Until that runs,
+  this ADR states an intention, not a tested property.
+
+---
+
 ## 2. Data Contracts
 
 Written before implementation (§1.4, contract-first). These are the canonical shapes; changes are
@@ -734,7 +865,40 @@ a structure exercised only by its own test. It is deferred until the feature tha
 The chunker still *extracts* wikilinks (that is parsing, and it is free); it just does not persist an
 adjacency structure nothing queries.
 
-### 2.5 Repository interface (§3.2, Protocol + factory)
+### 2.5 Response cache (SQLite, `.dynaflows/calls.db`) — ADR-013
+
+```sql
+CREATE TABLE calls (
+    key           TEXT PRIMARY KEY,  -- sha256(model_id|messages|schema|params|extra_body|variant)
+    model_id      TEXT NOT NULL,     -- as requested
+    served_by     TEXT,              -- as actually routed; OpenRouter may differ
+    variant       INTEGER NOT NULL DEFAULT 0,
+    raw_response  TEXT NOT NULL,     -- the provider's JSON, verbatim. Parse on read (ADR-013.4)
+    tokens_in     INTEGER NOT NULL,
+    tokens_out    INTEGER NOT NULL,
+    cost_usd      REAL NOT NULL,     -- what the ORIGINAL call cost; a hit adds this to usd_avoided
+    created_at    TEXT NOT NULL
+);
+```
+
+Only validated successes are written (ADR-013.5). `PRAGMA journal_mode=WAL`.
+
+### 2.6 Cost ledger — two counters, never merged
+
+```python
+class CostLedger(BaseModel):
+    usd_spent: float = 0.0       # money that left the account
+    usd_avoided: float = 0.0     # money a cache hit did not spend
+    tokens_in: int = 0
+    tokens_out: int = 0
+    calls_made: int = 0
+    calls_cached: int = 0
+```
+
+A single "cost" number answers neither "what did this run cost" nor "what would it have cost cold",
+and the G2 estimate needs the second one. AP-20: two facts, two counters.
+
+### 2.7 Repository interface (§3.2, Protocol + factory)
 
 ```python
 class PlaybookRepository(Protocol):
@@ -763,15 +927,15 @@ never `sqlite3.connect` (§2.2, AP-02).
 |---|---|---|---|
 | OQ-01 | Which concrete model ids fill each tier in `models.toml`? | `config/models.toml`; the Phase 1 cost baseline | Open — requires measurement, not opinion |
 | OQ-02 | Does a plan need intra-plan task dependencies (`depends_on`), or is a flat map sufficient? | `PlanTask.depends_on`; whether fan-out is one superstep or a scheduler | Open — **deliberately deferred**, see order note |
-| OQ-03 | What is `MAX_FANOUT`, and does it derive from the rate limit or the checkpoint write cost? | `Send` dispatch; the G2 cost estimate | Open — measure both, take the lower |
+| OQ-03 | What is `MAX_FANOUT`, and does it derive from the rate limit or the checkpoint write cost? | `Send` dispatch; the G2 cost estimate | **Resolved 2026-09-10 → ADR-014.** The framing was wrong: the rate limit binds the semaphore, not the plan width. 12 and 6, both provisional. |
 | OQ-04 | Is an offline/local tracing backend required, or is LangSmith a hard dependency? | `gateway/telemetry.py` abstraction — or its absence | Open — **do not build the abstraction until an answer exists** (AP-11) |
 | OQ-05 | Does the Obsidian vault need frontmatter-tag filtering, or are wikilinks + FTS5 enough? | `links` table usage; `PlaybookRepository.search` signature | Open |
 | OQ-06 | Should `dynaflows` ever write to the target repository, or stay read-only? | The tool-grant model for workers; the entire sandboxing question | Open — a "no" here is a negative ADR worth writing explicitly |
-| OQ-07 | Do worker provider calls need an idempotency key, or is checkpoint granularity sufficient to prevent double-billing on crash-resume? | `gateway.call()` signature; whether `WorkerResult` is written before or after the superstep commits | Open — §3.3 requires idempotency on mutating operations, and a paid LLM call is a mutating operation |
+| OQ-07 | Do worker provider calls need an idempotency key, or is checkpoint granularity sufficient to prevent double-billing on crash-resume? | `gateway.call()` signature; whether `WorkerResult` is written before or after the superstep commits | **Resolved 2026-09-10 → ADR-013.** Content-addressed cache in the gateway. Note the accepted reasoning is iteration speed, not crash cost. |
 
 **Decision order (current, and it has already been corrected once):**
 
-`OQ-07 → OQ-01 → OQ-03 → OQ-02 → OQ-06 → OQ-05 → OQ-04`
+`OQ-07 ✓ → OQ-01 → OQ-03 ✓ → OQ-02 → OQ-06 → OQ-05 → OQ-04`  — remaining: OQ-01, OQ-02, OQ-06, OQ-05, OQ-04
 
 *Re-ordering note (2026-08-30).* The initial order put OQ-01 (model ids) first, because it feels like
 the foundational choice. It is not: **OQ-03 dominates it.** `MAX_FANOUT` determines the requests-per-
@@ -811,6 +975,7 @@ crash-exposure window without ever asking whether re-execution is safe.
 | F-02 Prompt enhancer + gate G1 | `memory/features/feature-02-enhancer.md` | 1 | Not started |
 | F-03 Planner + gate G2 | `memory/features/feature-03-planner.md` | 1 | Not started |
 | F-04 Fan-out workers + resiliency | `memory/features/feature-04-fanout.md` | 1 | Not started |
+| F-11 Gateway response cache (ADR-013) | `memory/features/feature-11-call-cache.md` | 1 (step 1.2) | Spec'd, not started |
 | F-05 Structural evaluator + synthesizer | `memory/features/feature-05-synthesis.md` | 1 | Not started |
 | F-06 Rich terminal UX + resume | `memory/features/feature-06-cli-ux.md` | 1 | Not started |
 | F-07 Adversarial verification | — | 2 | Not started |
@@ -885,6 +1050,73 @@ Feature: Fan-out survives partial failure
 ```
 
 ```gherkin
+Feature: A billed call is paid for once            # ADR-013
+
+  Scenario: A crash between the provider response and the checkpoint
+    Given an approved plan with 8 tasks
+    And the process is killed after task 5's provider response arrives
+    When the run is resumed by thread id
+    Then task 5 is served from the cache
+    And the provider receives 7 calls in total across both attempts
+    And the ledger shows 7 in usd_spent and task 5's cost in usd_avoided
+
+  Scenario: Re-running an unchanged plan costs nothing
+    Given a completed run
+    When the same plan is executed again with the same inputs
+    Then the provider receives 0 calls
+    And every result is marked cache_hit in its trace
+    And usd_spent for the second run is 0.0
+
+  Scenario: A changed downstream prompt does not re-pay for workers
+    Given a completed run
+    When only the synthesizer prompt is changed and the run is repeated
+    Then every worker result is served from the cache
+    And exactly one provider call is made
+
+  Scenario: Sampling diversity is requested explicitly
+    Given a task executed with variant 0
+    When the same task is executed with variant 1
+    Then the provider receives a second call
+    And the two results are stored under different keys
+
+  Scenario: A transient failure is never cached
+    Given the provider returns 429 for a task on every attempt
+    When the task fails
+    Then nothing is written to calls.db for that key
+    And a later run of the same task calls the provider again
+
+  Scenario: A schema failure is never cached
+    Given the provider returns unparseable output twice for a task
+    Then nothing is written to calls.db for that key
+
+
+Feature: Fan-out width is bounded and never silently truncated   # ADR-014
+
+  Scenario: A plan within the bound runs as written
+    Given a planner that emits 12 tasks
+    Then the plan is accepted
+    And 12 Send branches are dispatched
+    And no more than 6 provider requests are in flight at any moment
+
+  Scenario: An oversized plan is re-planned, not trimmed
+    Given a planner that emits 20 tasks
+    When the plan is validated
+    Then the planner is called once more with the violation stated
+    And no task is dropped from the first plan without the human seeing it
+
+  Scenario: A persistently oversized plan stops at the human gate
+    Given a planner that emits 20 tasks on both attempts
+    Then the run halts at gate G2
+    And the CLI shows the human all 20 tasks and the bound that was exceeded
+    And no worker call is made
+
+  Scenario: Capacity and failure are different facts
+    Given a run in which one task failed and one task was never dispatched
+    Then the failure counter is 1
+    And the skipped counter is 1
+    And the synthesis names both, separately
+
+
 Feature: Playbook context is exact and reproducible
 
   Scenario: The planner names an anchor and the worker receives that section
@@ -945,6 +1177,11 @@ one that names its holes.
   and do work.
 - ADR-008's checkpointer path is untested against a real fan-out; only that SQLite is writable and
   has FTS5 is confirmed.
+- ADR-013 and ADR-014 are **decisions, not implementations**. Nothing in `src/` reads or writes
+  `calls.db`, and no code enforces `MAX_FANOUT`. Both land in Phase 1 step 1.2. Until then these two
+  ADRs are intentions, and this line is here so nobody reads them as descriptions.
+- ADR-014's two numbers (12 and 6) have no measurement behind them at all. Step 1.8 is where they
+  stop being guesses.
 - **Idempotency is unresolved (OQ-07).** ADR-007 makes *gate* re-execution safe. It says nothing about
   a `worker` node re-executing after a crash and re-issuing a billed provider call. §3.3 says this
   needs an idempotency key; this document does not yet specify one. Named here rather than left to be
