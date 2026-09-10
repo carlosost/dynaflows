@@ -23,6 +23,7 @@ from dynaflows.contracts.state import (
 )
 from dynaflows.graph import build_graph, open_checkpointer
 from dynaflows.graph.builder import dispatch_workers
+from tests.conftest import FakeGateway
 
 pytestmark = [pytest.mark.deterministic, pytest.mark.anyio]
 
@@ -39,7 +40,16 @@ def a_plan(n: int = 3) -> Plan:
 
 
 def config(thread: str = "th-1") -> dict:
-    return {"configurable": {"thread_id": thread}}
+    """Every graph invocation needs a gateway now that enhance_prompt is real
+    (step 1.4). These tests are about topology, reducers and resume, so the
+    gateway is a fake that counts calls and touches nothing."""
+    return {
+        "configurable": {
+            "thread_id": thread,
+            "gateway": FakeGateway(echo=True),
+            "auto_approve": ["prompt"],
+        }
+    }
 
 
 # --- topology ------------------------------------------------------------
@@ -99,9 +109,14 @@ async def test_concurrent_branches_accumulate_instead_of_overwriting(tmp_path: P
 
     assert len(final["results"]) == 6
     assert {r.task_id for r in final["results"]} == {f"t{i}" for i in range(6)}
-    assert final["cost"].calls_made == 6
-    assert final["cost"].tokens_in == 60
-    assert final["cost"].usd_spent == pytest.approx(3.0)
+
+    # The ledger sums the enhancer AND all six branches -- which is the point:
+    # a sequential node and six concurrent ones share one reduced key.
+    ledger = final["cost"]
+    assert ledger.calls_made == 6 + 1, "6 workers + 1 enhancer"
+    assert ledger.tokens_in == 6 * 10 + 40
+    assert ledger.tokens_out == 6 * 5 + 12
+    assert ledger.usd_spent == pytest.approx(6 * 0.5 + 0.002)
 
 
 def test_merge_cost_sums_every_field() -> None:
@@ -269,6 +284,8 @@ async def test_checkpointed_state_round_trips_under_strict_msgpack(
         # Every one of our types has to survive the round trip, not just str.
         assert snapshot.values["prompt_gate"].proceeds is True
         assert snapshot.values["plan"].tasks[0].task_id == "t0"
-        assert snapshot.values["cost"].calls_made == 0
+        # The enhancer ran before the breakpoint at `plan`, so its cost is
+        # already in the checkpoint -- and had to survive strict deserialisation.
+        assert snapshot.values["cost"].calls_made == 1
         final = await graph.ainvoke(None, config("th-strict"))
     assert final["evaluation"].task_count == 2

@@ -25,32 +25,104 @@ Two rules, and the first cost a real bug in this very file:
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import interrupt
 
+from dynaflows.contracts.calls import CallRequest
 from dynaflows.contracts.state import (
     EvaluationReport,
     GateDecision,
     GateOutcome,
     WorkflowState,
+    cost_delta,
 )
+from dynaflows.contracts.tiers import Tier
+from dynaflows.graph.deps import auto_approved, gateway_from
+from dynaflows.graph.prompts import ENHANCER_SYSTEM, EnhancedPrompt
 
 
 async def enhance_prompt(
     state: WorkflowState, config: RunnableConfig | None = None
 ) -> dict[str, Any]:
-    """Step 1.4 replaces the body with a real call.
+    """Rewrite the raw request into a precise brief. Small tier (ADR-006).
 
-    The LLM call belongs HERE, never in the gate that follows: ADR-007, a
-    resumed graph re-runs the interrupted node from its first line.
+    The LLM call belongs HERE and never in the gate that follows. ADR-007: a
+    resumed graph re-runs the interrupted node from its first line, so an
+    enhancer sharing a node with its gate would be paid for again on every
+    resume -- and could show the human different text than the text they were
+    approving.
     """
-    return {"enhanced_prompt": state.get("raw_prompt", "")}
+    gateway = gateway_from(config)
+    result = await gateway.call(
+        CallRequest(
+            tier=Tier.SMALL,
+            system=ENHANCER_SYSTEM,
+            prompt=state["raw_prompt"],
+            schema=EnhancedPrompt,
+            label="enhance_prompt",
+            metadata=(("run_id", state.get("run_id", "")), ("node", "enhance_prompt")),
+        )
+    )
+    payload: EnhancedPrompt = result.payload
+    return {
+        "enhanced_prompt": payload.enhanced,
+        "enhancer_assumptions": list(payload.assumptions),
+        "cost": cost_delta(
+            usd_spent=0.0 if result.cache_hit else result.cost_usd,
+            usd_avoided=result.cost_usd if result.cache_hit else 0.0,
+            tokens_in=0 if result.cache_hit else result.tokens_in,
+            tokens_out=0 if result.cache_hit else result.tokens_out,
+            calls_made=0 if result.cache_hit else 1,
+            calls_cached=1 if result.cache_hit else 0,
+        ),
+    }
 
 
 async def approve_prompt(
     state: WorkflowState, config: RunnableConfig | None = None
 ) -> dict[str, Any]:
-    """Gate G1. Step 1.4 adds `interrupt()` and nothing else ever may -- this
-    node stays pure so re-running it on resume costs nothing."""
-    return {"prompt_gate": GateOutcome(decision=GateDecision.APPROVE)}
+    """Gate G1 (ADR-005). PURE: it reads state, asks, and writes the answer.
+
+    Nothing else may ever live in this node. A resumed graph re-runs it from
+    line one, so any I/O here would be repeated on every resume -- and
+    `scripts/lint_architecture.py` now rejects an `await` in any function that
+    calls `interrupt()`, so the rule is enforced rather than remembered.
+    """
+    if auto_approved(config, "prompt"):
+        return {"prompt_gate": GateOutcome(decision=GateDecision.APPROVE, note="--yes-prompt")}
+
+    answer = interrupt(
+        {
+            "gate": "prompt",
+            "original": state.get("raw_prompt", ""),
+            "enhanced": state.get("enhanced_prompt", ""),
+            "assumptions": list(state.get("enhancer_assumptions") or []),
+        }
+    )
+    outcome = _gate_outcome(answer)
+    update: dict[str, Any] = {"prompt_gate": outcome}
+    if outcome.decision is GateDecision.EDIT and outcome.replacement:
+        # The human's text beats the model's. Replacing it here rather than
+        # re-asking the model is the entire point of offering "edit".
+        update["enhanced_prompt"] = outcome.replacement
+    if outcome.decision is GateDecision.REJECT:
+        update["halted"] = "rejected by human at gate G1"
+    return update
+
+
+def _gate_outcome(answer: Any) -> GateOutcome:
+    """Normalise whatever `Command(resume=...)` carried.
+
+    A bare string is accepted so a human answering "approve" at a terminal is
+    not a crash, but anything unrecognised is a REJECT: defaulting an
+    unparseable answer to approval would let a typo authorise a fan-out.
+    """
+    if isinstance(answer, GateOutcome):
+        return answer
+    if isinstance(answer, dict):
+        return GateOutcome.model_validate(answer)
+    if isinstance(answer, str) and answer.strip().lower() in set(GateDecision):
+        return GateOutcome(decision=GateDecision(answer.strip().lower()))
+    return GateOutcome(decision=GateDecision.REJECT, note=f"unparseable gate answer: {answer!r}")
 
 
 async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 11)
+**Last updated:** 2026-09-10 (rev 12)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -367,6 +367,17 @@ preceding node whose output is checkpointed before the gate is reached.
 enhance_prompt   (LLM call, writes state)  →  approve_prompt   (interrupt only)
 plan             (LLM call, writes state)  →  approve_plan     (interrupt only)
 ```
+
+**Implemented 2026-09-10 (step 1.4), and the check this ADR names now exists.**
+`scripts/lint_architecture.py` rejects any function that calls `interrupt()` and either `await`s or
+calls a known I/O helper; `tests/architecture/test_interrupt_node_purity.py` drives a violating
+fixture for each shape, so the rule can fail rather than only pass. The `await` ban is the
+load-bearing half — every I/O path in this codebase is async — and the rule exempts nobody, including
+the gateway package that ADR-010 does exempt.
+
+The behavioural proof is `test_resuming_does_not_re_run_the_enhancer`: the enhancer call count stays
+at 1 across a kill and resume, and the text that proceeds is byte-identical to the text the human was
+shown.
 
 **Consequences.**
 - Re-execution of a gate node is free and idempotent by construction.
@@ -1141,7 +1152,7 @@ crash-exposure window without ever asking whether re-execution is safe.
 |---|---|---|---|
 | F-00 Foundation, doctor, model registry | `memory/features/feature-00-foundation.md` | 0 | **Done** (2026-09-10) |
 | F-01 Playbook indexer + repository | `memory/features/feature-01-playbook-index.md` | 1 (step 1.1) | **Done** (2026-09-10) |
-| F-02 Prompt enhancer + gate G1 | `memory/features/feature-02-enhancer.md` | 1 | Not started |
+| F-02 Prompt enhancer + gate G1 | `memory/features/feature-02-enhancer.md` | 1 (step 1.4) | **Done** (2026-09-10) |
 | F-03 Planner + gate G2 | `memory/features/feature-03-planner.md` | 1 | Not started |
 | F-12 Graph skeleton, state contract, resume | `memory/features/feature-12-graph-skeleton.md` | 1 (step 1.3) | **Done** (2026-09-10) |
 | F-04 Fan-out workers + resiliency | `memory/features/feature-04-fanout.md` | 1 | Not started |
@@ -1402,6 +1413,20 @@ one that names its holes.
   synthesis can usefully degrade to, which is a measurement nobody has taken.
 - ADR-012's probe ran on aarch64 Linux, not on the macOS arm64 host this project is developed on.
   Closed only when `dynaflows doctor` has run there.
+
+**Learned on 2026-09-10, fourth pass — 204 green tests and the command was still broken.**
+`dynaflows run` built its config WITHOUT a gateway, so every real run failed inside `enhance_prompt`
+with CONFIG_INVALID while the whole suite stayed green. Two causes, and the second is the one worth
+keeping:
+
+1. The graph was tested and the *wiring that feeds it* was not. Unit tests constructed their own
+   config and passed a fake gateway directly, so they exercised the node and never the command. The
+   fix is `tests/unit/test_cli_run.py`, which drives the real Typer command with `get_gateway`
+   patched at the factory boundary.
+2. The edit that should have added the gateway was a string replacement that **silently did not
+   match** — a formatter had reshaped the target line first. Other replacements in the same batch
+   asserted their match; this one did not, so it failed quietly and looked like success. Any
+   mechanical edit that is not asserted is a change that might not have happened.
 
 **Learned on 2026-09-10, third pass — the CI step that could never have passed.** The workflow ran
 `dynaflows doctor --offline` and required exit 0, on a runner that has no credentials and never will.

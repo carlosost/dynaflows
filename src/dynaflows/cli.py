@@ -6,9 +6,11 @@ Phase 0 ships two commands and no workflow: `doctor` proves the environment,
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from langgraph.types import Command
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -153,25 +155,119 @@ def context(
     )
 
 
+def _render_gate(payload: dict[str, Any]) -> None:
+    """Show the human what they are approving, and what it cost them nothing to see."""
+    from rich.panel import Panel
+
+    console.print()
+    console.print(
+        Panel(
+            Text(payload.get("original", "")),
+            title="[dim]you asked[/]",
+            border_style="dim",
+            padding=(0, 1),
+        )
+    )
+    console.print(
+        Panel(
+            Text(payload.get("enhanced", "")),
+            title="[yellow]the workflow will run this[/]",
+            border_style="yellow",
+            padding=(0, 1),
+        )
+    )
+    assumptions = payload.get("assumptions") or []
+    if assumptions:
+        console.print("[dim]assumed on your behalf:[/]")
+        for item in assumptions:
+            console.print(Text(f"  · {item}"))
+    else:
+        console.print("[dim]no assumptions declared[/]")
+
+
+def _edit_text(initial: str) -> str | None:
+    """Open $EDITOR on the text, pre-filled. None if there is no editor.
+
+    Written directly rather than pulling in a dependency for it: a rewritten
+    brief is a paragraph, and editing a paragraph inside a one-line terminal
+    prompt is worse than rejecting and starting over.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if not editor:
+        return None
+    with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False) as handle:
+        handle.write(initial)
+        path = handle.name
+    try:
+        result = subprocess.run([*editor.split(), path], check=False)  # noqa: S603
+        if result.returncode != 0:
+            return None
+        return Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    finally:
+        Path(path).unlink(missing_ok=True)
+
+
+def _ask_gate(payload: dict[str, Any]) -> dict[str, Any]:
+    """approve / edit / reject.
+
+    `edit` opens the text in $EDITOR pre-filled, because a rewritten brief is
+    a paragraph and a one-line prompt would make editing it worse than
+    rejecting. If no editor is available it falls back to a prompt rather than
+    failing.
+    """
+    choice = typer.prompt("\n[a]pprove  [e]dit  [r]eject", default="a").strip().lower()[:1]
+    if choice == "r":
+        return {"decision": "reject"}
+    if choice == "e":
+        edited = _edit_text(payload.get("enhanced", ""))
+        if edited is None:
+            edited = typer.prompt("Replacement brief (no $EDITOR set)")
+        return {"decision": "edit", "replacement": edited.strip()}
+    return {"decision": "approve"}
+
+
+async def _drive(graph: Any, cfg: dict[str, Any], first_input: Any) -> dict[str, Any]:
+    """Run until the graph finishes, answering each gate as it appears.
+
+    A loop, not a single round trip: 1.5 adds gate G2, and a workflow that
+    could only ever stop once would have to be rewritten to add the second.
+    """
+    payload_in: Any = first_input
+    while True:
+        out = await graph.ainvoke(payload_in, cfg)
+        interrupts = out.get("__interrupt__") if isinstance(out, dict) else None
+        if not interrupts:
+            return dict(out) if isinstance(out, dict) else {}
+        gate_payload = interrupts[0].value
+        _render_gate(gate_payload)
+        payload_in = Command(resume=_ask_gate(gate_payload))
+
+
 @app.command()
 def run(
     prompt: Annotated[str, typer.Argument(help="What you want the workflow to do.")],
     thread: Annotated[str, typer.Option(help="Thread id. Reuse it to resume.")] = "",
-    stop_before: Annotated[
-        str, typer.Option(help="Halt before this node (step 1.3 stand-in for the gates).")
-    ] = "",
+    stop_before: Annotated[str, typer.Option(help="Halt before this node. Debugging aid.")] = "",
+    yes_prompt: Annotated[
+        bool, typer.Option("--yes-prompt", help="Skip gate G1 (ADR-005).")
+    ] = False,
 ) -> None:
     """Execute the workflow graph.
 
-    Step 1.3: every node is a pass-through, so this proves the topology, the
-    reducers and the checkpointer -- not the workflow. It exists now rather
-    than in 1.8 because a graph whose only caller is a test is the AP-11 shape,
-    and steps 1.4-1.7 fill the same nodes this command already drives.
+    Step 1.4: the enhancer is real and gate G1 asks before anything else runs.
+    The planner, workers and synthesizer are still pass-throughs (1.5-1.7).
     """
     import asyncio
     import uuid
 
     from dynaflows.contracts.state import initial_state
+    from dynaflows.gateway.client import get_gateway
     from dynaflows.gateway.telemetry import configure_tracing
     from dynaflows.graph import build_graph, open_checkpointer
 
@@ -186,9 +282,18 @@ def run(
     async def _go() -> dict[str, Any]:
         async with open_checkpointer(settings.state_db) as saver:
             graph = build_graph(saver, interrupt_before=(stop_before,) if stop_before else ())
-            cfg = {"configurable": {"thread_id": thread_id}}
+            cfg = {
+                "configurable": {
+                    "thread_id": thread_id,
+                    # Dependencies ride in `configurable` -- the documented
+                    # place for them, and the reason a test injects a fake by
+                    # passing a config rather than patching an import.
+                    "gateway": get_gateway(settings=settings),
+                    "auto_approve": ["prompt"] if yes_prompt else [],
+                }
+            }
             state = initial_state(uuid.uuid4().hex[:8], thread_id, prompt)
-            await graph.ainvoke(state, cfg)
+            await _drive(graph, cfg, state)
             snapshot = await graph.aget_state(cfg)
             return {"next": snapshot.next, "values": snapshot.values}
 
@@ -198,6 +303,13 @@ def run(
         console.print(f"[yellow]HALTED[/] before {', '.join(outcome['next'])}")
         console.print(f"[dim]resume with:[/] dynaflows resume {thread_id}")
         return
+    halted = outcome["values"].get("halted")
+    if halted:
+        console.print(f"[red]Stopped.[/] {halted}")
+        ledger = outcome["values"].get("cost")
+        if ledger is not None:
+            console.print(f"[dim]spent ${ledger.usd_spent:.4f} before stopping[/]")
+        raise typer.Exit(code=2)
     report = outcome["values"].get("evaluation")
     console.print("[green]Completed.[/]")
     if report is not None:
@@ -214,6 +326,7 @@ def resume(
     """Continue a halted or crashed run from its last checkpoint (ADR-008)."""
     import asyncio
 
+    from dynaflows.gateway.client import get_gateway
     from dynaflows.gateway.telemetry import configure_tracing
     from dynaflows.graph import build_graph, open_checkpointer
 
@@ -223,13 +336,19 @@ def resume(
     async def _go() -> dict[str, Any]:
         async with open_checkpointer(settings.state_db) as saver:
             graph = build_graph(saver)
-            cfg = {"configurable": {"thread_id": thread}}
+            cfg = {
+                "configurable": {
+                    "thread_id": thread,
+                    "gateway": get_gateway(settings=settings),
+                    "auto_approve": [],
+                }
+            }
             before = await graph.aget_state(cfg)
             if not before.created_at:
                 return {"missing": True}
             # None as input means "continue from the checkpoint" rather than
             # "start again" -- the whole point of resume.
-            await graph.ainvoke(None, cfg)
+            await _drive(graph, cfg, None)
             snapshot = await graph.aget_state(cfg)
             return {"next": snapshot.next, "values": snapshot.values}
 

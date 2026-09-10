@@ -175,6 +175,9 @@ class WorkflowState(TypedDict, total=False):
 
     raw_prompt: str
     enhanced_prompt: str | None
+    # Surfaced at gate G1: a human approving a rewrite needs to see what was
+    # assumed on their behalf, not just the result.
+    enhancer_assumptions: list[str]
     prompt_gate: GateOutcome | None
 
     plan: Plan | None
@@ -202,6 +205,7 @@ def initial_state(run_id: str, thread_id: str, raw_prompt: str) -> WorkflowState
         thread_id=thread_id,
         raw_prompt=raw_prompt,
         enhanced_prompt=None,
+        enhancer_assumptions=[],
         prompt_gate=None,
         plan=None,
         plan_hash=None,

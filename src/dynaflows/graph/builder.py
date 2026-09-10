@@ -13,13 +13,25 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-from dynaflows.contracts.state import WorkflowState
+from dynaflows.contracts.state import GateDecision, WorkflowState
 from dynaflows.graph import nodes
 
 # Static breakpoints for step 1.3, so resume can be proven before `interrupt()`
 # exists. Steps 1.4/1.5 replace these with real gates; the constant is here so
 # the change is one line and visible in a diff.
 GATE_NODES = ("approve_prompt", "approve_plan")
+
+
+def after_prompt_gate(state: WorkflowState) -> str:
+    """A rejection ends the run before anything is spent.
+
+    ADR-005: G1 is cheap to fail. The whole value of gating here is that a
+    "no" costs one small-tier call and nothing else.
+    """
+    gate = state.get("prompt_gate")
+    if gate is not None and gate.decision is GateDecision.REJECT:
+        return END
+    return "plan"
 
 
 def dispatch_workers(state: WorkflowState) -> list[Send] | str:
@@ -47,7 +59,7 @@ def build_graph(checkpointer: Any = None, *, interrupt_before: tuple[str, ...] =
 
     builder.add_edge(START, "enhance_prompt")
     builder.add_edge("enhance_prompt", "approve_prompt")
-    builder.add_edge("approve_prompt", "plan")
+    builder.add_conditional_edges("approve_prompt", after_prompt_gate, ["plan", END])
     builder.add_edge("plan", "approve_plan")
     builder.add_conditional_edges("approve_plan", dispatch_workers, ["worker", "evaluate"])
     builder.add_edge("worker", "evaluate")
