@@ -116,8 +116,16 @@ def models(
     # [tiers.small] is valid Rich markup and gets swallowed as a style tag, and
     # a model id ending ":free" contains Rich's :emoji: shorthand. Output that
     # is meant to be pasted must be printed literally.
-    free = [m for m in by_cost if m.id.endswith(":free")]
-    paid = [m for m in by_cost if not m.id.endswith(":free")]
+    # A :batch endpoint routes to a provider's asynchronous batch API. Its
+    # latency class is different by design, and the gateway calls behind a 60s
+    # timeout with a human waiting at gate G2. Whether such an endpoint blocks
+    # for hours or times out immediately is UNVERIFIED -- both are useless
+    # here, so it never appears as a candidate. This is ADR-006's homogeneity
+    # rule in a third dimension the registry does not check.
+    batch = [m for m in by_cost if m.id.endswith(":batch")]
+    usable = [m for m in by_cost if not m.id.endswith(":batch")]
+    free = [m for m in usable if m.id.endswith(":free")]
+    paid = [m for m in usable if not m.id.endswith(":free")]
 
     small = (free + paid)[:limit]
     # Workers run N times per plan. A :free endpoint is rate-limited hard, so
@@ -135,6 +143,14 @@ def models(
         "# If you set min_context_tokens in [constraints], every model listed here",
         "# must hold at least that many tokens or `dynaflows doctor` fails.",
     ]
+    # State the filter. A silent exclusion is indistinguishable from absence,
+    # and the reader cannot tell what they were not shown (AP-20).
+    if batch:
+        lines += [
+            f"# {len(batch)} :batch endpoint(s) excluded from every tier below.",
+            "# They route to an asynchronous batch API; this CLI calls synchronously",
+            "# with a human waiting at a gate. `dynaflows models` still lists them.",
+        ]
 
     def entry(model: ModelInfo, *, commented: bool = False) -> str:
         prefix = '    # "' if commented else '    "'

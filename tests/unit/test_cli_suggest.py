@@ -27,6 +27,8 @@ _CATALOGUE = [
     ModelInfo("nex-agi/nex-n2.5-mini:free", 262_000, 0.0, 0.0),
     ModelInfo("liquid/lfm-2.5-2.6b:free", 131_000, 0.0, 0.0),
     ModelInfo("mistralai/mistral-nemo", 131_000, 0.02, 0.03),
+    # cheapest paid entry: lands in `mid` unless it is filtered out
+    ModelInfo("openai/gpt-5-nano:batch", 400_000, 0.01, 0.10),
     ModelInfo("openai/gpt-5-nano", 400_000, 0.02, 0.20),
     ModelInfo("meta-llama/llama-4-scout", 10_000_000, 0.10, 0.30),
     ModelInfo("x-ai/grok-4.20", 2_000_000, 1.25, 2.50),
@@ -90,3 +92,28 @@ def test_long_lines_are_not_wrapped_at_narrow_widths(suggest_output: str) -> Non
     for line in suggest_output.splitlines():
         if line.strip().startswith('"'):
             assert line.rstrip().endswith((",", "]")) or "#" in line, line
+
+
+def test_batch_endpoints_never_appear_in_any_tier(suggest_output: str) -> None:
+    """The fixture's cheapest PAID entry is a :batch id. If the filter were
+    absent it would be the first suggestion for the worker tier."""
+    parsed = tomllib.loads(suggest_output)
+    for tier in parsed["tiers"].values():
+        assert not any(m.endswith(":batch") for m in tier["chain"]), tier["chain"]
+
+
+def test_the_batch_exclusion_is_stated_not_silent(suggest_output: str) -> None:
+    """A filtered-out row and a nonexistent row look identical to the reader
+    unless the filter says so (AP-20)."""
+    assert ":batch endpoint(s) excluded" in suggest_output
+
+
+def test_the_plain_listing_still_shows_batch_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`models` reports the catalogue. Hiding rows there would misrepresent
+    what the provider offers; only --suggest is opinionated."""
+    monkeypatch.setattr("dynaflows.gateway.probe.catalogue", lambda settings: _CATALOGUE)
+    result = CliRunner().invoke(app, ["models"])
+    assert result.exit_code == 0, result.output
+    assert "gpt-5-nano:batch" in result.output.replace("\n", "")

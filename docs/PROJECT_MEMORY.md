@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 5)
+**Last updated:** 2026-09-10 (rev 6)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -1284,9 +1284,14 @@ one that names its holes.
   where failure is most expensive — the planner runs before the fan-out, so a 429 there ends the run
   before any work happens. A second entry from a different family is a config change, not a code one.
 - ADR-006 checks capability homogeneity in two dimensions (structured output, context length) and not
-  a third: **latency class**. A `:batch` endpoint behind an interactive one would silently convert an
-  interactive run into a batch job, with a human waiting at gate G2. `--suggest` does not yet exclude
-  `:batch` the way it excludes `:free`.
+  a third: **latency class**. `--suggest` now excludes `:batch` endpoints from every tier and says so
+  in its output, but `doctor` does **not** reject a `:batch` id pasted in by hand. That enforcement is
+  deliberately absent: no chain has ever contained one, so the rule would have no subject (AP-11).
+  Add it the first time one appears.
+- What a `:batch` endpoint actually does behind this gateway is **unverified**. It either blocks far
+  longer than a human at a gate will tolerate, or it times out and burns three retries; which one is
+  unknown, because checking costs real credits and the answer changes nothing — both are unusable
+  here. Recorded as unverified rather than asserted (AP-19 habit 3).
 - **Idempotency is unresolved (OQ-07).** ADR-007 makes *gate* re-execution safe. It says nothing about
   a `worker` node re-executing after a crash and re-issuing a billed provider call. §3.3 says this
   needs an idempotency key; this document does not yet specify one. Named here rather than left to be
