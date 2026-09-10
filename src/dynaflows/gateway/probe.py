@@ -122,7 +122,7 @@ def probe_structured(settings: Settings, model_id: str) -> ProbeResult:
             base_url=settings.openrouter_base_url,
             timeout=settings.timeout_seconds,
             max_retries=0,
-            model_kwargs={"extra_body": {"provider": {"require_parameters": True}}},
+            extra_body={"provider": {"require_parameters": True}},
         ).with_structured_output(_Handshake)
 
         result = llm.invoke(

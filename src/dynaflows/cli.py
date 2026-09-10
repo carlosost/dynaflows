@@ -11,6 +11,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from dynaflows import __version__
 from dynaflows.contracts.errors import DynaflowsError
@@ -53,7 +54,9 @@ def doctor(
     blocking = 0
     warnings = 0
     for check in run_checks(settings, offline=offline):
-        table.add_row(_GLYPH[check.status], check.name, check.detail)
+        # Text() not str: a model id ending ':free' is Rich emoji shorthand,
+        # and a detail containing '[' would be read as a style tag.
+        table.add_row(_GLYPH[check.status], Text(check.name), Text(check.detail))
         blocking += check.blocking
         warnings += check.status is Status.WARN
 
@@ -79,7 +82,7 @@ def models(
     Model ids are never hardcoded from memory: a renamed id fails silently
     (AP-05), so the only trustworthy source is the provider's live list.
     """
-    from dynaflows.gateway.probe import catalogue
+    from dynaflows.gateway.probe import ModelInfo, catalogue
 
     settings = get_settings()
     try:
@@ -97,7 +100,7 @@ def models(
         table.add_column("context", justify="right")
         for model in by_cost:
             table.add_row(
-                model.id,
+                Text(model.id),
                 f"{model.prompt_usd_per_mtok:.2f}",
                 f"{model.completion_usd_per_mtok:.2f}",
                 f"{model.context_length // 1000}k",
@@ -108,6 +111,11 @@ def models(
     # --suggest must not make a decision it cannot justify from this data.
     # Price tells you cost. It does not tell you reasoning quality, and it does
     # not tell you rate limits -- both of which decide two of the four tiers.
+    #
+    # Everything below is emitted with markup disabled. A TOML header like
+    # [tiers.small] is valid Rich markup and gets swallowed as a style tag, and
+    # a model id ending ":free" contains Rich's :emoji: shorthand. Output that
+    # is meant to be pasted must be printed literally.
     free = [m for m in by_cost if m.id.endswith(":free")]
     paid = [m for m in by_cost if not m.id.endswith(":free")]
 
@@ -121,11 +129,21 @@ def models(
         m for m in sorted(paid, key=lambda m: -m.context_length) if m.family not in mid_families
     ][:limit]
 
-    console.print("[dim]# Paste into config/models.toml and bump `version`.[/]")
-    console.print(
-        "[dim]# Order within a chain is preference, then fallback. Every fallback must[/]"
-    )
-    console.print("[dim]# hold >= min_context_ratio of its primary's context, or doctor fails.[/]")
+    lines: list[str] = [
+        "# Paste into config/models.toml and bump `version`.",
+        "# Order within a chain is preference, then fallback.",
+        "# If you set min_context_tokens in [constraints], every model listed here",
+        "# must hold at least that many tokens or `dynaflows doctor` fails.",
+    ]
+
+    def entry(model: ModelInfo, *, commented: bool = False) -> str:
+        prefix = '    # "' if commented else '    "'
+        return (
+            f'{prefix}{model.id}",'
+            f"  # in ${model.prompt_usd_per_mtok:.2f}"
+            f" out ${model.completion_usd_per_mtok:.2f}"
+            f" ctx {model.context_length // 1000}k"
+        )
 
     for tier, candidates, note in (
         (Tier.SMALL, small, "cheapest available; the enhancer and router are easy tasks"),
@@ -136,37 +154,31 @@ def models(
         ),
         (Tier.MID_HIGH, mid_high, "longest context, family-disjoint from mid per ADR-006"),
     ):
-        console.print(f"\n[bold][tiers.{tier.value}][/]  [dim]# {note}[/]")
-        console.print("chain = [")
-        for model in candidates:
-            console.print(
-                f'    "{model.id}",'
-                f"  [dim]# in ${model.prompt_usd_per_mtok:.2f} "
-                f"out ${model.completion_usd_per_mtok:.2f} "
-                f"ctx {model.context_length // 1000}k[/]"
-            )
-        console.print("]")
+        lines += ["", f"[tiers.{tier.value}]  # {note}", "chain = ["]
+        lines += [entry(m) for m in candidates]
+        lines.append("]")
 
     # The planner is the one tier this command refuses to choose for you.
-    console.print("\n[bold][tiers.frontier][/]")
-    console.print(
-        "[yellow]# NOT SUGGESTED. The planner needs reasoning quality, and nothing in the[/]"
-    )
-    console.print("[yellow]# catalogue measures that. Sorting by price would suggest the most[/]")
-    console.print(
-        "[yellow]# expensive model, which is a legacy-premium heuristic, not a good one.[/]"
-    )
-    console.print("[yellow]# Uncomment one or two deliberately. ADR-006: this tier runs ONCE[/]")
-    console.print("[yellow]# per plan but decides the cost and correctness of N worker calls.[/]")
-    console.print("chain = [")
-    for model in sorted(paid, key=lambda m: -m.context_length)[:limit]:
-        console.print(
-            f'    # "{model.id}",'
-            f"  [dim]# in ${model.prompt_usd_per_mtok:.2f} "
-            f"out ${model.completion_usd_per_mtok:.2f} "
-            f"ctx {model.context_length // 1000}k[/]"
-        )
-    console.print("]")
+    lines += [
+        "",
+        f"[tiers.{Tier.FRONTIER.value}]",
+        "# NOT SUGGESTED. The planner needs reasoning quality, and nothing in the",
+        "# catalogue measures that. Sorting by price would name the most expensive",
+        "# model, which is a legacy-premium heuristic, not a good one.",
+        "# Uncomment one or two deliberately. ADR-006: this tier runs ONCE per plan",
+        "# but decides the cost and correctness of N worker calls.",
+        "chain = [",
+    ]
+    lines += [
+        entry(m, commented=True) for m in sorted(paid, key=lambda m: -m.context_length)[:limit]
+    ]
+    lines.append("]")
+
+    for line in lines:
+        # soft_wrap: Rich hard-wraps at the terminal width by default, which
+        # would split a model id across two lines and break the paste on any
+        # narrow terminal.
+        console.print(line, markup=False, highlight=False, soft_wrap=True)
 
 
 def main() -> None:

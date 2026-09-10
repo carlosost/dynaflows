@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 2)
+**Last updated:** 2026-09-10 (rev 3)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -45,6 +45,13 @@ which decision and what it cost.
 ---
 
 ## 1. Architecture Decision Records
+
+**Review status.** ADR-001 (static topology, dynamism in plan data), ADR-003 (routing layer deferred
+to Phase 3 because the worker catalogue dominates its taxonomy) and ADR-004 (Phase 1's evaluator is a
+structural gate, not an LLM judge) were **reviewed and accepted by Carlos on 2026-09-10**. They were
+written as overrides of the originally requested node chain, so the acceptance is recorded here
+rather than left implicit — a superseding ADR now has to argue against an accepted decision, not
+against an unreviewed proposal.
 
 ### ADR-001: The dynamism is in the plan data, not in the graph topology
 
@@ -764,7 +771,7 @@ never `sqlite3.connect` (§2.2, AP-02).
 
 **Decision order (current, and it has already been corrected once):**
 
-`OQ-07 → OQ-03 → OQ-01 → OQ-02 → OQ-06 → OQ-05 → OQ-04`
+`OQ-07 → OQ-01 → OQ-03 → OQ-02 → OQ-06 → OQ-05 → OQ-04`
 
 *Re-ordering note (2026-08-30).* The initial order put OQ-01 (model ids) first, because it feels like
 the foundational choice. It is not: **OQ-03 dominates it.** `MAX_FANOUT` determines the requests-per-
@@ -776,7 +783,17 @@ Recording the correction here rather than only the final order, per §1.7.
 Similarly, OQ-06 must precede OQ-05: whether workers can write determines what "context" even means,
 and therefore what the retrieval layer is for.
 
-*Second re-ordering (same day, found during the pre-implementation verification pass).* **OQ-07 now
+*Third re-ordering (2026-09-10, after Phase 0 shipped a gateway design).* **OQ-03 is demoted; it
+does not dominate OQ-01 as strongly as claimed.** The original argument was that `MAX_FANOUT` sets
+the requests-per-minute envelope and therefore decides which models are viable at the worker tier.
+That is only true without a concurrency limiter. ADR-010 puts a process-global semaphore in the
+gateway, so a wide fan-out **queues** rather than exceeding the rate limit — plan width and request
+concurrency are separate knobs. Rate limits still constrain the *semaphore*, and still rule out
+`:free` endpoints for a tier that runs N times, so the coupling is real; it is just not dominating.
+The correction is recorded rather than quietly applied, because a re-ordering justified by an
+argument that turned out to be weak is exactly the thing a future reader needs to see.
+
+*Second re-ordering (2026-08-31, found during the pre-implementation verification pass).* **OQ-07
 leads.** Playbook §3.3 requires an idempotency key on every mutating operation, and a billed provider
 call is a mutating operation — retrying one after a crash charges twice. The answer determines the
 `gateway.call()` signature, which every node depends on, and it determines whether `WorkerResult` is
@@ -936,6 +953,21 @@ one that names its holes.
   synthesis can usefully degrade to, which is a measurement nobody has taken.
 - ADR-012's probe ran on aarch64 Linux, not on the macOS arm64 host this project is developed on.
   Closed only when `dynaflows doctor` has run there.
+
+**Learned on 2026-09-10, second pass — three bugs, one root cause: data crossing a boundary that
+interprets it.** `models --suggest` printed through Rich, which read the TOML header `[tiers.small]`
+as a style tag and swallowed it, and turned a model id ending `:free` into an emoji because `:free:`
+is Rich's emoji shorthand — so the pasted block was invalid TOML and the doctor's own output showed a
+corrupted model id. Rich also hard-wraps to the terminal, which would have split an id across lines
+on a narrow one. Separately, `doctor`'s environment check called `check_env()` with no argument and
+fell through to `os.environ`, ignoring the settings it was handed, and `get_settings()` wrote the
+`.env` file into `os.environ` as a side effect — so one call anywhere in a test session leaked a
+developer's real credentials into every later test, which is exactly how it was found.
+
+The general rule now applied in both places: **anything that came from outside is data, and must be
+passed as data.** Model ids go through Rich as `Text`; pasteable output is printed with markup
+disabled and soft wrapping; `parse_dotenv` is pure and composition happens in a visible `resolve_env`;
+`Settings` carries `missing_required` computed from the same mapping every other field was read from.
 
 **Learned on 2026-09-10, and worth more than the fixes:** a deterministic-tier test asserted that
 the shipped `config/models.toml` was *unpopulated*. It passed continuously and then failed the first

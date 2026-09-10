@@ -11,7 +11,7 @@ Every numeric default here is a PLACEHOLDER, not a measurement (playbook 4.5).
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, MutableMapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,13 +34,15 @@ def find_project_root(start: Path | None = None) -> Path:
     raise FileNotFoundError(f"pyproject.toml not found above {current}")
 
 
-def load_dotenv(path: Path, *, environ: MutableMapping[str, str] | None = None) -> dict[str, str]:
-    """Read a .env file into a dict. Does not overwrite vars already set.
+def parse_dotenv(path: Path) -> dict[str, str]:
+    """Parse a .env file into a dict.
 
-    Real environment wins over the file, so a CI-injected secret is never
-    shadowed by a stale local file.
+    PURE: returns values, mutates nothing. An earlier version wrote straight
+    into os.environ, which made `get_settings()` a function with a hidden
+    global side effect -- one call anywhere in a test session leaked a
+    developer's real .env into every later test in the process. Composition
+    now happens in `resolve_env`, where it is visible.
     """
-    env = os.environ if environ is None else environ
     loaded: dict[str, str] = {}
     if not path.is_file():
         return loaded
@@ -56,10 +58,20 @@ def load_dotenv(path: Path, *, environ: MutableMapping[str, str] | None = None) 
         value = value.strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
             value = value[1:-1]
-        if key and key not in env:
-            env[key] = value
+        if key:
             loaded[key] = value
     return loaded
+
+
+def resolve_env(project_root: Path, environ: Mapping[str, str] | None = None) -> Mapping[str, str]:
+    """The environment this process reads, as one explicit mapping.
+
+    The real environment wins over the .env file, so a CI-injected secret is
+    never shadowed by a stale local file.
+    """
+    if environ is not None:
+        return environ
+    return {**parse_dotenv(project_root / ".env"), **os.environ}
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +87,7 @@ class Settings:
     models_config: Path
     max_concurrent: int
     timeout_seconds: float
+    missing_required: tuple[str, ...]
 
     @property
     def state_db(self) -> Path:
@@ -98,9 +111,7 @@ def get_settings(environ: Mapping[str, str] | None = None, root: Path | None = N
     Tests patch `dynaflows.<module>.get_settings`, never os.environ directly.
     """
     project_root = root or find_project_root()
-    env = os.environ if environ is None else environ
-    if environ is None:
-        load_dotenv(project_root / ".env")
+    env = resolve_env(project_root, environ)
 
     home_raw = env.get("DYNAFLOWS_HOME", ".dynaflows")
     home = Path(home_raw)
@@ -119,6 +130,10 @@ def get_settings(environ: Mapping[str, str] | None = None, root: Path | None = N
         models_config=project_root / "config" / "models.toml",
         max_concurrent=int(env.get("OPENROUTER_MAX_CONCURRENT", "8")),
         timeout_seconds=float(env.get("OPENROUTER_TIMEOUT_SECONDS", "60")),
+        # Computed from the SAME mapping every other field was read from.
+        # doctor previously called check_env() with no argument, which fell
+        # through to os.environ and ignored the injected environment entirely.
+        missing_required=tuple(check_env(env)),
     )
 
 

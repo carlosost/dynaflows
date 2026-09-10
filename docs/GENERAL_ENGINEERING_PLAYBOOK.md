@@ -17,7 +17,7 @@ companion adds domain-specific depth.
 
 ---
 
-**Revision, 2026-08-26 — additions from the `hippo-pipeline` project.** Every change below
+**Revision, 2026-08-26 — additions from a production data-pipeline project.** Every change below
 came from a defect or a near-miss in a real build, not from theory. If you keep a canonical
 copy of this playbook elsewhere, these are the sections to merge:
 
@@ -1489,7 +1489,7 @@ violations, naming convention enforcement) whenever any source file is edited:
 ```
 
 Replace `scripts/lint_architecture.sh` with whatever enforces your project's structural
-rules. In Sentinel, this runs `lint_gateway_usage.sh` to enforce ADR-006 (no direct
+rules. In one project, this runs `lint_gateway_usage.sh` to enforce an ADR (no direct
 provider SDK imports outside `src/gateway/`). In another project it might check that
 repository classes don't import HTTP clients, or that config modules don't import
 business logic.

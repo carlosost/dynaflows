@@ -18,7 +18,7 @@ from dynaflows.contracts.errors import DynaflowsError
 from dynaflows.contracts.tiers import Tier
 from dynaflows.gateway.registry import context_violations, get_model_registry
 from dynaflows.gateway.telemetry import check_langsmith, configure_tracing
-from dynaflows.settings import REQUIRED_VARS, Settings, check_env, get_settings
+from dynaflows.settings import REQUIRED_VARS, Settings, get_settings
 
 
 class Status(StrEnum):
@@ -39,7 +39,7 @@ class Check:
 
 
 def check_required_env(settings: Settings) -> Check:
-    missing = check_env()
+    missing = settings.missing_required
     if missing:
         return Check(
             "environment",

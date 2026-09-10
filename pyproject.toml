@@ -3,6 +3,8 @@ name = "dynaflows"
 version = "0.1.0"
 description = "A CLI that reconstructs Claude Code's dynamic-workflow patterns on LangGraph, with per-node model routing and full tracing."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Carlos Ost", email = "carlos.ost@gmail.com" }
 ]
