@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 4)
+**Last updated:** 2026-09-10 (rev 5)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -444,6 +444,21 @@ extracted into an adjacency table for optional 1-hop expansion.
 recomputes and exits non-zero on drift. Wired as a CI step and as a `PostToolUse` hook — this is
 playbook AP-19's "generated file plus a drift check makes staleness impossible rather than unlikely."
 
+**Amendment, 2026-09-10 — the Phase 1 corpus is `docs/` only (resolves OQ-05).**
+
+There is no Obsidian vault to index yet. The wikilink adjacency table and frontmatter-tag filtering
+are therefore **not built**: they would have no caller, which is the AP-11 shape this project has
+already been bitten by once. The chunker still *extracts* wikilinks — that is parsing, and it is
+free — but nothing persists or queries an adjacency structure.
+
+Scope is recorded inside this ADR rather than as a separate record, per §1.3: which corpus is indexed
+and how it is indexed would be read together every time, so they are one decision.
+
+**Reversal condition:** a notes tree the user actually wants queried at runtime. At that point the
+questions to answer are whether those notes use `[[wikilinks]]` and tags *meaningfully* — an
+adjacency table over notes that barely link to each other is dead weight, and FTS5 alone would serve
+better.
+
 **Consequences.**
 - Retrieval is reproducible: the same plan produces the same context bytes. Two runs that differ can
   be diffed.
@@ -738,6 +753,82 @@ different facts and must not share a fate.
 
 ---
 
+### ADR-015: LangSmith is a hard dependency; the tracing backend is not abstracted
+
+**Date:** 2026-09-10
+**Status:** Accepted (negative) — resolves OQ-04
+
+**Context.**
+OQ-04 asked whether an offline or local tracing backend is required. Behind it sat a tempting piece
+of architecture: a `TracingBackend` protocol with a LangSmith implementation and a local JSONL one,
+selected by a factory. It is the kind of abstraction that looks like good design in the abstract.
+
+It has no caller. Nothing in this project needs a second backend, and AP-11 is explicit that an
+abstraction whose only exercise is its own test is negative value — maintenance cost plus false
+confidence. The prevention form of that anti-pattern is the relevant one here: *refuse to build the
+abstraction before its production caller exists.*
+
+There is also a substantive reason, not just a scheduling one. Requirement 2 of this project is that
+every step, call and routing decision is traceable. Traceability is not a feature bolted onto the
+workflow — it is the reason the workflow is worth building rather than just prompting a model. A
+degraded local-only tracing mode would be a second code path that has to be kept true (AP-19) while
+delivering a worse version of the product's central claim.
+
+**Decision.**
+LangSmith is a hard runtime dependency. `dynaflows doctor` fails without it. There is no
+`TracingBackend` protocol, no factory, and no local-only fallback mode. `gateway/telemetry.py` talks
+to LangSmith directly.
+
+**Consequences.**
+- A run requires network egress to `api.smith.langchain.com`. Prompts and outputs leave the machine.
+  This is stated here so it is a known property rather than a discovery.
+- The local `run.jsonl` (ADR-011) stays, but as a *join key* to the hosted trace, not as a substitute
+  for it. It is not a fallback and must not grow into one by accident.
+- **Reversal condition:** a concrete run that must happen without third-party egress — an
+  air-gapped environment, or a client whose contract forbids it. Not "we might want it someday."
+  When that arrives, this ADR is superseded and the abstraction is built with a caller in hand.
+
+---
+
+### ADR-016: Workers are read-only; dynaflows never writes to a target repository
+
+**Date:** 2026-09-10
+**Status:** Accepted (negative) — resolves OQ-06
+
+**Context.**
+The charter has said since day one that this is not a coding agent. That statement lived in prose,
+with nothing enforcing it — which is AP-19's exact failure shape: a document asserting behaviour the
+code does not guarantee, believed until someone checks.
+
+The decision has to be made *before* step 1.6, not after. If a worker may write, the tool grant needs
+a sandbox design, a path allow-list, and a rollback story, and all three have to exist before the
+first worker node is written. If a worker may not write, the tool grant is trivial. Deciding this
+after the worker exists means retrofitting a security boundary around code that was not built for
+one, which is the expensive order.
+
+**Decision.**
+Workers read and reason. They never create, modify or delete a file in any directory other than
+`.dynaflows/` (the run store and databases this tool owns). No worker receives a write tool, a shell,
+or a network client other than the gateway.
+
+Outputs reach the user through the synthesizer and the run store. If a user wants a produced artifact
+in their repository, they copy it there themselves.
+
+**Consequences.**
+- Sandboxing is out of scope for Phases 0–5 entirely. This is the single largest scope reduction in
+  the project and the reason Phase 1 is a matter of days rather than weeks.
+- The worker tool-grant model in step 1.6 is: the playbook repository (read), the run store (write,
+  inside `.dynaflows/` only), and the gateway. Nothing else.
+- This ADR is enforceable and therefore must be enforced: step 1.6 adds an architectural lint
+  rejecting filesystem-write calls outside `src/dynaflows/store/`, alongside the ADR-010 gateway
+  check. An ADR asserting testable behaviour names the test that proves it (AP-19 habit 1);
+  `tests/architecture/test_worker_write_boundary.py` is that test, and it is written in step 1.6
+  rather than now, because its subject does not exist yet.
+- **Reversal condition:** a task that cannot be expressed as "read, reason, report." Reversing this
+  requires a sandbox ADR first, not a code change first.
+
+---
+
 ## 2. Data Contracts
 
 Written before implementation (§1.4, contract-first). These are the canonical shapes; changes are
@@ -926,16 +1017,20 @@ never `sqlite3.connect` (§2.2, AP-02).
 | ID | Question | Blocks | Status |
 |---|---|---|---|
 | OQ-01 | Which concrete model ids fill each tier in `models.toml`? | `config/models.toml`; the Phase 1 cost baseline | Open — requires measurement, not opinion |
-| OQ-02 | Does a plan need intra-plan task dependencies (`depends_on`), or is a flat map sufficient? | `PlanTask.depends_on`; whether fan-out is one superstep or a scheduler | Open — **deliberately deferred**, see order note |
+| OQ-02 | Does a plan need intra-plan task dependencies (`depends_on`), or is a flat map sufficient? | `PlanTask.depends_on`; whether fan-out is one superstep or a scheduler | Open — **deliberately deferred.** Phase 1 is a pure map and `depends_on` is contract-bound to empty, so nothing is blocked. Reversal condition: the first plan where the planner wants task B to consume task A's output. Deciding it in the abstract would be guessing at a shape no real task has demanded. |
 | OQ-03 | What is `MAX_FANOUT`, and does it derive from the rate limit or the checkpoint write cost? | `Send` dispatch; the G2 cost estimate | **Resolved 2026-09-10 → ADR-014.** The framing was wrong: the rate limit binds the semaphore, not the plan width. 12 and 6, both provisional. |
-| OQ-04 | Is an offline/local tracing backend required, or is LangSmith a hard dependency? | `gateway/telemetry.py` abstraction — or its absence | Open — **do not build the abstraction until an answer exists** (AP-11) |
-| OQ-05 | Does the Obsidian vault need frontmatter-tag filtering, or are wikilinks + FTS5 enough? | `links` table usage; `PlaybookRepository.search` signature | Open |
-| OQ-06 | Should `dynaflows` ever write to the target repository, or stay read-only? | The tool-grant model for workers; the entire sandboxing question | Open — a "no" here is a negative ADR worth writing explicitly |
+| OQ-04 | Is an offline/local tracing backend required, or is LangSmith a hard dependency? | `gateway/telemetry.py` abstraction — or its absence | **Resolved 2026-09-10 → ADR-015.** Hard dependency; no abstraction. |
+| OQ-05 | Does the Obsidian vault need frontmatter-tag filtering, or are wikilinks + FTS5 enough? | `links` table usage; `PlaybookRepository.search` signature | **Resolved 2026-09-10 → ADR-009 amendment.** No vault yet; `docs/` only, adjacency deferred. |
+| OQ-06 | Should `dynaflows` ever write to the target repository, or stay read-only? | The tool-grant model for workers; the entire sandboxing question | **Resolved 2026-09-10 → ADR-016.** Read-only. Sandboxing out of scope. |
 | OQ-07 | Do worker provider calls need an idempotency key, or is checkpoint granularity sufficient to prevent double-billing on crash-resume? | `gateway.call()` signature; whether `WorkerResult` is written before or after the superstep commits | **Resolved 2026-09-10 → ADR-013.** Content-addressed cache in the gateway. Note the accepted reasoning is iteration speed, not crash cost. |
 
 **Decision order (current, and it has already been corrected once):**
 
-`OQ-07 ✓ → OQ-01 → OQ-03 ✓ → OQ-02 → OQ-06 → OQ-05 → OQ-04`  — remaining: OQ-01, OQ-02, OQ-06, OQ-05, OQ-04
+`OQ-07 ✓ → OQ-01 → OQ-03 ✓ → OQ-02 → OQ-06 ✓ → OQ-05 ✓ → OQ-04 ✓`
+
+**Remaining: OQ-01 and OQ-02 — and neither is answerable by deciding.** OQ-01 needs the step 1.8
+measurement; OQ-02 needs a real task that a flat map cannot express. Both have reversal conditions
+recorded above. Nothing in Phase 1 is blocked by either.
 
 *Re-ordering note (2026-08-30).* The initial order put OQ-01 (model ids) first, because it feels like
 the foundational choice. It is not: **OQ-03 dominates it.** `MAX_FANOUT` determines the requests-per-
@@ -1182,6 +1277,16 @@ one that names its holes.
   ADRs are intentions, and this line is here so nobody reads them as descriptions.
 - ADR-014's two numbers (12 and 6) have no measurement behind them at all. Step 1.8 is where they
   stop being guesses.
+- ADR-016 is currently unenforced. The lint and `tests/architecture/test_worker_write_boundary.py`
+  it names arrive in step 1.6, with their subject. Until then it is a rule with nothing reading code,
+  which is precisely the state AP-19 says not to mistake for a guarantee.
+- The `frontier` tier has a chain of one, so ADR-010's tier-fallback layer is inert for the tier
+  where failure is most expensive — the planner runs before the fan-out, so a 429 there ends the run
+  before any work happens. A second entry from a different family is a config change, not a code one.
+- ADR-006 checks capability homogeneity in two dimensions (structured output, context length) and not
+  a third: **latency class**. A `:batch` endpoint behind an interactive one would silently convert an
+  interactive run into a batch job, with a human waiting at gate G2. `--suggest` does not yet exclude
+  `:batch` the way it excludes `:free`.
 - **Idempotency is unresolved (OQ-07).** ADR-007 makes *gate* re-execution safe. It says nothing about
   a `worker` node re-executing after a crash and re-issuing a billed provider call. §3.3 says this
   needs an idempotency key; this document does not yet specify one. Named here rather than left to be
