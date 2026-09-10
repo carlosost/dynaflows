@@ -154,6 +154,31 @@ def context(
 
 
 @app.command()
+def cache(
+    clear: Annotated[bool, typer.Option("--clear", help="Delete every cached response.")] = False,
+) -> None:
+    """Inspect or clear the response cache (ADR-013).
+
+    Clearing is the manual remedy for the limitation the ADR records: a
+    provider can change the model behind a pinned id without changing the id
+    -- AP-05's exact shape -- and nothing detects a silent behavioural change.
+    """
+    from dynaflows.gateway.cache import ResponseCache, connect_cache
+
+    settings = get_settings()
+    connection = connect_cache(settings.calls_db)
+    try:
+        store_ = ResponseCache(connection)
+        if clear:
+            removed = store_.clear()
+            console.print(f"[green]Cleared[/] {removed} cached response(s).")
+            return
+        console.print(f"{store_.count()} cached response(s) in {settings.calls_db}")
+    finally:
+        connection.close()
+
+
+@app.command()
 def models(
     suggest: Annotated[
         bool, typer.Option("--suggest", help="Print a models.toml block from the live catalogue.")

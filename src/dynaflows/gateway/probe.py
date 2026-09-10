@@ -11,10 +11,10 @@ This is Phase 0's entire provider surface. The resiliency ladder is 1.2.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import httpx
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field
 
 from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 from dynaflows.settings import Settings
@@ -108,34 +108,48 @@ class ProbeResult:
 def probe_structured(settings: Settings, model_id: str) -> ProbeResult:
     """One traced, schema-enforced call. Never raises; reports instead.
 
-    `require_parameters` routes only to providers that actually implement
-    json_schema for this model -- ADR-006. Without it OpenRouter may fall back
-    to a provider that ignores the schema, which is the failure this whole
-    probe exists to detect.
+    Runs THROUGH the gateway rather than beside it. An earlier version built
+    its own ChatOpenAI here, which would have made two implementations of "call
+    the provider" -- the AP-11 shape, where a fix applied to one has no effect
+    on the other. Retries and cache are disabled so the doctor measures the
+    provider, not the ladder.
     """
+    import asyncio
+
+    from dynaflows.contracts.calls import CallRequest
+    from dynaflows.contracts.tiers import Tier
+    from dynaflows.gateway.cache import NullCache
+    from dynaflows.gateway.client import GatewayClient
+    from dynaflows.gateway.invoker import build_langchain_invoker
+    from dynaflows.gateway.registry import TierChain, load_registry
+
+    registry = load_registry(settings.models_config)
+    # Probe THIS model, whatever the tier's chain says.
+    pinned = replace(
+        registry, tiers={**registry.tiers, Tier.SMALL: TierChain(Tier.SMALL, "probe", (model_id,))}
+    )
+    gateway = GatewayClient(
+        registry=pinned,
+        invoker=build_langchain_invoker(settings),
+        cache=NullCache(),
+        max_attempts=1,
+        timeout_seconds=settings.timeout_seconds,
+    )
+    request = CallRequest(
+        tier=Tier.SMALL,
+        prompt="Reply with ok=true and model_said set to the single word: handshake",
+        schema=_Handshake,
+        label="doctor.probe_structured",
+        metadata=(("tier_probe", "true"),),
+    )
     try:
-        from langchain_openai import ChatOpenAI
-
-        llm = ChatOpenAI(
-            model=model_id,
-            api_key=SecretStr(settings.openrouter_api_key) if settings.openrouter_api_key else None,
-            base_url=settings.openrouter_base_url,
-            timeout=settings.timeout_seconds,
-            max_retries=0,
-            extra_body={"provider": {"require_parameters": True}},
-        ).with_structured_output(_Handshake)
-
-        result = llm.invoke(
-            "Reply with ok=true and model_said set to the single word: handshake",
-            config={
-                "run_name": "doctor.probe_structured",
-                "tags": ["doctor", "phase-0"],
-                "metadata": {"model_id": model_id, "tier_probe": True},
-            },
-        )
+        result = asyncio.run(gateway.call(request))
+    except DynaflowsError as exc:
+        return ProbeResult(model_id, False, str(exc))
     except Exception as exc:  # noqa: BLE001 -- a doctor check reports, never propagates
         return ProbeResult(model_id, False, f"{type(exc).__name__}: {exc}")
 
-    if not isinstance(result, _Handshake):
-        return ProbeResult(model_id, False, f"schema not honoured; got {type(result).__name__}")
-    return ProbeResult(model_id, True, f"structured output honoured (said: {result.model_said!r})")
+    payload = result.payload
+    if not isinstance(payload, _Handshake):
+        return ProbeResult(model_id, False, f"schema not honoured; got {type(payload).__name__}")
+    return ProbeResult(model_id, True, f"structured output honoured (said: {payload.model_said!r})")

@@ -98,6 +98,12 @@ class Settings:
         return self.home / "playbook.db"
 
     @property
+    def calls_db(self) -> Path:
+        """ADR-013.1: separate from state.db, so clearing the cache to force
+        fresh calls can never destroy a resumable run."""
+        return self.home / "calls.db"
+
+    @property
     def playbook_root(self) -> Path:
         """The runtime retrieval corpus. ADR-009 amendment: docs/ only.
 

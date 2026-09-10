@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 8)
+**Last updated:** 2026-09-10 (rev 9)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -533,6 +533,28 @@ Two different questions need two different limits.
    (b) on `ValidationError`, exactly one repair call at **Small** tier with the validation error
    appended, because repairing JSON is a formatting task, not a reasoning task; (c) on second failure,
    return `status="failed"` — **never raise into the graph.**
+
+**Amendment, 2026-09-10 (step 1.2 implementation). Two corrections and one addition.**
+
+1. **Retry is hand-rolled; `tenacity` is removed from the dependencies.** The ladder needs three
+   things at once — honour `Retry-After`, full jitter, and an *injected sleeper* so the deterministic
+   tier never actually waits. That is about twenty-five lines written directly and a wrapper fight
+   otherwise. `tenacity` was declared in Phase 0 and never imported; a dependency nothing uses is the
+   same drift AP-19 describes, so it is gone rather than left as a claim.
+
+2. **A fatal error aborts the chain instead of walking it.** The layer order above says "on exhausted
+   retries, advance to the next model", which is right for a rate limit and wrong for a 401. An
+   authentication failure, a config error or an exceeded budget is not about *this* model: falling
+   through repeats it once per chain entry and reports the last one instead of the real one. With a
+   three-model chain in a twelve-way fan-out that is 36 doomed requests before anything says "401".
+   `_FATAL = {AUTH_FAILED, CONFIG_INVALID, BUDGET_EXCEEDED}` short-circuits. `UNKNOWN` deliberately
+   does *not*: an unrecognised failure might be model-specific, so falling through is the safer
+   default. **This was found by a test, not by reasoning** — the assertion was written first and the
+   code failed it.
+
+3. **A schema failure does not open the circuit breaker and does not fall through.** The model
+   answered; it answered badly. Treating bad output as "the model is down" would take a healthy model
+   out of rotation for the cooldown, and layer 8's repair is the right response instead.
 
 **Decision — failures and exclusions are counted apart (AP-20).** Two sinks, two counters, two
 thresholds:
@@ -1100,7 +1122,7 @@ crash-exposure window without ever asking whether re-execution is safe.
 | F-02 Prompt enhancer + gate G1 | `memory/features/feature-02-enhancer.md` | 1 | Not started |
 | F-03 Planner + gate G2 | `memory/features/feature-03-planner.md` | 1 | Not started |
 | F-04 Fan-out workers + resiliency | `memory/features/feature-04-fanout.md` | 1 | Not started |
-| F-11 Gateway response cache (ADR-013) | `memory/features/feature-11-call-cache.md` | 1 (step 1.2) | Spec'd, not started |
+| F-11 Gateway response cache (ADR-013) | `memory/features/feature-11-call-cache.md` | 1 (step 1.2) | **Done** (2026-09-10) |
 | F-05 Structural evaluator + synthesizer | `memory/features/feature-05-synthesis.md` | 1 | Not started |
 | F-06 Rich terminal UX + resume | `memory/features/feature-06-cli-ux.md` | 1 | Not started |
 | F-07 Adversarial verification | — | 2 | Not started |
@@ -1312,6 +1334,13 @@ one that names its holes.
   these characters is unknown at pack time. It leans high on purpose. Calibration path: LangSmith
   reports real token counts per call, so step 1.8 compares estimate to actual and replaces the
   constant with a measured one.
+- `gateway/invoker.py`'s error classifier is **unverified against a live provider**. The status-code
+  and class-name mapping was written from documentation, not from observed exceptions, and the
+  consequences of getting it wrong are not cosmetic: a 401 classified as retryable burns the whole
+  chain, a 429 classified as fatal ends a run that would have succeeded. Eighteen tests drive it with
+  fakes; only real traffic closes it.
+- The cache's ADR-013 limitation is now live code: a provider changing the model behind a pinned id
+  serves stale responses indefinitely. `dynaflows cache --clear` is the remedy and it is manual.
 - ADR-016 is currently unenforced. The lint and `tests/architecture/test_worker_write_boundary.py`
   it names arrive in step 1.6, with their subject. Until then it is a rule with nothing reading code,
   which is precisely the state AP-19 says not to mistake for a guarantee.
