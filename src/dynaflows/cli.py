@@ -398,6 +398,12 @@ def _money(ledger: Any) -> str:
         f"${ledger.usd_spent:.4f} spent, ${ledger.usd_avoided:.4f} avoided by cache, "
         f"{ledger.calls_made} call(s)"
     )
+    if ledger.calls_cached:
+        # Without this, a run that re-used a cached enhancer answer reported
+        # one fewer call than the graph made, and the only way to find out why
+        # was to reproduce the whole thing. A cache hit is a fact about the
+        # run, not an absence.
+        line += f" + {ledger.calls_cached} from cache"
     if ledger.calls_unpriced:
         line += (
             f" -- {ledger.calls_unpriced} unpriced, so the total is a LOWER BOUND."

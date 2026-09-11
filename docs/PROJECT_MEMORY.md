@@ -1619,6 +1619,26 @@ one that names its holes.
   - `source_root` was hardcoded to `settings.project_root`, so **dynaflows could only ever analyse
     its own repository**. `run` and `resume` now take `--root`. That was not a test convenience; the
     tests merely made it visible.
+- **CLOSED 2026-09-11: `merge_cost` silently dropped `calls_unpriced`.** The field was added to
+  `CostLedger` two commits earlier and never added to the reducer, so it was discarded at the first
+  superstep — meaning the "the total is a LOWER BOUND" warning built to surface unpriced calls could
+  not fire in any run with more than one node, which is every run. **Fourth occurrence of the same
+  pattern** after zero tokens, zero cost and `degraded` without a counter: a new fact and a
+  hand-written aggregation list that nobody updated. `merge_cost` now enumerates
+  `dataclasses.fields()`, and `tests/architecture/test_reducers_cover_their_contracts.py` asserts
+  both the property (every field survives a merge) and the shape (the reducer is not a hand-written
+  list), so the next field added fails a test rather than vanishing.
+- **CLOSED 2026-09-11: a zero-byte report counted as output.** Live run `w2` produced a worker whose
+  findings file was empty; it still received a valid `ArtifactRef`, so `produced_something` returned
+  True, `empty_count` stayed 0 and the task reported `ok`. A reference to nothing is nothing:
+  `produced_something` now requires a non-blank summary or an artifact with tokens, and a worker
+  whose `findings` is blank is `degraded` regardless of what it says about its context.
+- **STILL OPEN: the worker output contract does not require evidence.** Run `w2` was the first with
+  real code in front of the workers, and three of four returned a single sentence — "no issues were
+  found" — despite a prompt demanding file, line, impact, severity and evidence per finding.
+  `WorkerReport.findings` is free text, so "I found nothing" and "I looked and here is what I
+  checked" are indistinguishable, and neither can be verified. Making findings a structured list
+  with required citations is the candidate fix and is a design change, not a patch.
 - **The analysed root is not recorded in the checkpoint.** `resume` accepts `--root` and defaults to
   the project root, so resuming a run that used `--root` without passing it again resolves inputs
   somewhere else entirely and the workers quietly analyse the wrong files. The plan is checkpointed;

@@ -16,7 +16,7 @@ load-bearing and easy to lose:
 from __future__ import annotations
 
 import operator
-from dataclasses import replace
+from dataclasses import fields, replace
 from enum import StrEnum
 from typing import Annotated, Literal, TypedDict
 
@@ -146,7 +146,17 @@ class WorkerResult(BaseModel):
 
     @property
     def produced_something(self) -> bool:
-        return self.status != "failed" and bool(self.summary or self.artifact)
+        """Whether this worker actually delivered anything.
+
+        An ArtifactRef is not evidence of output: run `w2` wrote a ZERO-BYTE
+        findings file, got a perfectly valid reference to it, and counted as
+        having produced something -- so `empty_count` stayed 0 and the task
+        reported `ok`. A reference to nothing is nothing.
+        """
+        if self.status == "failed":
+            return False
+        has_artifact = self.artifact is not None and self.artifact.tokens > 0
+        return bool(self.summary.strip()) or has_artifact
 
 
 class EvaluationReport(BaseModel):
@@ -210,17 +220,19 @@ def merge_cost(current: CostLedger, update: CostLedger) -> CostLedger:
     Concurrent branches each contribute their own spend. Anything other than a
     sum here loses money that was actually spent, which would make the budget
     ceiling and the G2 estimate both wrong.
+
+    Written as a loop over the dataclass fields rather than ten hand-written
+    additions. The hand-written version omitted `calls_unpriced` for two
+    commits -- added to the ledger, never added here -- so every unpriced call
+    was discarded at the first merge and the "LOWER BOUND" warning built to
+    surface them could not fire in a real run. Enumerating the fields by hand
+    is a list that must be updated in two places, and it was not.
     """
     return CostLedger(
-        usd_spent=current.usd_spent + update.usd_spent,
-        usd_avoided=current.usd_avoided + update.usd_avoided,
-        tokens_in=current.tokens_in + update.tokens_in,
-        tokens_out=current.tokens_out + update.tokens_out,
-        calls_made=current.calls_made + update.calls_made,
-        calls_cached=current.calls_cached + update.calls_cached,
-        schema_failures=current.schema_failures + update.schema_failures,
-        calls_skipped=current.calls_skipped + update.calls_skipped,
-        fallbacks=current.fallbacks + update.fallbacks,
+        **{
+            field.name: getattr(current, field.name) + getattr(update, field.name)
+            for field in fields(CostLedger)
+        }
     )
 
 

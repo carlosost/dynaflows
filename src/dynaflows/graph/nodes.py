@@ -386,7 +386,16 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
     # ADR-004 needs that separable from a clean success. `degraded` is what the
     # evaluator counts; hiding it as `ok` is how a run passes while telling the
     # user nothing.
-    incomplete = not report.context_was_sufficient or bool(context.dropped_ids) or bool(refusals)
+    # A worker that wrote nothing did not succeed, whatever it says about its
+    # context. Run `w2`: one worker produced a zero-byte findings file and
+    # three produced one sentence each, and three of the four reported `ok`.
+    wrote_nothing = not report.findings.strip()
+    incomplete = (
+        not report.context_was_sufficient
+        or bool(context.dropped_ids)
+        or bool(refusals)
+        or wrote_nothing
+    )
     return {
         "results": [
             WorkerResult(

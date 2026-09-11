@@ -289,3 +289,39 @@ async def test_a_worker_that_saw_source_is_not_told_that(workspace: Path) -> Non
     await run_worker(a_task(inputs=["src/auth.py"]), gateway, workspace)
 
     assert "NO SOURCE FILES WERE PROVIDED" not in gateway.requests[-1].prompt
+
+
+async def test_a_worker_that_writes_nothing_is_not_ok(workspace: Path) -> None:
+    """Run `w2`: one worker wrote a ZERO-BYTE findings file and three wrote a
+    single sentence each, and three of the four reported `ok`. An empty report
+    is not a clean result."""
+    gateway = FakeGateway()
+    gateway.worker_report = lambda request: WorkerReport(
+        summary="nothing to report", findings="   ", context_was_sufficient=True
+    )
+
+    out = await run_worker(a_task(inputs=["src/auth.py"]), gateway, workspace)
+
+    assert out["results"][0].status == "degraded"
+
+
+async def test_an_empty_artifact_does_not_count_as_output(workspace: Path) -> None:
+    """An ArtifactRef is a reference, not evidence. The zero-byte file had a
+    perfectly valid one, so `empty_count` stayed 0 and nothing noticed."""
+    from dynaflows.contracts.state import ArtifactRef, WorkerResult
+
+    empty = WorkerResult(
+        task_id="t",
+        status="degraded",
+        summary="",
+        artifact=ArtifactRef(sha="abc", path="/tmp/x.md", tokens=0, preview=""),
+    )
+    real = WorkerResult(
+        task_id="t",
+        status="degraded",
+        summary="",
+        artifact=ArtifactRef(sha="abc", path="/tmp/x.md", tokens=120, preview="findings"),
+    )
+
+    assert empty.produced_something is False
+    assert real.produced_something is True
