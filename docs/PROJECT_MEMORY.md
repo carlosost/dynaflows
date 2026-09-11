@@ -1386,25 +1386,31 @@ one that names its holes.
   these characters is unknown at pack time. It leans high on purpose. Calibration path: LangSmith
   reports real token counts per call, so step 1.8 compares estimate to actual and replaces the
   constant with a measured one.
-- **OPEN: the planner's structured call has never completed against a live provider.** The 402 blocked
-  it once; the retry died inside the openai SDK with `'NoneType' object is not iterable`, raised at
-  `parse_chat_completion` where it does `for choice in chat_completion.choices` — so OpenRouter
-  returned a body whose `choices` was null. What is now *known*, not assumed:
-  - `dynaflows probe openai/gpt-5.6-luna-pro` returns HTTP 200, `finish_reason: stop`, valid
-    schema-conforming JSON, 45 reasoning tokens. The model, the key, the credit balance,
-    `require_parameters` and `json_schema` all work.
-  - **The reasoning-budget hypothesis was wrong.** It was recorded here as the leading explanation
-    and the probe falsified it in one command. Kept in the record because a hypothesis that was
-    plausible, load-bearing and false is exactly what this section is for.
-  - `with_structured_output(method="json_schema")` does **not** send a JSON schema of our making.
-    `_convert_to_openai_response_format` returns the pydantic CLASS unchanged, LangChain binds the
-    class, and the openai SDK converts it with `type_to_response_format_param` and calls its native
-    `.parse()` helper. There are two converters in the path and only the second reaches the wire.
-    Both generated schemas were inspected offline and are valid strict JSON Schema, `$defs` included.
-  - Remaining differences between the working probe and the failing call: a 15,402-char system prompt
-    (~4,280 tokens) and a nested schema. `dynaflows diagnose plan` sends exactly that payload twice —
-    once as a bare POST, once through the production path — so the next live run separates a payload
-    fault from an SDK fault instead of adding a fourth hypothesis.
+- **CLOSED 2026-09-11: `'NoneType' object is not iterable`. Root cause was an SDK rename (AP-05).**
+  `ChatOpenAI` renames a constructor `max_tokens` to `max_completion_tokens` unconditionally
+  (`langchain_openai/chat_models/base.py`, `_default_params` and `_get_request_payload`). ADR-006
+  sends `provider.require_parameters: true`, OpenRouter does not recognise that parameter name for
+  these endpoints, and the routing funnel drops every candidate at `Filter by Parameters`. Two
+  models, two different symptoms for the same fault: `nex-agi/nex-n2.5-mini:free` returned a clean
+  404 naming the failed routing step; `openai/gpt-5.6-luna-pro` returned **HTTP 200 with
+  `choices: null`**, which the openai SDK's `parse_chat_completion` iterated, producing a bare
+  `TypeError` that named neither the parameter nor the rename. Fix: `max_tokens` now travels in
+  `extra_body`, which is merged into the request body verbatim, so the name chosen is the name sent.
+  **The 402 fix introduced this.** Before `default_max_tokens = 4096`, no `max_tokens` was ever set,
+  so nothing was renamed and nothing was filtered — a fix whose blast radius was one line wider than
+  the reasoning behind it (§1.3).
+  What this cost, recorded because the cost is the lesson:
+  - **Two wrong hypotheses, both plausible, both expensive.** First: the model is a reasoner and
+    4096 max_tokens left nothing for the answer. Second: `include_raw=True`, added in the
+    immediately preceding commit, was the trigger — a strong temporal correlation that was pure
+    coincidence. Neither survived a diagnostic. Correlation with the last commit is the most
+    seductive false lead there is, and it was wrong twice in a row here.
+  - **`probe` could not find it because it tested a different call.** It differed from the failing
+    call in three ways at once. `diagnose` was built to differ in none, and answered in one run.
+  - **261 tests could not find it because every one of them stops at the invoker seam.** The fakes
+    see `max_tokens`; the wire sees `max_completion_tokens`. `tests/architecture/test_wire_payload.py`
+    now asserts the exact top-level payload key set and was confirmed to fail against the old code
+    before being kept. It is designed to fail on an SDK upgrade: that failure is the notification.
 - `gateway/invoker.py`'s error classifier has now met exactly ONE real failure (402) and was wrong
   about it. 429, 401, 500 and timeout remain unverified against live traffic — and the 402 is the
   reason to treat that as a real gap rather than a formality.

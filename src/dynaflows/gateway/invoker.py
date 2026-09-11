@@ -203,9 +203,54 @@ def langchain_response_format(schema: Any) -> dict[str, Any]:
     return dict(converted)
 
 
+def build_chat_client(settings: Settings, model_id: str, request: CallRequest) -> Any:
+    """Construct the provider chat client. The ONLY place it happens (ADR-010).
+
+    Module level rather than inline in the invoker's closure for one reason:
+    a test has to be able to ask what this will put on the wire. The live
+    failure that motivated it was a parameter LangChain renamed between this
+    constructor and the HTTP request, which no fake-based test can observe.
+    """
+    from langchain_openai import ChatOpenAI  # noqa: PLC0415
+
+    kwargs: dict[str, Any] = {}
+    if request.temperature is not None:
+        kwargs["temperature"] = request.temperature
+
+    # ADR-006: route only to providers that actually implement json_schema for
+    # this model, instead of one that ignores it.
+    extra_body: dict[str, Any] = {"provider": {"require_parameters": True}}
+    if request.max_tokens is not None:
+        # AP-05, observed live. Passing max_tokens to the ChatOpenAI
+        # CONSTRUCTOR does not send max_tokens: LangChain renames it to
+        # `max_completion_tokens` on the way out (base.py `_default_params`
+        # and `_get_request_payload`, unconditionally). OpenRouter's
+        # require_parameters filter does not recognise that name for these
+        # endpoints, drops every candidate, and reports it as a 404 "Filter by
+        # Parameters" for one model and a 200 with `choices: null` for another
+        # -- which surfaced as "'NoneType' object is not iterable" from inside
+        # the openai SDK, naming neither the parameter nor the rename.
+        #
+        # extra_body is merged into the request body verbatim, so the name
+        # chosen here is the name that reaches the provider.
+        extra_body["max_tokens"] = request.max_tokens
+
+    return ChatOpenAI(
+        model=model_id,
+        api_key=SecretStr(settings.openrouter_api_key) if settings.openrouter_api_key else None,
+        base_url=settings.openrouter_base_url,
+        timeout=settings.timeout_seconds,
+        # Retry lives in the ladder, which honours Retry-After and records
+        # attempts in the trace. A second retry loop inside the SDK would
+        # multiply both silently.
+        max_retries=0,
+        extra_body=extra_body,
+        **kwargs,
+    )
+
+
 def build_langchain_invoker(settings: Settings) -> Any:
-    """The production invoker. The ONLY construction of a chat client."""
-    from langchain_openai import ChatOpenAI
+    """The production invoker. Constructs nothing itself; see build_chat_client."""
 
     async def invoke(model_id: str, request: CallRequest) -> RawResponse:
         messages: list[tuple[str, str]] = []
@@ -213,26 +258,8 @@ def build_langchain_invoker(settings: Settings) -> Any:
             messages.append(("system", request.system))
         messages.append(("human", request.prompt))
 
-        kwargs: dict[str, Any] = {}
-        if request.temperature is not None:
-            kwargs["temperature"] = request.temperature
-        if request.max_tokens is not None:
-            kwargs["max_tokens"] = request.max_tokens
+        chat = build_chat_client(settings, model_id, request)
 
-        chat = ChatOpenAI(
-            model=model_id,
-            api_key=SecretStr(settings.openrouter_api_key) if settings.openrouter_api_key else None,
-            base_url=settings.openrouter_base_url,
-            timeout=settings.timeout_seconds,
-            # Retry lives in the ladder, which honours Retry-After and records
-            # attempts in the trace. A second retry loop inside the SDK would
-            # multiply both silently.
-            max_retries=0,
-            # ADR-006: route only to providers that actually implement
-            # json_schema for this model, instead of one that ignores it.
-            extra_body={"provider": {"require_parameters": True}},
-            **kwargs,
-        )
         # with_structured_output returns a Runnable, not a ChatOpenAI. Binding
         # it to a separate name keeps the type honest instead of widening the
         # first one to Any to make the assignment fit.
