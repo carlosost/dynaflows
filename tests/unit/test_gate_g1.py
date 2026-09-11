@@ -18,7 +18,7 @@ from dynaflows.contracts.state import GateDecision, initial_state
 from dynaflows.contracts.tiers import Tier
 from dynaflows.graph import build_graph, open_checkpointer
 from dynaflows.graph.prompts import EnhancedPrompt
-from tests.conftest import FakeGateway
+from tests.conftest import FakeGateway, make_playbook
 
 pytestmark = [pytest.mark.deterministic, pytest.mark.anyio]
 
@@ -29,7 +29,18 @@ def anyio_backend() -> str:
 
 
 def cfg(thread: str, gateway: FakeGateway, **extra: object) -> dict:
-    return {"configurable": {"thread_id": thread, "gateway": gateway, **extra}}
+    return {
+        "configurable": {
+            "thread_id": thread,
+            "gateway": gateway,
+            "playbook": make_playbook(),
+            # G1 is the subject here; G2 is auto-approved so it never appears.
+            # Merged, not overridden: a test that adds "prompt" must not
+            # accidentally re-enable G2 and hang on a gate it never asked for.
+            "auto_approve": ["plan", *(extra.pop("auto_approve", []) or [])],  # type: ignore[misc]
+            **extra,
+        }
+    }
 
 
 async def run_to_gate(saver, thread: str, gateway: FakeGateway, prompt: str = "audit auth"):  # noqa: ANN001, ANN201
@@ -45,7 +56,7 @@ async def test_the_enhancer_runs_at_small_tier_and_halts_at_the_gate(tmp_path: P
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
         _, out = await run_to_gate(saver, "t1", gateway)
-    assert gateway.calls == 1
+    assert gateway.enhancer_calls == 1
     assert gateway.requests[0].tier is Tier.SMALL
     assert gateway.requests[0].schema is EnhancedPrompt
     assert "__interrupt__" in out
@@ -94,7 +105,7 @@ async def test_resuming_does_not_re_run_the_enhancer(tmp_path: Path) -> None:
     async with open_checkpointer(db) as saver:
         graph = build_graph(saver)
         final = await graph.ainvoke(Command(resume={"decision": "approve"}), cfg("t4", gateway))
-    assert gateway.calls == 1, "the enhancer was paid for twice"
+    assert gateway.enhancer_calls == 1, "the enhancer was paid for twice"
     assert final["enhanced_prompt"] == shown, "the approved text is not the text that proceeded"
 
 
@@ -130,7 +141,7 @@ async def test_edit_replaces_the_model_text_without_asking_again(tmp_path: Path)
             cfg("t7", gateway),
         )
     assert final["enhanced_prompt"] == "my wording"
-    assert gateway.calls == 1
+    assert gateway.enhancer_calls == 1
 
 
 async def test_reject_ends_the_run_before_anything_else_is_spent(tmp_path: Path) -> None:
@@ -143,7 +154,7 @@ async def test_reject_ends_the_run_before_anything_else_is_spent(tmp_path: Path)
     assert final["prompt_gate"].decision is GateDecision.REJECT
     assert final["halted"] == "rejected by human at gate G1"
     assert final.get("evaluation") is None, "the run continued past a rejection"
-    assert gateway.calls == 1
+    assert gateway.enhancer_calls == 1
 
 
 async def test_an_unparseable_answer_is_a_rejection_not_an_approval(tmp_path: Path) -> None:
@@ -214,4 +225,4 @@ async def test_a_gateway_in_config_does_not_break_strict_checkpointing(
             Command(resume={"decision": "approve"}), cfg("strict-1", gateway)
         )
     assert final["prompt_gate"].decision is GateDecision.APPROVE
-    assert gateway.calls == 1
+    assert gateway.enhancer_calls == 1

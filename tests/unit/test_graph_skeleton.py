@@ -23,7 +23,7 @@ from dynaflows.contracts.state import (
 )
 from dynaflows.graph import build_graph, open_checkpointer
 from dynaflows.graph.builder import dispatch_workers
-from tests.conftest import FakeGateway
+from tests.conftest import FakeGateway, draft_with, make_playbook
 
 pytestmark = [pytest.mark.deterministic, pytest.mark.anyio]
 
@@ -39,15 +39,19 @@ def a_plan(n: int = 3) -> Plan:
     )
 
 
-def config(thread: str = "th-1") -> dict:
+def config(thread: str = "th-1", gateway: FakeGateway | None = None) -> dict:
     """Every graph invocation needs a gateway now that enhance_prompt is real
     (step 1.4). These tests are about topology, reducers and resume, so the
     gateway is a fake that counts calls and touches nothing."""
     return {
         "configurable": {
             "thread_id": thread,
-            "gateway": FakeGateway(echo=True),
-            "auto_approve": ["prompt"],
+            "gateway": gateway or FakeGateway(echo=True),
+            "playbook": make_playbook(),
+            # These tests are about topology, reducers and resume. Both gates
+            # are auto-approved so they never interrupt here -- the gates have
+            # their own suites.
+            "auto_approve": ["prompt", "plan"],
         }
     }
 
@@ -99,24 +103,28 @@ async def test_concurrent_branches_accumulate_instead_of_overwriting(tmp_path: P
     original = nodes.worker
     nodes.worker = counting_worker  # type: ignore[assignment]
     try:
+        gateway = FakeGateway(echo=True)
+        # Fan-out width comes from the PLAN, and the plan now comes from the
+        # planner -- so the width is configured on the fake, not injected into
+        # state where the planner would overwrite it.
+        gateway.plan_draft = lambda: draft_with(6)
         async with open_checkpointer(tmp_path / "state.db") as saver:
             graph = build_graph(saver)
             state = initial_state("r1", "th-fan", "x")
-            state["plan"] = a_plan(6)
-            final = await graph.ainvoke(state, config("th-fan"))
+            final = await graph.ainvoke(state, config("th-fan", gateway))
     finally:
         nodes.worker = original  # type: ignore[assignment]
 
     assert len(final["results"]) == 6
-    assert {r.task_id for r in final["results"]} == {f"t{i}" for i in range(6)}
+    assert {r.task_id for r in final["results"]} == {f"task-{i}" for i in range(1, 7)}
 
     # The ledger sums the enhancer AND all six branches -- which is the point:
     # a sequential node and six concurrent ones share one reduced key.
     ledger = final["cost"]
-    assert ledger.calls_made == 6 + 1, "6 workers + 1 enhancer"
-    assert ledger.tokens_in == 6 * 10 + 40
-    assert ledger.tokens_out == 6 * 5 + 12
-    assert ledger.usd_spent == pytest.approx(6 * 0.5 + 0.002)
+    assert ledger.calls_made == 6 + 1 + 1, "6 workers + enhancer + planner"
+    assert ledger.tokens_in == 6 * 10 + 2 * 40
+    assert ledger.tokens_out == 6 * 5 + 2 * 12
+    assert ledger.usd_spent == pytest.approx(6 * 0.5 + 2 * 0.002)
 
 
 def test_merge_cost_sums_every_field() -> None:
@@ -218,7 +226,7 @@ def test_a_plan_may_not_exceed_max_fanout() -> None:
     with pytest.raises(ValueError, match="at most"):
         Plan(
             tasks=[
-                PlanTask(task_id=f"t{i}", capability="c", objective="o")
+                PlanTask(task_id=f"t{i}", capability="analyse", objective="o")
                 for i in range(MAX_FANOUT + 1)
             ]
         )
@@ -231,32 +239,34 @@ def test_a_plan_needs_at_least_one_task() -> None:
 
 def test_duplicate_task_ids_are_rejected() -> None:
     with pytest.raises(ValueError, match="unique"):
-        Plan(tasks=[PlanTask(task_id="t", capability="c", objective="o") for _ in range(2)])
+        Plan(tasks=[PlanTask(task_id="t", capability="analyse", objective="o") for _ in range(2)])
 
 
 def test_intra_plan_dependencies_are_rejected_while_oq_02_is_open() -> None:
     """A dependency that is silently ignored produces a plan that runs in the
     wrong order with no error anywhere."""
     with pytest.raises(ValueError, match="OQ-02"):
-        PlanTask(task_id="t", capability="c", objective="o", depends_on=["other"])
+        PlanTask(task_id="t", capability="analyse", objective="o", depends_on=["other"])
 
 
-async def test_a_stub_node_does_not_erase_state_an_earlier_step_set(tmp_path: Path) -> None:
+async def test_a_later_node_does_not_erase_an_earlier_one_s_state(tmp_path: Path) -> None:
     """The regression that motivated the rule in nodes.py's docstring.
 
-    `plan` used to return {"plan": None}, which is a destructive write dressed
-    as a pass-through: it erased an injected plan, the conditional edge saw no
-    tasks, and the fan-out silently never dispatched. "Nothing to contribute"
-    and "the value is None" are different statements.
+    `plan` used to return {"plan": None} -- a destructive write dressed as a
+    pass-through, which erased state an earlier step had set. "Nothing to
+    contribute" and "the value is None" are different statements, and the
+    remaining stubs (worker, synthesize) must keep returning {}.
     """
     async with open_checkpointer(tmp_path / "state.db") as saver:
         graph = build_graph(saver)
-        state = initial_state("r1", "th-stub", "x")
-        state["plan"] = a_plan(2)
+        state = initial_state("r1", "th-stub", "audit the auth layer")
         final = await graph.ainvoke(state, config("th-stub"))
+    # Set by enhance_prompt, six supersteps before the end.
+    assert final["enhanced_prompt"] == "audit the auth layer"
+    assert final["prompt_gate"] is not None
+    # Set by plan, and still intact after evaluate and synthesize ran.
     assert final["plan"] is not None
-    assert len(final["plan"].tasks) == 2
-    assert final["evaluation"].task_count == 2
+    assert final["plan_hash"]
 
 
 async def test_checkpointed_state_round_trips_under_strict_msgpack(
@@ -275,7 +285,6 @@ async def test_checkpointed_state_round_trips_under_strict_msgpack(
     async with open_checkpointer(db) as saver:
         graph = build_graph(saver, interrupt_before=("plan",))
         state = initial_state("r1", "th-strict", "audit auth")
-        state["plan"] = a_plan(2)
         await graph.ainvoke(state, config("th-strict"))
 
     async with open_checkpointer(db) as saver:
@@ -283,9 +292,30 @@ async def test_checkpointed_state_round_trips_under_strict_msgpack(
         snapshot = await graph.aget_state(config("th-strict"))
         # Every one of our types has to survive the round trip, not just str.
         assert snapshot.values["prompt_gate"].proceeds is True
-        assert snapshot.values["plan"].tasks[0].task_id == "t0"
+        assert snapshot.values["plan"] is None  # the breakpoint precedes `plan`
         # The enhancer ran before the breakpoint at `plan`, so its cost is
         # already in the checkpoint -- and had to survive strict deserialisation.
         assert snapshot.values["cost"].calls_made == 1
         final = await graph.ainvoke(None, config("th-strict"))
-    assert final["evaluation"].task_count == 2
+    assert final["evaluation"].task_count == 3
+
+
+# --- the worker catalogue (ADR-001) --------------------------------------
+
+
+def test_a_task_naming_an_unregistered_capability_is_rejected() -> None:
+    """ADR-001: the planner selects from a catalogue, it does not invent.
+
+    Caught at plan time rather than dispatch time: a branch naming a
+    capability no worker implements fails N supersteps later, far from the
+    plan that caused it.
+    """
+    with pytest.raises(ValueError, match="unknown capability"):
+        PlanTask(task_id="t", capability="hallucinated", objective="o")
+
+
+def test_the_registered_capability_is_accepted() -> None:
+    from dynaflows.graph.capabilities import CAPABILITY_IDS
+
+    assert {"analyse"} == CAPABILITY_IDS, "Phase 1 registers exactly what 1.6 implements (AP-11)"
+    assert PlanTask(task_id="t", capability="analyse", objective="o").capability == "analyse"

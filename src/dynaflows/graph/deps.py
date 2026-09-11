@@ -11,6 +11,7 @@ from typing import Any
 from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 
 GATEWAY_KEY = "gateway"
+PLAYBOOK_KEY = "playbook"
 AUTO_APPROVE_KEY = "auto_approve"
 
 
@@ -26,6 +27,18 @@ def gateway_from(config: Any) -> Any:
             "no gateway in config['configurable']; the graph was invoked without one",
         )
     return gateway
+
+
+def playbook_from(config: Any) -> Any:
+    """The retrieval repository (ADR-009). Injected like the gateway, so tests
+    hand the planner a known corpus instead of the real docs/ tree."""
+    repository = configurable(config).get(PLAYBOOK_KEY)
+    if repository is None:
+        raise DynaflowsError.of(
+            ErrorCode.CONFIG_INVALID,
+            "no playbook repository in config['configurable']",
+        )
+    return repository
 
 
 def auto_approved(config: Any, gate: str) -> bool:

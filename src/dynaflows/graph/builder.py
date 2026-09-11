@@ -34,6 +34,14 @@ def after_prompt_gate(state: WorkflowState) -> str:
     return "plan"
 
 
+def after_plan_gate(state: WorkflowState) -> str:
+    """A rejection at G2 ends the run before the fan-out spends anything."""
+    gate = state.get("plan_gate")
+    if gate is not None and gate.decision is GateDecision.REJECT:
+        return END
+    return "dispatch"
+
+
 def dispatch_workers(state: WorkflowState) -> list[Send] | str:
     """Fan out one branch per plan task. ADR-001's variable dimension.
 
@@ -61,7 +69,12 @@ def build_graph(checkpointer: Any = None, *, interrupt_before: tuple[str, ...] =
     builder.add_edge("enhance_prompt", "approve_prompt")
     builder.add_conditional_edges("approve_prompt", after_prompt_gate, ["plan", END])
     builder.add_edge("plan", "approve_plan")
-    builder.add_conditional_edges("approve_plan", dispatch_workers, ["worker", "evaluate"])
+    # Two hops on purpose: the gate decides whether to proceed at all, and
+    # only then does the plan decide the fan-out width. Folding them into one
+    # predicate would mix a human decision with a data-shape decision.
+    builder.add_node("dispatch", lambda state: {})
+    builder.add_conditional_edges("approve_plan", after_plan_gate, ["dispatch", END])
+    builder.add_conditional_edges("dispatch", dispatch_workers, ["worker", "evaluate"])
     builder.add_edge("worker", "evaluate")
     builder.add_edge("evaluate", "synthesize")
     builder.add_edge("synthesize", END)

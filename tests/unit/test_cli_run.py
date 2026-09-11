@@ -17,7 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from dynaflows.cli import app
-from tests.conftest import FakeGateway
+from tests.conftest import FakeGateway, make_playbook
 
 pytestmark = pytest.mark.deterministic
 
@@ -27,6 +27,7 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGateway:
     """A gateway that counts calls, and state written under tmp."""
     gateway = FakeGateway("a precise brief", ["assumed the HTTP layer"])
     monkeypatch.setattr("dynaflows.gateway.client.get_gateway", lambda **_: gateway)
+    monkeypatch.setattr("dynaflows.playbook.get_playbook_repository", lambda **_: make_playbook())
     monkeypatch.setenv("DYNAFLOWS_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     monkeypatch.setenv("LANGSMITH_API_KEY", "test")
@@ -37,15 +38,19 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGateway:
 def test_run_reaches_the_enhancer_with_a_gateway(isolated: FakeGateway) -> None:
     """The regression. Without a gateway in config the node raises
     CONFIG_INVALID and the run produces nothing."""
-    result = CliRunner().invoke(app, ["run", "audit auth", "--thread", "t1", "--yes-prompt"])
+    result = CliRunner().invoke(
+        app, ["run", "audit auth", "--thread", "t1", "--yes-prompt", "--yes-plan"]
+    )
     assert result.exit_code == 0, result.output
-    assert isolated.calls == 1
+    assert isolated.enhancer_calls == 1
     assert "Completed" in result.output
 
 
 def test_run_halts_at_gate_g1_and_shows_the_rewrite(isolated: FakeGateway) -> None:
     """Answering 'r' at the prompt: the human sees both texts and says no."""
-    result = CliRunner().invoke(app, ["run", "audit auth", "--thread", "t2"], input="r\n")
+    result = CliRunner().invoke(
+        app, ["run", "audit auth", "--thread", "t2", "--yes-plan"], input="r\n"
+    )
     assert "audit auth" in result.output
     assert "a precise brief" in result.output
     assert "assumed the HTTP layer" in result.output
@@ -54,22 +59,26 @@ def test_run_halts_at_gate_g1_and_shows_the_rewrite(isolated: FakeGateway) -> No
 
 
 def test_approving_at_the_gate_completes_the_run(isolated: FakeGateway) -> None:
-    result = CliRunner().invoke(app, ["run", "audit auth", "--thread", "t3"], input="a\n")
+    result = CliRunner().invoke(
+        app, ["run", "audit auth", "--thread", "t3", "--yes-plan"], input="a\n"
+    )
     assert result.exit_code == 0, result.output
     assert "Completed" in result.output
-    assert isolated.calls == 1
+    assert isolated.enhancer_calls == 1
 
 
 def test_a_rejection_reports_what_it_cost_before_stopping(isolated: FakeGateway) -> None:
     """ADR-005: the value of gating at G1 is that a 'no' costs one small-tier
     call. Saying so out loud is how that stays true."""
-    result = CliRunner().invoke(app, ["run", "audit auth", "--thread", "t4"], input="r\n")
+    result = CliRunner().invoke(
+        app, ["run", "audit auth", "--thread", "t4", "--yes-plan"], input="r\n"
+    )
     assert "spent $0.0020" in result.output
 
 
 def test_yes_prompt_never_asks(isolated: FakeGateway) -> None:
     result = CliRunner().invoke(
-        app, ["run", "audit auth", "--thread", "t5", "--yes-prompt"], input=""
+        app, ["run", "audit auth", "--thread", "t5", "--yes-prompt", "--yes-plan"], input=""
     )
     assert result.exit_code == 0, result.output
     assert "approve" not in result.output.lower()
@@ -80,9 +89,9 @@ def test_resume_continues_a_gated_run_without_re_running_the_enhancer(
 ) -> None:
     """ADR-007 through the CLI, not just the graph."""
     runner = CliRunner()
-    first = runner.invoke(app, ["run", "audit auth", "--thread", "t6"], input="r\n")
+    first = runner.invoke(app, ["run", "audit auth", "--thread", "t6", "--yes-plan"], input="r\n")
     assert first.exit_code == 2
-    assert isolated.calls == 1
+    assert isolated.enhancer_calls == 1
 
 
 def test_resume_on_an_unknown_thread_fails_loudly(isolated: FakeGateway) -> None:
@@ -106,7 +115,7 @@ def test_no_editor_falls_back_to_multiline_and_never_loops(
     monkeypatch.setattr("dynaflows.cli._find_editor", lambda: None)
     result = CliRunner().invoke(
         app,
-        ["run", "audit auth", "--thread", "e1"],
+        ["run", "audit auth", "--thread", "e1", "--yes-plan"],
         input="e\nmy own brief\nsecond line\n.\n",
     )
     assert result.exit_code == 0, result.output
@@ -118,7 +127,9 @@ def test_submitting_nothing_keeps_the_text_instead_of_re_asking(
 ) -> None:
     """The loop. Empty input used to re-prompt forever with no way out."""
     monkeypatch.setattr("dynaflows.cli._find_editor", lambda: None)
-    result = CliRunner().invoke(app, ["run", "audit auth", "--thread", "e2"], input="e\n.\n")
+    result = CliRunner().invoke(
+        app, ["run", "audit auth", "--thread", "e2", "--yes-plan"], input="e\n.\n"
+    )
     assert result.exit_code == 0, result.output
     assert "treating as approve" in result.output
 
@@ -153,10 +164,10 @@ def test_the_edited_text_reaches_the_workflow(
 ) -> None:
     monkeypatch.setattr("dynaflows.cli._find_editor", lambda: None)
     result = CliRunner().invoke(
-        app, ["run", "audit auth", "--thread", "e3"], input="e\nREPLACED BRIEF\n.\n"
+        app, ["run", "audit auth", "--thread", "e3", "--yes-plan"], input="e\nREPLACED BRIEF\n.\n"
     )
     assert result.exit_code == 0, result.output
-    assert isolated.calls == 1, "editing must not re-ask the model"
+    assert isolated.enhancer_calls == 1, "editing must not re-ask the model"
 
 
 def test_resuming_a_finished_thread_says_so_instead_of_claiming_work(
@@ -166,13 +177,15 @@ def test_resuming_a_finished_thread_says_so_instead_of_claiming_work(
     that did not happen. Two different facts, one word: AP-20 in a status line.
     """
     runner = CliRunner()
-    first = runner.invoke(app, ["run", "audit auth", "--thread", "d1", "--yes-prompt"])
+    first = runner.invoke(
+        app, ["run", "audit auth", "--thread", "d1", "--yes-prompt", "--yes-plan"]
+    )
     assert first.exit_code == 0, first.output
 
     again = runner.invoke(app, ["resume", "d1"])
     assert again.exit_code == 0, again.output
     assert "already finished" in again.output
-    assert isolated.calls == 1, "resuming a finished thread must not re-run anything"
+    assert isolated.enhancer_calls == 1, "resuming a finished thread must not re-run anything"
 
 
 def test_run_and_resume_describe_a_finished_run_the_same_way(
@@ -181,7 +194,7 @@ def test_run_and_resume_describe_a_finished_run_the_same_way(
     """They had grown separate endings and disagreed: `run` showed the task
     summary, `resume` showed nothing. One reporter now."""
     runner = CliRunner()
-    ran = runner.invoke(app, ["run", "audit auth", "--thread", "d2", "--yes-prompt"])
+    ran = runner.invoke(app, ["run", "audit auth", "--thread", "d2", "--yes-prompt", "--yes-plan"])
     resumed = runner.invoke(app, ["resume", "d2"])
     for fragment in ("task(s)", "spent", "call(s)"):
         assert fragment in ran.output, fragment
@@ -189,6 +202,9 @@ def test_run_and_resume_describe_a_finished_run_the_same_way(
 
 
 def test_a_completed_run_reports_what_it_cost(isolated: FakeGateway) -> None:
-    result = CliRunner().invoke(app, ["run", "audit auth", "--thread", "d3", "--yes-prompt"])
-    assert "$0.0020 spent" in result.output
-    assert "1 call(s)" in result.output
+    result = CliRunner().invoke(
+        app, ["run", "audit auth", "--thread", "d3", "--yes-prompt", "--yes-plan"]
+    )
+    # Two calls now: the enhancer and the planner.
+    assert "$0.0040 spent" in result.output
+    assert "2 call(s)" in result.output

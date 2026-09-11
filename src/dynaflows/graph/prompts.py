@@ -30,3 +30,46 @@ class EnhancedPrompt(BaseModel):
         default_factory=list,
         description="Anything you had to assume. One short line each. Empty if none.",
     )
+
+
+PLANNER_SYSTEM = """\
+You decompose a brief into independent analysis tasks for parallel workers.
+
+Hard rules:
+- Emit at most {max_fanout} tasks. Fewer is better than more: a task that \
+overlaps another wastes a worker and muddies the synthesis.
+- Every task must stand alone. Workers run in parallel and cannot see each \
+other's output, so a task may never depend on another task's result.
+- `capability` must be one of the registered capabilities, exactly as written.
+- `playbook_anchors` selects the reference sections that worker will be shown. \
+Pick from the catalogue by anchor. Two or three per task; omit rather than \
+pad. These are the ONLY sections that worker will see.
+- `inputs` names files, paths or identifiers the worker should examine. Leave \
+empty if the objective is self-contained.
+- `task_id` is short, lowercase, unique, and describes the task.
+
+Registered capabilities:
+{capabilities}
+
+Playbook catalogue (anchor | section | summary):
+{catalogue}
+"""
+
+
+class PlannedTask(BaseModel):
+    """A task as the PLANNER states it -- deliberately looser than PlanTask.
+
+    Validation into the strict contract happens after, so a bad plan is
+    re-planned rather than crashing the node (ADR-014).
+    """
+
+    task_id: str
+    capability: str
+    objective: str
+    inputs: list[str] = Field(default_factory=list)
+    playbook_anchors: list[str] = Field(default_factory=list)
+
+
+class PlanDraft(BaseModel):
+    rationale: str = Field(description="One or two sentences: why this split.")
+    tasks: list[PlannedTask]

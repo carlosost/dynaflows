@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-11 (rev 13)
+**Last updated:** 2026-09-11 (rev 14)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -228,6 +228,17 @@ gates on *what is about to run*, not on the phrasing of the request.
 
 **Decision.**
 Two `interrupt()` points:
+
+**Amendment, 2026-09-11 (step 1.5). G2 always interrupts in Phase 1; the cost threshold is deferred.**
+
+The table below says G2 interrupts when `estimated_cost_usd > HITL_PLAN_THRESHOLD_USD`. Implementing
+that needs a price per model, which needs the provider catalogue, which is a network round trip the
+gate should not take — and a **fabricated** price would make the ledger confidently wrong, which is
+worse than visibly incomplete (the same reasoning as `PriceBook` in ADR-010).
+
+So Phase 1 gates every plan, with `--yes-plan` to skip. The gate shows the task list, the anchors
+each worker will be given, and an estimated **token** count, which is derivable without a network
+call. The USD threshold returns in step 1.8 alongside the price data the measurement pass produces.
 
 | Gate | Node | Payload shown | Default behaviour |
 |---|---|---|---|
@@ -1153,7 +1164,7 @@ crash-exposure window without ever asking whether re-execution is safe.
 | F-00 Foundation, doctor, model registry | `memory/features/feature-00-foundation.md` | 0 | **Done** (2026-09-10) |
 | F-01 Playbook indexer + repository | `memory/features/feature-01-playbook-index.md` | 1 (step 1.1) | **Done** (2026-09-10) |
 | F-02 Prompt enhancer + gate G1 | `memory/features/feature-02-enhancer.md` | 1 (step 1.4) | **Done** (2026-09-10) |
-| F-03 Planner + gate G2 | `memory/features/feature-03-planner.md` | 1 | Not started |
+| F-03 Planner + gate G2 | `memory/features/feature-03-planner.md` | 1 (step 1.5) | **Done** (2026-09-11) |
 | F-12 Graph skeleton, state contract, resume | `memory/features/feature-12-graph-skeleton.md` | 1 (step 1.3) | **Done** (2026-09-10) |
 | F-04 Fan-out workers + resiliency | `memory/features/feature-04-fanout.md` | 1 | Not started |
 | F-11 Gateway response cache (ADR-013) | `memory/features/feature-11-call-cache.md` | 1 (step 1.2) | **Done** (2026-09-10) |
@@ -1390,6 +1401,15 @@ one that names its holes.
   LangGraph's runtime `InvalidUpdateError` catches that, which is why a real six-way fan-out runs in
   the deterministic tier rather than only the annotations being inspected. Recorded so the check is
   not mistaken for complete.
+- **ADR-011's feedback loop is NOT implemented.** The ADR calls a G2 rejection writing LangSmith
+  feedback "the single highest-value observability decision in the project", and step 1.5 shipped the
+  gate without it. The blocker is real — the gateway does not yet surface the LangSmith run id that
+  `create_feedback` needs — but the consequence is that every rejection is currently a training
+  signal thrown away. It belongs in step 1.6, where the invoker is being touched anyway.
+- The worker catalogue registers exactly **one** capability, `analyse`. That is AP-11 applied
+  honestly rather than a placeholder: `verify` arrives in Phase 2 with the node that performs it.
+  A twelve-way fan-out of `analyse` tasks with different objectives, inputs and anchors is still
+  Fan-out-and-Synthesize.
 - ADR-016 is currently unenforced. The lint and `tests/architecture/test_worker_write_boundary.py`
   it names arrive in step 1.6, with their subject. Until then it is a rule with nothing reading code,
   which is precisely the state AP-19 says not to mistake for a guarantee.

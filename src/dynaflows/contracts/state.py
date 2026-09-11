@@ -82,6 +82,21 @@ class PlanTask(BaseModel):
     tier_override: Tier | None = None
     depends_on: list[str] = Field(default_factory=list)
 
+    @field_validator("capability")
+    @classmethod
+    def _capability_must_be_registered(cls, value: str) -> str:
+        """ADR-001: the planner selects from a catalogue, it does not invent.
+
+        Validated here rather than trusted, because a task naming a capability
+        no worker implements would dispatch a branch that can only fail -- and
+        it would fail N supersteps later, far from the plan that caused it.
+        """
+        from dynaflows.graph.capabilities import CAPABILITY_IDS
+
+        if value not in CAPABILITY_IDS:
+            raise ValueError(f"unknown capability {value!r}; registered: {sorted(CAPABILITY_IDS)}")
+        return value
+
     @field_validator("depends_on")
     @classmethod
     def _phase_1_is_a_flat_map(cls, value: list[str]) -> list[str]:
@@ -182,6 +197,9 @@ class WorkflowState(TypedDict, total=False):
 
     plan: Plan | None
     plan_hash: str | None
+    # Why planning failed, when it did. Surfaced at G2 instead of a trimmed
+    # plan that looks fine (ADR-014).
+    plan_rejected_reason: str | None
     plan_gate: GateOutcome | None
 
     # --- concurrent keys: reducers are mandatory (see FAN_OUT_KEYS) --------
@@ -209,6 +227,7 @@ def initial_state(run_id: str, thread_id: str, raw_prompt: str) -> WorkflowState
         prompt_gate=None,
         plan=None,
         plan_hash=None,
+        plan_rejected_reason=None,
         plan_gate=None,
         results=[],
         cost=CostLedger(),

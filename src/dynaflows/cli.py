@@ -155,9 +155,44 @@ def context(
     )
 
 
+def _render_plan_gate(payload: dict[str, Any]) -> None:
+    """The task list, in full. ADR-005: this gate exists because approving a
+    well-worded brief tells you nothing about the twelve workers about to run
+    on the wrong twelve files -- so it shows the tasks, not a count of them."""
+    from rich.table import Table
+
+    tasks = payload.get("tasks") or []
+    console.print()
+    console.print(f"[dim]{payload.get('rationale', '')}[/]")
+    table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+    table.add_column("#", width=3)
+    table.add_column("task", no_wrap=True)
+    table.add_column("does", style="bold")
+    table.add_column("objective", overflow="fold")
+    table.add_column("playbook", no_wrap=True)
+    for index, task in enumerate(tasks, start=1):
+        table.add_row(
+            str(index),
+            Text(task.get("task_id", "")),
+            Text(task.get("capability", "")),
+            Text(task.get("objective", "")),
+            Text(" ".join(task.get("anchors") or []) or "—"),
+        )
+    console.print(table)
+    console.print(
+        f"[yellow]{len(tasks)} parallel worker(s)[/], "
+        f"[dim]~{payload.get('estimated_tokens', 0):,} tokens estimated · "
+        f"plan {payload.get('plan_hash', '?')}[/]"
+    )
+
+
 def _render_gate(payload: dict[str, Any]) -> None:
     """Show the human what they are approving, and what it cost them nothing to see."""
     from rich.panel import Panel
+
+    if payload.get("gate") == "plan":
+        _render_plan_gate(payload)
+        return
 
     console.print()
     console.print(
@@ -334,6 +369,9 @@ def run(
     yes_prompt: Annotated[
         bool, typer.Option("--yes-prompt", help="Skip gate G1 (ADR-005).")
     ] = False,
+    yes_plan: Annotated[
+        bool, typer.Option("--yes-plan", help="Skip gate G2. The fan-out runs unreviewed.")
+    ] = False,
 ) -> None:
     """Execute the workflow graph.
 
@@ -347,6 +385,7 @@ def run(
     from dynaflows.gateway.client import get_gateway
     from dynaflows.gateway.telemetry import configure_tracing
     from dynaflows.graph import build_graph, open_checkpointer
+    from dynaflows.playbook import get_playbook_repository
 
     settings = get_settings()
     # ADR-011. LangChain and LangGraph read os.environ directly, and
@@ -366,7 +405,9 @@ def run(
                     # place for them, and the reason a test injects a fake by
                     # passing a config rather than patching an import.
                     "gateway": get_gateway(settings=settings),
-                    "auto_approve": ["prompt"] if yes_prompt else [],
+                    "playbook": get_playbook_repository(),
+                    "auto_approve": (["prompt"] if yes_prompt else [])
+                    + (["plan"] if yes_plan else []),
                 }
             }
             state = initial_state(uuid.uuid4().hex[:8], thread_id, prompt)
@@ -393,6 +434,7 @@ def resume(
     from dynaflows.gateway.client import get_gateway
     from dynaflows.gateway.telemetry import configure_tracing
     from dynaflows.graph import build_graph, open_checkpointer
+    from dynaflows.playbook import get_playbook_repository
 
     settings = get_settings()
     configure_tracing(settings)  # ADR-011; see the note in `run`.
@@ -404,6 +446,7 @@ def resume(
                 "configurable": {
                     "thread_id": thread,
                     "gateway": get_gateway(settings=settings),
+                    "playbook": get_playbook_repository(),
                     "auto_approve": [],
                 }
             }
