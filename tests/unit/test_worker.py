@@ -261,3 +261,31 @@ async def test_one_failing_worker_does_not_take_the_others_with_it(
     assert statuses["task-2"] == "failed"
     assert sum(1 for s in statuses.values() if s == "ok") == 3
     assert final["evaluation"].failed_count == 1
+
+
+# --- the run that passed while a worker invented an audit -----------------
+
+
+async def test_a_worker_with_no_source_is_told_not_to_invent_one(workspace: Path) -> None:
+    """Live run w1: five workers got no source, four said so, and the fifth
+    reported six findings against four files that do not exist -- with line
+    numbers, one of them HIGH severity. "Audit the gateway package" reads like
+    permission to describe what such a package usually contains, so the
+    instruction not to has to be explicit."""
+    gateway = FakeGateway()
+
+    await run_worker(a_task(inputs=[]), gateway, workspace)
+
+    prompt = gateway.requests[-1].prompt
+    assert "NO SOURCE FILES WERE PROVIDED" in prompt
+    assert "line numbers you were not shown" in prompt
+
+
+async def test_a_worker_that_saw_source_is_not_told_that(workspace: Path) -> None:
+    """The warning must not fire on the ordinary path, or it becomes noise the
+    model learns to skip (playbook 5.2, Pattern 5, applied to a prompt)."""
+    gateway = FakeGateway()
+
+    await run_worker(a_task(inputs=["src/auth.py"]), gateway, workspace)
+
+    assert "NO SOURCE FILES WERE PROVIDED" not in gateway.requests[-1].prompt

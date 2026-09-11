@@ -150,18 +150,58 @@ class WorkerResult(BaseModel):
 
 
 class EvaluationReport(BaseModel):
-    """ADR-004: deterministic, no LLM. The judge arrives in Phase 2."""
+    """ADR-004: deterministic, no LLM. The judge arrives in Phase 2.
+
+    Every status a worker can return has a counter here, and the counters must
+    account for every task. That is not tidiness. `degraded` existed for a
+    whole commit with no counter, so a run of five degraded results reported
+    "0 ok, 0 failed" and `passed=True` -- and one of those five had fabricated
+    an audit of four files that do not exist. A fact with no counter becomes
+    silence, and silence reads as good news (AP-20, third occurrence).
+    """
 
     task_count: int
     ok_count: int
     failed_count: int
     empty_count: int
+    degraded_count: int = 0
     passed: bool
     reasons: list[str] = Field(default_factory=list)
 
     @property
     def failure_rate(self) -> float:
         return self.failed_count / self.task_count if self.task_count else 0.0
+
+    @property
+    def accounted_for(self) -> int:
+        """Results this report can explain.
+
+        `empty_count` is deliberately NOT in this sum. ok/degraded/failed are
+        statuses and they partition the results; "empty" is an orthogonal
+        observation -- a degraded result that produced nothing is both, and
+        adding all four double-counts it. The first version of this property
+        did add all four, and a test written at the same time caught it, which
+        is the only reason it is not a fourth wrong number.
+        """
+        return self.ok_count + self.degraded_count + self.failed_count
+
+    @property
+    def unaccounted(self) -> int:
+        return self.task_count - self.accounted_for
+
+    def render(self) -> str:
+        """One line, naming every non-zero fact. A status line that can only
+        say 'ok' and 'failed' cannot describe a degraded run at all."""
+        parts = [f"{self.task_count} task(s)", f"{self.ok_count} ok"]
+        if self.degraded_count:
+            parts.append(f"{self.degraded_count} degraded")
+        if self.failed_count:
+            parts.append(f"{self.failed_count} failed")
+        if self.empty_count:
+            parts.append(f"{self.empty_count} empty")
+        if self.unaccounted:
+            parts.append(f"{self.unaccounted} unaccounted for")
+        return ", ".join(parts) + f", passed={self.passed}"
 
 
 def merge_cost(current: CostLedger, update: CostLedger) -> CostLedger:

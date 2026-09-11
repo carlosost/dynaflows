@@ -416,10 +416,12 @@ def _report(values: dict[str, Any]) -> None:
     console.print("[green]Completed.[/]")
     report = values.get("evaluation")
     if report is not None:
-        console.print(
-            f"[dim]{report.task_count} task(s), {report.ok_count} ok, "
-            f"{report.failed_count} failed, passed={report.passed}[/]"
-        )
+        # report.render(), not a format string here. The old line could say
+        # only ok and failed, so a run of five degraded results printed
+        # "0 ok, 0 failed" -- a sentence describing nothing that happened.
+        console.print(f"[dim]{report.render()}[/]")
+        for reason in report.reasons:
+            console.print(f"[yellow]  - {reason}[/]")
     ledger = values.get("cost")
     if ledger is not None:
         console.print(f"[dim]{_money(ledger)}[/]")

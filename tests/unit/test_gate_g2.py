@@ -308,3 +308,85 @@ async def test_a_planned_task_with_no_result_at_all_does_not_pass() -> None:
     # AP-20: a task that produced nothing is not a task that failed. Counting
     # it as failed would have made the vacuous pass merely a wrong number.
     assert report.failed_count == 0
+
+
+# --- ADR-004 rule 2: a run where nothing succeeded did not succeed --------
+
+
+async def test_a_run_where_every_task_degraded_does_not_pass() -> None:
+    """Live run w1. Five degraded results counted as zero ok and zero failed,
+    `reasons` came out empty, and the run reported passed=True -- while one of
+    the five had invented four source files and a HIGH severity finding.
+
+    Third time a fact without a counter became silence, after the zero-token
+    ledger and the zero-cost ledger. The counter is the fix; this is the test
+    that says the counter has to affect the verdict too.
+    """
+    plan = Plan(
+        rationale="r",
+        tasks=[PlanTask(task_id=f"t{i}", capability="analyse", objective="o") for i in range(5)],
+    )
+    state = {
+        "plan": plan,
+        "results": [
+            WorkerResult(task_id=f"t{i}", status="degraded", summary="hedged") for i in range(5)
+        ],
+    }
+
+    out = await nodes.evaluate(state)  # type: ignore[arg-type]
+    report = out["evaluation"]
+
+    assert report.passed is False
+    assert report.degraded_count == 5
+    assert "no task succeeded cleanly" in " ".join(report.reasons)
+    # The counters must account for every task, or a status vanishes again.
+    assert report.unaccounted == 0
+    assert "5 degraded" in report.render()
+
+
+async def test_a_partly_degraded_run_passes_but_never_silently() -> None:
+    """Not a failure -- some work succeeded. But the degraded ones are exactly
+    the results a reader must not trust equally, so they are never unsaid."""
+    plan = Plan(
+        rationale="r",
+        tasks=[PlanTask(task_id=f"t{i}", capability="analyse", objective="o") for i in range(3)],
+    )
+    state = {
+        "plan": plan,
+        "results": [
+            WorkerResult(task_id="t0", status="ok", summary="grounded"),
+            WorkerResult(task_id="t1", status="ok", summary="grounded"),
+            WorkerResult(task_id="t2", status="degraded", summary="hedged"),
+        ],
+    }
+
+    out = await nodes.evaluate(state)  # type: ignore[arg-type]
+    report = out["evaluation"]
+
+    assert report.passed is False
+    assert report.ok_count == 2
+    assert "1 of 3 task(s) degraded" in " ".join(report.reasons)
+
+
+async def test_every_status_has_a_counter() -> None:
+    """The structural guard. A new WorkerResult status with no counter here
+    would repeat the bug exactly, so the sum is asserted rather than the
+    individual numbers."""
+    plan = Plan(
+        rationale="r",
+        tasks=[PlanTask(task_id=f"t{i}", capability="analyse", objective="o") for i in range(4)],
+    )
+    state = {
+        "plan": plan,
+        "results": [
+            WorkerResult(task_id="t0", status="ok", summary="s"),
+            WorkerResult(task_id="t1", status="degraded", summary="s"),
+            WorkerResult(task_id="t2", status="failed", summary=""),
+            WorkerResult(task_id="t3", status="degraded", summary=""),
+        ],
+    }
+
+    out = await nodes.evaluate(state)  # type: ignore[arg-type]
+    report = out["evaluation"]
+
+    assert report.unaccounted == 0, report.render()

@@ -318,7 +318,7 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
     source_chunks, refusals = read_sources(list(task.inputs), root)
     context = pack([*playbook_chunks, *source_chunks], WORKER_CONTEXT_BUDGET)
 
-    prompt = _worker_prompt(task, context, refusals)
+    prompt = _worker_prompt(task, context, refusals, sources=len(source_chunks))
     try:
         result = await gateway.call(
             CallRequest(
@@ -411,7 +411,13 @@ def _failed(task: PlanTask, exc: DynaflowsError) -> WorkerResult:
     )
 
 
-def _worker_prompt(task: PlanTask, context: ContextPack, refusals: list[SourceRefusal]) -> str:
+def _worker_prompt(
+    task: PlanTask,
+    context: ContextPack,
+    refusals: list[SourceRefusal],
+    *,
+    sources: int,
+) -> str:
     """What the worker is shown, including what it is NOT shown.
 
     The refusals and drops are in the prompt, not only in the trace. A model
@@ -431,17 +437,40 @@ def _worker_prompt(task: PlanTask, context: ContextPack, refusals: list[SourceRe
         parts.append(
             f"CONTEXT TRUNCATED: {len(context.dropped_ids)} section(s) did not fit the budget."
         )
+    if not sources:
+        # The run that motivated this: five workers were given no source at
+        # all, four said so, and the fifth invented four filenames, six
+        # findings and a set of line numbers, one of them HIGH severity. The
+        # honest instruction has to be explicit, because "audit the gateway
+        # package" reads like permission to describe what such a package
+        # usually contains.
+        parts.append(
+            "NO SOURCE FILES WERE PROVIDED.\n"
+            "You have not seen any code. Do not name files, symbols or line "
+            "numbers you were not shown, and do not describe what such code "
+            "usually looks like. Report that you could not examine anything, "
+            "set context_was_sufficient to false, and say what you would need."
+        )
     parts.append("CONTEXT\n" + (context.text or "(nothing was retrievable)"))
     return "\n\n".join(parts)
 
 
 async def evaluate(state: WorkflowState, config: RunnableConfig | None = None) -> dict[str, Any]:
-    """ADR-004: deterministic, no LLM. Step 1.7 fills in the thresholds."""
+    """ADR-004: deterministic, no LLM. Step 1.7 fills in the thresholds.
+
+    The rules below each exist because a run passed when it should not have.
+    They are checked separately and reported separately (AP-20): "nothing came
+    back", "everything came back broken" and "everything came back hedged" are
+    three different failures needing three different answers, and one `passed`
+    flag with one reason string answers none of them.
+    """
     results = state.get("results") or []
     plan_obj = state.get("plan")
     task_count = len(plan_obj.tasks) if plan_obj else len(results)
     failed = sum(1 for r in results if r.status == "failed")
+    degraded = sum(1 for r in results if r.status == "degraded")
     empty = sum(1 for r in results if r.status != "failed" and not r.produced_something)
+    ok = sum(1 for r in results if r.status == "ok")
 
     reasons: list[str] = []
 
@@ -463,11 +492,30 @@ async def evaluate(state: WorkflowState, config: RunnableConfig | None = None) -
     if empty:
         reasons.append(f"{empty} task(s) returned nothing usable")
 
+    # ADR-004 rule 2: a run where nothing succeeded did not succeed.
+    #
+    # The second vacuous pass, and it shipped in the commit that INTRODUCED
+    # `degraded`. Five degraded results counted as zero ok and zero failed, so
+    # `reasons` was empty and the run passed -- while one of those five workers
+    # had invented four source files and reported a HIGH severity finding
+    # against them. "Degraded" has to cost something or it is a synonym for
+    # "fine".
+    if task_count and not ok:
+        reasons.append(
+            f"no task succeeded cleanly ({degraded} degraded, {failed} failed of {task_count})"
+        )
+    elif degraded:
+        # Some succeeded, some did not. Not a failure, but never silent: the
+        # degraded ones are exactly the results a reader must not trust
+        # equally, and the synthesizer says so too (step 1.7).
+        reasons.append(f"{degraded} of {task_count} task(s) degraded")
+
     report = EvaluationReport(
         task_count=task_count,
-        ok_count=sum(1 for r in results if r.status == "ok"),
+        ok_count=ok,
         failed_count=failed,
         empty_count=empty,
+        degraded_count=degraded,
         passed=not reasons,
         reasons=reasons,
     )

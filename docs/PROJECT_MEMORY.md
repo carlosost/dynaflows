@@ -1523,6 +1523,41 @@ one that names its holes.
     table, so a pre-existing `calls.db` would have raised `IntegrityError` at fan-in — inside a
     worker, where ADR-010 says nothing may raise. `connect_cache` now rebuilds the table, copying
     rows rather than dropping them.
+- **CLOSED 2026-09-11: a run passed while a worker fabricated an audit.** Live run `w1`, the first
+  fan-out against real models. Five workers, `0 ok, 0 failed, passed=True`. What actually happened:
+  - The planner emitted **no `inputs` at all**, so ADR-017's resolution had nothing to resolve and
+    every worker received playbook chunks and no code. Four correctly reported "no package named
+    `gateway` was found". **The fifth invented `gateway/logger.py`, `gateway/middleware.py`,
+    `gateway/handlers.py` and `gateway/metrics.py`** — none of which exist anywhere in the repo —
+    with line numbers ("Lines 70–80") and six findings, one rated HIGH severity for sensitive-data
+    leakage. It also set `context_was_sufficient=False`: it admitted it lacked context *and*
+    fabricated findings anyway. **A tool that invents an audit is worse than one that produces
+    nothing**, and nothing in the pipeline objected.
+  - `EvaluationReport` had counters for ok, failed and empty but **not for `degraded`**, which had
+    been introduced in the same commit. Five degraded results summed to zero of everything,
+    `reasons` came out empty, and `passed` was therefore True. Third occurrence of this exact shape
+    after the zero-token ledger and the zero-cost ledger: **a fact with no counter becomes silence,
+    and silence reads as good news.**
+  - Fixes: `degraded_count`; ADR-004 **rule 2** — a run where no task succeeded cleanly does not
+    pass, and a partly degraded run passes but says so; `EvaluationReport.render()`, because the old
+    status line could only say ok and failed and so described a five-degraded run as "0 ok, 0
+    failed"; and an explicit no-source instruction in the worker prompt, since "audit the gateway
+    package" reads to a model like permission to describe what such a package usually contains.
+  - `accounted_for` asserts the status counters partition the results, so a future status with no
+    counter fails a test instead of vanishing. Its first version summed `empty_count` too and
+    double-counted — caught by the test written beside it, which is the only reason it is not a
+    fourth wrong number.
+- **STILL OPEN: the planner names files blind.** It is shown the playbook catalogue and is never
+  shown what the repository contains, so `inputs` is guesswork: on thread `p1` it guessed
+  `src/dynaflows/gateway` correctly, on `w1` it gave up and wrote "verify the package exists" into
+  all five objectives instead. Until the planner can see a source catalogue the way it sees the
+  playbook catalogue, ADR-017's machinery is built and unused, and every fan-out is a fan-out of
+  ungrounded reasoning. This is the next step and it needs an ADR, not a patch.
+- **STILL OPEN: nothing verifies that a finding cites something real.** The no-source prompt is an
+  instruction, not a guarantee, and it does not cover the harder case — a worker that WAS given
+  `auth.py` and cites a line number that is not in it. Phase 2's adversarial verification is the
+  designed answer; until it exists, worker output is unverified by construction and this document
+  should not imply otherwise.
 - **`WORKER_CONTEXT_BUDGET = 6_000`, `MAX_FILE_BYTES = 200_000` and `MAX_FILES_PER_INPUT = 25` are
   placeholders** (§4.5), sized so twelve workers stay inside the 32,000-token floor `doctor`
   enforces. None is measured. Step 1.8 owes all three, and they now sit alongside `MAX_FANOUT`, the
