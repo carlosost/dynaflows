@@ -157,3 +157,38 @@ def test_the_edited_text_reaches_the_workflow(
     )
     assert result.exit_code == 0, result.output
     assert isolated.calls == 1, "editing must not re-ask the model"
+
+
+def test_resuming_a_finished_thread_says_so_instead_of_claiming_work(
+    isolated: FakeGateway,
+) -> None:
+    """`resume` on a completed thread printed "Completed." -- reporting work
+    that did not happen. Two different facts, one word: AP-20 in a status line.
+    """
+    runner = CliRunner()
+    first = runner.invoke(app, ["run", "audit auth", "--thread", "d1", "--yes-prompt"])
+    assert first.exit_code == 0, first.output
+
+    again = runner.invoke(app, ["resume", "d1"])
+    assert again.exit_code == 0, again.output
+    assert "already finished" in again.output
+    assert isolated.calls == 1, "resuming a finished thread must not re-run anything"
+
+
+def test_run_and_resume_describe_a_finished_run_the_same_way(
+    isolated: FakeGateway,
+) -> None:
+    """They had grown separate endings and disagreed: `run` showed the task
+    summary, `resume` showed nothing. One reporter now."""
+    runner = CliRunner()
+    ran = runner.invoke(app, ["run", "audit auth", "--thread", "d2", "--yes-prompt"])
+    resumed = runner.invoke(app, ["resume", "d2"])
+    for fragment in ("task(s)", "spent", "call(s)"):
+        assert fragment in ran.output, fragment
+        assert fragment in resumed.output, fragment
+
+
+def test_a_completed_run_reports_what_it_cost(isolated: FakeGateway) -> None:
+    result = CliRunner().invoke(app, ["run", "audit auth", "--thread", "d3", "--yes-prompt"])
+    assert "$0.0020 spent" in result.output
+    assert "1 call(s)" in result.output

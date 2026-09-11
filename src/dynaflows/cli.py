@@ -300,6 +300,32 @@ async def _drive(graph: Any, cfg: dict[str, Any], first_input: Any) -> dict[str,
         payload_in = Command(resume=_ask_gate(gate_payload))
 
 
+def _report(values: dict[str, Any]) -> None:
+    """How a finished run is described. Shared, so `run` and `resume` cannot
+    drift into describing the same state differently."""
+    halted = values.get("halted")
+    if halted:
+        console.print(f"[red]Stopped.[/] {halted}")
+        ledger = values.get("cost")
+        if ledger is not None:
+            console.print(f"[dim]spent ${ledger.usd_spent:.4f} before stopping[/]")
+        raise typer.Exit(code=2)
+
+    console.print("[green]Completed.[/]")
+    report = values.get("evaluation")
+    if report is not None:
+        console.print(
+            f"[dim]{report.task_count} task(s), {report.ok_count} ok, "
+            f"{report.failed_count} failed, passed={report.passed}[/]"
+        )
+    ledger = values.get("cost")
+    if ledger is not None:
+        console.print(
+            f"[dim]${ledger.usd_spent:.4f} spent, ${ledger.usd_avoided:.4f} avoided by cache, "
+            f"{ledger.calls_made} call(s)[/]"
+        )
+
+
 @app.command()
 def run(
     prompt: Annotated[str, typer.Argument(help="What you want the workflow to do.")],
@@ -354,20 +380,7 @@ def run(
         console.print(f"[yellow]HALTED[/] before {', '.join(outcome['next'])}")
         console.print(f"[dim]resume with:[/] dynaflows resume {thread_id}")
         return
-    halted = outcome["values"].get("halted")
-    if halted:
-        console.print(f"[red]Stopped.[/] {halted}")
-        ledger = outcome["values"].get("cost")
-        if ledger is not None:
-            console.print(f"[dim]spent ${ledger.usd_spent:.4f} before stopping[/]")
-        raise typer.Exit(code=2)
-    report = outcome["values"].get("evaluation")
-    console.print("[green]Completed.[/]")
-    if report is not None:
-        console.print(
-            f"[dim]{report.task_count} task(s), {report.ok_count} ok, "
-            f"{report.failed_count} failed, passed={report.passed}[/]"
-        )
+    _report(outcome["values"])
 
 
 @app.command()
@@ -397,6 +410,11 @@ def resume(
             before = await graph.aget_state(cfg)
             if not before.created_at:
                 return {"missing": True}
+            if not before.next:
+                # Already finished. Saying "Completed." here would report work
+                # that did not happen -- the same two-facts-one-word confusion
+                # AP-20 describes, in a status line.
+                return {"already_done": True, "values": before.values}
             # None as input means "continue from the checkpoint" rather than
             # "start again" -- the whole point of resume.
             await _drive(graph, cfg, None)
@@ -407,10 +425,14 @@ def resume(
     if outcome.get("missing"):
         console.print(f"[red]No checkpoint for thread {thread}.[/]")
         raise typer.Exit(code=1)
+    if outcome.get("already_done"):
+        console.print(f"[dim]Thread {thread} already finished. Nothing to resume.[/]")
+        _report(outcome["values"])
+        return
     if outcome["next"]:
         console.print(f"[yellow]HALTED[/] before {', '.join(outcome['next'])}")
         return
-    console.print("[green]Completed.[/]")
+    _report(outcome["values"])
 
 
 @app.command()
