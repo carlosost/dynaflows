@@ -12,12 +12,16 @@ This is Phase 0's entire provider surface. The resiliency ladder is 1.2.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import httpx
 from pydantic import BaseModel, Field
 
 from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 from dynaflows.settings import Settings
+
+if TYPE_CHECKING:
+    from dynaflows.contracts.calls import CallRequest
 
 _STRUCTURED_FILTER = {"supported_parameters": "structured_outputs"}
 
@@ -103,6 +107,61 @@ class ProbeResult:
     model_id: str
     ok: bool
     detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class SdkAttempt:
+    """What the real call path did, as a value rather than a traceback."""
+
+    ok: bool
+    detail: str
+    tokens_in: int = 0
+    tokens_out: int = 0
+
+
+def call_through_gateway(
+    settings: Settings,
+    model_id: str,
+    request: CallRequest,
+) -> SdkAttempt:
+    """Run ONE CallRequest through the production path, on a pinned model.
+
+    This is the half of a reproduction that must not be re-implemented: if the
+    diagnostic built its own ChatOpenAI, it would prove something about a call
+    the product never makes. Retries and cache off, so one request is one
+    provider call and the failure is not smeared across a chain.
+    """
+    import asyncio  # noqa: PLC0415
+
+    from dynaflows.gateway.cache import NullCache  # noqa: PLC0415
+    from dynaflows.gateway.client import GatewayClient  # noqa: PLC0415
+    from dynaflows.gateway.invoker import build_langchain_invoker  # noqa: PLC0415
+    from dynaflows.gateway.registry import TierChain, load_registry  # noqa: PLC0415
+
+    registry = load_registry(settings.models_config)
+    pinned = replace(
+        registry,
+        tiers={**registry.tiers, request.tier: TierChain(request.tier, "repro", (model_id,))},
+    )
+    gateway = GatewayClient(
+        registry=pinned,
+        invoker=build_langchain_invoker(settings),
+        cache=NullCache(),
+        max_attempts=1,
+        timeout_seconds=settings.timeout_seconds,
+    )
+    try:
+        result = asyncio.run(gateway.call(request))
+    except DynaflowsError as exc:
+        return SdkAttempt(False, str(exc))
+    except Exception as exc:  # noqa: BLE001 -- a diagnostic reports, never propagates
+        return SdkAttempt(False, f"{type(exc).__name__}: {exc}")
+    return SdkAttempt(
+        True,
+        f"{type(result.payload).__name__} returned",
+        tokens_in=result.tokens_in,
+        tokens_out=result.tokens_out,
+    )
 
 
 def probe_structured(settings: Settings, model_id: str) -> ProbeResult:

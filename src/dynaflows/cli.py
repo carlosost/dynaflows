@@ -563,6 +563,142 @@ def probe(
 
 
 @app.command()
+def diagnose(
+    node: Annotated[str, typer.Argument(help="Which node's call to reproduce: enhance | plan")],
+    model: Annotated[str | None, typer.Option(help="Override the model to call.")] = None,
+    brief: Annotated[
+        str, typer.Option(help="The user brief to send.")
+    ] = "Review the error handling in the gateway package.",
+    max_tokens: Annotated[int, typer.Option(help="Output allowance to request.")] = 4096,
+) -> None:
+    """Send a node's EXACT call twice: once bare, once through the real stack.
+
+    `probe` proved the model works. It did not prove that THIS call works,
+    because it sent a two-field schema and no system prompt while the planner
+    sends a nested schema behind a four-thousand-token catalogue. A diagnostic
+    that differs from the failing call in three ways cannot tell you which one
+    matters.
+
+    So: build the node's real system prompt and real schema, ask LangChain for
+    the response_format it would have sent, and fire that at the provider with
+    no SDK in the way. Then fire the same CallRequest through the production
+    path. Exactly one of four things is then true, and each names its own fix.
+    """
+    import json as json_module
+
+    from dynaflows.contracts.calls import CallRequest
+    from dynaflows.contracts.state import MAX_FANOUT
+    from dynaflows.gateway.invoker import langchain_response_format, raw_completion
+    from dynaflows.gateway.probe import call_through_gateway
+    from dynaflows.graph.capabilities import render_catalogue
+    from dynaflows.graph.prompts import (
+        ENHANCER_SYSTEM,
+        PLANNER_SYSTEM,
+        EnhancedPrompt,
+        PlanDraft,
+    )
+    from dynaflows.playbook.repository import get_playbook_repository
+
+    settings = get_settings()
+
+    if node == "enhance":
+        system = ENHANCER_SYSTEM
+        schema: Any = EnhancedPrompt
+        tier = Tier.SMALL
+    elif node == "plan":
+        repository = get_playbook_repository()
+        system = PLANNER_SYSTEM.format(
+            max_fanout=MAX_FANOUT,
+            capabilities=render_catalogue(),
+            catalogue=repository.catalog(),
+        )
+        schema = PlanDraft
+        tier = Tier.FRONTIER
+    else:
+        console.print(f"[red]Unknown node {node!r}. Expected 'enhance' or 'plan'.[/]")
+        raise typer.Exit(code=2)
+
+    from dynaflows.gateway.registry import load_registry
+
+    registry = load_registry(settings.models_config)
+    model_id = model or registry.tiers[tier].chain[0]
+
+    response_format = langchain_response_format(schema)
+    console.print(f"[bold]node[/] {node}   [bold]tier[/] {tier.value}   [bold]model[/] ", end="")
+    console.print(Text(model_id), markup=False)
+    console.print(f"[dim]system prompt[/] {len(system)} chars")
+    console.print("[dim]response_format LangChain would send:[/]")
+    console.print(Text(json_module.dumps(response_format, indent=2)[:2500]), markup=False)
+
+    console.print("\n[bold]1. bare POST, same payload, no SDK[/]")
+    try:
+        status, body = raw_completion(
+            settings,
+            model_id,
+            system=system,
+            prompt=brief,
+            max_tokens=max_tokens,
+            response_format=response_format,
+        )
+    except Exception as exc:  # noqa: BLE001 -- a diagnostic reports, never traces
+        # A transport failure here is a finding, not a crash. Printing a
+        # hundred-line traceback for "no route to the provider" buries the one
+        # line that matters and makes the second half of the diagnostic
+        # unreachable.
+        console.print(f"[red]transport failed[/] {type(exc).__name__}: {exc}")
+        status, body = 0, {}
+    if status == 0:
+        # No response to read. Saying "choices is missing" here would report a
+        # provider fault for a network one.
+        pass
+    elif isinstance(body, str):
+        console.print(f"[dim]HTTP[/] {status}")
+        console.print(Text(body[:2000]), markup=False)
+    else:
+        console.print(f"[dim]HTTP[/] {status}")
+        choices = body.get("choices")
+        if choices:
+            first = choices[0]
+            console.print(f"[dim]finish_reason[/] {first.get('finish_reason')}")
+            content = (first.get("message") or {}).get("content")
+            console.print(Text(str(content)[:1500]), markup=False)
+        else:
+            console.print("[red]choices is missing or null -- this is the failure[/]")
+        if usage := body.get("usage"):
+            console.print(f"[dim]usage[/] {usage}")
+        if error := body.get("error"):
+            console.print("[red]error[/] ", end="")
+            console.print(Text(json_module.dumps(error, indent=2)[:1500]), markup=False)
+
+    console.print("\n[bold]2. same request through the production path[/]")
+    attempt = call_through_gateway(
+        settings,
+        model_id,
+        CallRequest(
+            tier=tier,
+            system=system,
+            prompt=brief,
+            schema=schema,
+            max_tokens=max_tokens,
+            label=f"diagnose.{node}",
+            metadata=(("diagnostic", "true"),),
+        ),
+    )
+    if attempt.ok:
+        console.print(
+            f"[green]OK[/] {attempt.detail} ({attempt.tokens_in} in / {attempt.tokens_out} out)"
+        )
+    else:
+        console.print("[red]FAILED[/] ", end="")
+        console.print(Text(attempt.detail[:2000]), markup=False)
+
+    console.print("\n[dim]How to read this:[/]")
+    console.print("[dim]  both fail  -> the payload; the error body above names which part.[/]")
+    console.print("[dim]  1 ok, 2 fails -> the SDK path, not the provider.[/]")
+    console.print("[dim]  both ok    -> the failure is upstream of the call.[/]")
+
+
+@app.command()
 def cache(
     clear: Annotated[bool, typer.Option("--clear", help="Delete every cached response.")] = False,
 ) -> None:

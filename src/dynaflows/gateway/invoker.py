@@ -114,8 +114,10 @@ def raw_completion(
     model_id: str,
     *,
     prompt: str = "Reply with ok=true and model_said set to the single word: handshake",
+    system: str | None = None,
     max_tokens: int = 4096,
     schema: dict[str, Any] | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any] | str]:
     """One chat/completions POST, bypassing every SDK. Returns (status, body).
 
@@ -124,13 +126,26 @@ def raw_completion(
     provider SDK, which named no cause a user could act on. When the stack
     cannot explain a response, the only honest next step is to look at the
     response (AP-19 habit 3).
+
+    `response_format` overrides `schema` and is passed through verbatim. That
+    is what lets a reproduction send the block LangChain would have sent,
+    rather than a hand-written approximation of it -- the whole value of the
+    comparison is that only ONE thing differs from the failing call.
     """
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
     body: dict[str, Any] = {
         "model": model_id,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "max_tokens": max_tokens,
     }
-    if schema is not None:
+    if response_format is not None:
+        body["response_format"] = response_format
+        body["provider"] = {"require_parameters": True}
+    elif schema is not None:
         body["response_format"] = {
             "type": "json_schema",
             "json_schema": {"name": "probe", "strict": True, "schema": schema},
@@ -147,6 +162,45 @@ def raw_completion(
         return response.status_code, response.json()
     except ValueError:
         return response.status_code, response.text
+
+
+def langchain_response_format(schema: Any) -> dict[str, Any]:
+    """The response_format block that actually reaches OpenRouter.
+
+    Not a reconstruction. There are two converters in this path and only the
+    second one matters: LangChain's `_convert_to_openai_response_format`
+    returns a pydantic CLASS unchanged when given one, and hands it to the
+    openai SDK, which converts it with `type_to_response_format_param` and puts
+    THAT on the wire. A diagnostic built on LangChain's converter would send a
+    pydantic class as JSON and prove nothing.
+
+    Both are private imports. That is the cost of reproducing a call exactly;
+    re-deriving the conversion here would be the AP-11 shape -- a second
+    implementation that drifts from the real one silently, because a
+    reproduction that disagrees with production still looks like a
+    reproduction.
+    """
+    from langchain_core.utils.pydantic import is_basemodel_subclass  # noqa: PLC0415
+    from openai.lib._parsing._completions import (  # noqa: PLC0415
+        type_to_response_format_param,
+    )
+
+    converted: Any
+    if isinstance(schema, type) and is_basemodel_subclass(schema):
+        converted = type_to_response_format_param(schema)
+    else:
+        from langchain_openai.chat_models.base import (  # noqa: PLC0415
+            _convert_to_openai_response_format,
+        )
+
+        converted = _convert_to_openai_response_format(schema, strict=None)
+
+    if not isinstance(converted, dict):
+        raise DynaflowsError.of(
+            ErrorCode.SCHEMA_INVALID,
+            f"conversion returned {type(converted).__name__}, not a response_format block",
+        )
+    return dict(converted)
 
 
 def build_langchain_invoker(settings: Settings) -> Any:
