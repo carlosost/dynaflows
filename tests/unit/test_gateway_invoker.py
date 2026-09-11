@@ -168,3 +168,18 @@ def test_a_response_without_a_remedy_is_not_invented() -> None:
     plain = Fake("APIStatusError", 402)
     plain.body = {"error": {"message": "no metadata here"}}
     assert remedy_of(plain) is None
+
+
+def test_a_malformed_provider_response_is_a_provider_failure_not_unknown() -> None:
+    """OpenRouter can return `choices: null` when an upstream provider fails
+    mid-request; the SDK iterates None and raises a bare TypeError. Live, that
+    surfaced as `UNKNOWN ...: 'NoneType' object is not iterable` -- a message
+    naming no cause, on a code that does not fall through to another model.
+    """
+    assert classify(TypeError("'NoneType' object is not iterable")) is (ErrorCode.MODEL_UNAVAILABLE)
+
+
+def test_an_unrelated_type_error_is_still_unknown() -> None:
+    """The rule is narrow on purpose: widening it would swallow real bugs in
+    our own code as 'the provider is down'."""
+    assert classify(TypeError("unsupported operand type(s)")) is ErrorCode.UNKNOWN

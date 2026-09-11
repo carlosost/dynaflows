@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from pydantic import SecretStr
 
 from dynaflows.contracts.calls import CallRequest, RawResponse
@@ -44,6 +45,15 @@ def classify(exc: BaseException) -> ErrorCode:
     status = getattr(exc, "status_code", None) or getattr(exc, "http_status", None)
     if isinstance(status, int) and status in _STATUS_TO_CODE:
         return _STATUS_TO_CODE[status]
+    # OpenRouter can return a body with `choices: null` when an upstream
+    # provider fails mid-request; the SDK then iterates None and raises a bare
+    # TypeError. That is a provider failure -- worth another model -- not an
+    # unknown one, and "'NoneType' object is not iterable" is a terrible thing
+    # to hand a user.
+    text = str(exc)
+    if isinstance(exc, TypeError) and "NoneType" in text and "iterable" in text:
+        return ErrorCode.MODEL_UNAVAILABLE
+
     name = type(exc).__name__.lower()
     if "ratelimit" in name:
         return ErrorCode.RATE_LIMIT
@@ -97,6 +107,46 @@ def _usage(message: Any) -> dict[str, int]:
         "tokens_in": int(usage.get("input_tokens", 0) or 0),
         "tokens_out": int(usage.get("output_tokens", 0) or 0),
     }
+
+
+def raw_completion(
+    settings: Settings,
+    model_id: str,
+    *,
+    prompt: str = "Reply with ok=true and model_said set to the single word: handshake",
+    max_tokens: int = 4096,
+    schema: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any] | str]:
+    """One chat/completions POST, bypassing every SDK. Returns (status, body).
+
+    A diagnostic, and it exists because of a real failure: a structured call
+    died with "'NoneType' object is not iterable" from somewhere inside the
+    provider SDK, which named no cause a user could act on. When the stack
+    cannot explain a response, the only honest next step is to look at the
+    response (AP-19 habit 3).
+    """
+    body: dict[str, Any] = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+    }
+    if schema is not None:
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "probe", "strict": True, "schema": schema},
+        }
+        body["provider"] = {"require_parameters": True}
+
+    response = httpx.post(
+        f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
+        headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
+        json=body,
+        timeout=settings.timeout_seconds,
+    )
+    try:
+        return response.status_code, response.json()
+    except ValueError:
+        return response.status_code, response.text
 
 
 def build_langchain_invoker(settings: Settings) -> Any:
@@ -154,7 +204,11 @@ def build_langchain_invoker(settings: Settings) -> Any:
                 },
             )
         except Exception as exc:  # noqa: BLE001 -- translated, never propagated raw
-            error = DynaflowsError.of(classify(exc), f"{model_id}: {exc}")
+            # The exception TYPE is half the diagnosis. "'NoneType' object is
+            # not iterable" names no subject; "TypeError: 'NoneType' object is
+            # not iterable" at least says the failure was structural rather
+            # than a provider status code.
+            error = DynaflowsError.of(classify(exc), f"{model_id}: {type(exc).__name__}: {exc}")
             error.retry_after = retry_after_of(exc)  # type: ignore[attr-defined]
             error.remedy = remedy_of(exc)  # type: ignore[attr-defined]
             raise error from exc

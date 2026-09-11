@@ -505,6 +505,64 @@ def resume(
 
 
 @app.command()
+def probe(
+    model: Annotated[str, typer.Argument(help="Model id to probe, e.g. openai/gpt-5.6-luna-pro")],
+    max_tokens: Annotated[int, typer.Option(help="Output allowance to request.")] = 4096,
+    structured: Annotated[
+        bool, typer.Option("--structured/--plain", help="Ask for json_schema output.")
+    ] = True,
+) -> None:
+    """Make ONE raw call to a model and print exactly what comes back.
+
+    No LangChain, no ladder, no cache -- a bare chat/completions POST. When the
+    stack cannot explain a response, the only honest next step is to look at
+    the response rather than reason about it (AP-19 habit 3).
+
+    Diagnostics it answers directly: does this model work at all on this key,
+    does it honour json_schema, what `finish_reason` does it return, and how
+    many of your max_tokens went to reasoning rather than to the answer.
+    """
+    import json as json_module
+
+    from dynaflows.gateway.invoker import raw_completion
+
+    settings = get_settings()
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}, "model_said": {"type": "string"}},
+        "required": ["ok", "model_said"],
+        "additionalProperties": False,
+    }
+    status, body = raw_completion(
+        settings, model, max_tokens=max_tokens, schema=schema if structured else None
+    )
+    console.print(f"[dim]HTTP[/] {status}")
+    if isinstance(body, str):
+        console.print(Text(body[:2000]), markup=False)
+        raise typer.Exit(code=0 if status == 200 else 1)
+
+    choices = body.get("choices")
+    if choices:
+        first = choices[0]
+        message = first.get("message") or {}
+        console.print(f"[dim]finish_reason[/] {first.get('finish_reason')}")
+        content = message.get("content")
+        console.print(f"[dim]content[/] {'<empty>' if not content else ''}")
+        if content:
+            console.print(Text(str(content)[:1200]), markup=False)
+        if message.get("reasoning"):
+            console.print("[yellow]this model returned reasoning content[/]")
+    else:
+        console.print("[red]no choices in the response[/]")
+    if usage := body.get("usage"):
+        console.print(f"[dim]usage[/] {usage}")
+    if error := body.get("error"):
+        console.print(f"[red]error[/] {error}")
+    console.print("\n[dim]full body:[/]")
+    console.print(Text(json_module.dumps(body, indent=2)[:3000]), markup=False)
+
+
+@app.command()
 def cache(
     clear: Annotated[bool, typer.Option("--clear", help="Delete every cached response.")] = False,
 ) -> None:
