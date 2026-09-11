@@ -6,6 +6,7 @@ Phase 0 ships two commands and no workflow: `doctor` proves the environment,
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -965,6 +966,12 @@ def calibrate(
         raise typer.Exit(code=1)
 
 
+# PLACEHOLDER (playbook 4.5): enough to ride out a shared-pool overload, not
+# enough to turn a measurement into a long wait.
+_CALIBRATION_ATTEMPTS = 3
+_CALIBRATION_BACKOFF = 8
+
+
 def _pin_worker(registry: Any, model_id: str) -> Any:
     """Score THIS model, whatever the MID chain says."""
     from dataclasses import replace
@@ -1031,9 +1038,30 @@ def _calibrate_once(
             "source_root": source.parent,
         }
     }
+    # Pinning a model for measurement removes the fallback chain, so a
+    # transient upstream 429 ends the whole run -- which is what happened the
+    # first time a provider was overloaded mid-calibration. Falling back to
+    # another model would be worse than failing: it would silently measure a
+    # different model and label the number with this one. So the same model is
+    # retried, with a backoff, and only a persistent failure is reported.
+    from dynaflows.contracts.errors import ErrorCode  # noqa: PLC0415
+
+    transient = {ErrorCode.RATE_LIMIT, ErrorCode.TIMEOUT, ErrorCode.MODEL_UNAVAILABLE}
     state = {**initial_state("calib", "calib", task.objective), "task": task}
-    out = asyncio.run(nodes.worker(state, config))  # type: ignore[arg-type]
-    result = out["results"][0]
+    result = None
+    for attempt in range(_CALIBRATION_ATTEMPTS):
+        out = asyncio.run(nodes.worker(state, config))  # type: ignore[arg-type]
+        result = out["results"][0]
+        if result.status != "failed":
+            break
+        code = result.error.code if result.error else None
+        if code not in transient:
+            break
+        if attempt + 1 < _CALIBRATION_ATTEMPTS:
+            wait = _CALIBRATION_BACKOFF * (2**attempt)
+            console.print(f"[dim]  {code} from the provider; retrying in {wait}s[/]")
+            time.sleep(wait)
+    assert result is not None
     if result.status == "failed":
         return None, result.error.message if result.error else "failed"
 

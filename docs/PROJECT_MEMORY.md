@@ -2127,6 +2127,18 @@ one that names its holes.
   compared against a total that was structurally always 0.0, so only the token ceiling was ever a
   real guard. It should work now that costs are real, but "should" is the word that produced this
   entry — it stays open until a run is deliberately driven into the USD ceiling and stops.
+- **VERIFIED LIVE 2026-09-11: the 429 path works.** A shared-pool overload on `llama-4-scout`
+  (DeepInfra, `engine_overloaded`) was classified `RATE_LIMIT` and reported with the provider's own
+  `remedy_hint` in the body. The classifier's second real failure, and this time it was right.
+  It also exposed a defect in `calibrate`: pinning a model for measurement removes the fallback
+  chain, so one transient upstream error ended the whole run. Falling back would be worse than
+  failing — it would measure a different model and label the number with this one — so the pinned
+  model is now retried with a backoff instead.
+- **STILL OPEN: `ErrorEnvelope` drops the remedy.** `remedy_of()` extracts the provider's own
+  suggested fix and `DynaflowsError` carries it as a dynamic attribute, but the envelope that
+  crosses into `WorkerResult` has only `code`, `message` and `attempts`. So the one actionable
+  sentence the provider sent is available at the gateway boundary and gone by the time a user reads
+  the failure.
 - `gateway/invoker.py`'s error classifier has now met exactly ONE real failure (402) and was wrong
   about it. 429, 401, 500 and timeout remain unverified against live traffic — and the 402 is the
   reason to treat that as a real gap rather than a formality.
