@@ -36,6 +36,7 @@ class Defect:
 
 @dataclass(frozen=True, slots=True)
 class Scorecard:
+    findings: tuple[Finding, ...]
     found: tuple[str, ...]
     missed: tuple[Defect, ...]
     unplanted: tuple[Finding, ...]
@@ -99,6 +100,7 @@ def score(
             found.append(hit.id)
 
     return Scorecard(
+        findings=tuple(findings),
         found=tuple(found),
         missed=tuple(d for d in defects if d.id not in found),
         unplanted=tuple(unplanted),

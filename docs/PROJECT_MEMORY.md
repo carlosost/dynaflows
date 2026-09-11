@@ -1900,11 +1900,19 @@ one that names its holes.
   and was still wrong by a factor of four for four steps, because **a placeholder nobody exercises is
   indistinguishable from a correct value.** The register told us it was unmeasured; only a run told
   us it was wrong.
-- **STILL OPEN, and now the most important number in the project: worker recall is unmeasured.**
-  Until `dynaflows calibrate` is run against a live model, every "no findings" result in this
-  project's history is uninterpretable, and so is every future one. If recall is zero, the prompt or
-  the tier is the subject and nothing downstream — the synthesizer, Phase 2's verification — has any
-  value.
+- **MEASURED 2026-09-11: worker recall on the calibration fixture is 0/5.** `mistralai/mistral-nemo`
+  — the head of the MID chain, chosen by ADR-006's cost-asymmetry argument — read a 57-line file
+  containing a logged API key, two bare `except` blocks that swallow everything, a retry of a
+  non-retryable error and a discarded root cause, and reported **zero findings with status `ok`**.
+  It examined the file; the artifact says so.
+  **Every "no findings" result in this project's history is therefore uninterpretable**, `s2`
+  included, and so is every future one until recall is non-zero. Nothing downstream — the
+  synthesizer, Phase 2's verification — has any value over a worker that reports nothing.
+  Two candidate causes and they are separable: the model (a 12B model at $0.02/M) or the prompt's
+  asymmetric incentives. `dynaflows calibrate --sweep` scores several models on the same fixture,
+  which is how **OQ-01 stops being an opinion**: ADR-006 assigned the cheapest paid model to the
+  workers on a cost argument that never asked whether that model could do the work. The sweep must
+  run before the prompt is touched, or the two causes become one confounded change.
 - **STILL OPEN: the worker prompt's incentives are asymmetric and were made so deliberately.**
   "Finding nothing is a legitimate result" plus "an unchecked citation is DISCARDED" reward silence.
   The fix is NOT to demand findings, which is what produced `w1`. The candidate is to make what was

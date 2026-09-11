@@ -843,72 +843,71 @@ def sources(
 
 @app.command()
 def calibrate(
-    model: Annotated[str | None, typer.Option(help="Override the worker model.")] = None,
+    model: Annotated[
+        str | None, typer.Option(help="Score one model instead of the tier's.")
+    ] = None,
+    sweep: Annotated[
+        str | None,
+        typer.Option(
+            help="Comma-separated models to score side by side. 'tiers' uses each chain's head."
+        ),
+    ] = None,
     show: Annotated[bool, typer.Option("--show/--quiet", help="Print every finding.")] = False,
 ) -> None:
     """Run a worker against a fixture whose defects are known. ADR-022.
 
     "No findings" is unfalsifiable on its own: a clean codebase and a worker
     that cannot find anything produce identical output, and run `s2` produced
-    exactly that against the gateway package. This plants five defects, runs
-    the REAL worker path over them, and scores what comes back.
+    exactly that against the gateway package.
+
+    `--sweep` scores several models on the same fixture, which is how OQ-01
+    stops being an opinion. ADR-006 assigned the cheapest paid model to the
+    workers on a cost-asymmetry argument that never checked whether that model
+    could do the work.
 
     It measures the worker, not the truth. Five planted defects say nothing
     about the defects nobody planted, and full recall here is a floor rather
     than a ceiling.
     """
-    import asyncio
-
-    from dynaflows.calibration import fixture_paths, load_manifest, score
-    from dynaflows.contracts.state import PlanTask, initial_state
-    from dynaflows.gateway.client import get_gateway
-    from dynaflows.graph import nodes
-    from dynaflows.playbook import get_playbook_repository
-    from dynaflows.store.run_store import RunStore
+    from dynaflows.calibration import fixture_paths, load_manifest
 
     settings = get_settings()
     source, manifest_path = fixture_paths()
     defects = load_manifest(manifest_path)
 
-    task = PlanTask(
-        task_id="calibration",
-        capability="analyse",
-        objective=(
-            "Audit error handling in this file. Report every place an error is swallowed, "
-            "retried when it cannot succeed, stripped of its cause, or exposed in a log."
-        ),
-        inputs=[source.name],
-        playbook_anchors=["AP-09", "§4.1"],
-    )
-    gateway = get_gateway(settings=settings)
-    if model:
-        gateway.registry = _pin_worker(gateway.registry, model)
-    config: dict[str, Any] = {
-        "configurable": {
-            "gateway": gateway,
-            "playbook": get_playbook_repository(),
-            "store": RunStore(settings.home),
-            "source_root": source.parent,
-        }
-    }
+    if sweep:
+        models = _sweep_models(settings, sweep)
+        table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
+        table.add_column("model", no_wrap=True)
+        table.add_column("recall", justify="right")
+        table.add_column("claimed", justify="right")
+        table.add_column("discarded", justify="right")
+        table.add_column("$", justify="right")
+        table.add_column("missed", overflow="fold")
+        for candidate in models:
+            card, result = _calibrate_once(settings, source, defects, candidate)
+            if card is None:
+                table.add_row(Text(candidate), Text("error"), "", "", "", Text(str(result)))
+                continue
+            table.add_row(
+                Text(candidate),
+                Text(f"{len(card.found)}/{card.planted}"),
+                Text(str(card.reported)),
+                Text(f"{card.discarded} ({card.discard_rate:.0%})"),
+                Text(f"{result.cost_usd or 0:.4f}"),
+                Text(", ".join(d.id for d in card.missed) or "—"),
+            )
+        console.print(table)
+        console.print(
+            "[dim]Five planted defects in one file. A floor, not a ceiling, and a score that "
+            "rises after a prompt change may be overfitting to it (ADR-022).[/]"
+        )
+        return
 
-    state = {**initial_state("calib", "calib", task.objective), "task": task}
-    out = asyncio.run(nodes.worker(state, config))  # type: ignore[arg-type]
-    result = out["results"][0]
-
-    findings = []
-    if result.findings_ref is not None:
-        from dynaflows.graph.prompts import Finding
-
-        raw = RunStore(settings.home).read_data(result.findings_ref)
-        findings = [Finding.model_validate(f) for f in raw] if isinstance(raw, list) else []
-
-    card = score(
-        findings,
-        defects,
-        reported=result.findings_reported,
-        discarded=result.findings_reported - result.findings_grounded,
-    )
+    card, result = _calibrate_once(settings, source, defects, model)
+    if card is None:
+        console.print(f"[red]calibration failed[/] {result}")
+        raise typer.Exit(code=2)
 
     console.print(f"[dim]model[/] {result.model_id}   [dim]status[/] {result.status}")
     console.print(
@@ -930,7 +929,7 @@ def calibrate(
             "possibly real, possibly noise[/]"
         )
     if show:
-        for finding in findings:
+        for finding in card.findings:
             console.print(
                 Text(f"  [{finding.severity}] {finding.file}:{finding.lines} {finding.claim}"),
                 markup=False,
@@ -945,6 +944,7 @@ def calibrate(
 
 
 def _pin_worker(registry: Any, model_id: str) -> Any:
+    """Score THIS model, whatever the MID chain says."""
     from dataclasses import replace
 
     from dynaflows.contracts.tiers import Tier
@@ -954,6 +954,79 @@ def _pin_worker(registry: Any, model_id: str) -> Any:
         registry,
         tiers={**registry.tiers, Tier.MID: TierChain(Tier.MID, "calibration", (model_id,))},
     )
+
+
+def _sweep_models(settings: Any, sweep: str) -> list[str]:
+    """Which models to score. 'tiers' takes the head of each configured chain."""
+    if sweep != "tiers":
+        return [m.strip() for m in sweep.split(",") if m.strip()]
+    from dynaflows.gateway.registry import load_registry
+
+    registry = load_registry(settings.models_config)
+    heads = [chain.chain[0] for chain in registry.tiers.values() if chain.chain]
+    return list(dict.fromkeys(heads))
+
+
+def _calibrate_once(
+    settings: Any, source: Path, defects: list[Any], model: str | None
+) -> tuple[Any, Any]:
+    """One worker run over the fixture, through the production node.
+
+    Returns (scorecard, result) or (None, error). A model that cannot be
+    reached is a row in the table, not the end of the sweep: the comparison is
+    the point and one unavailable endpoint should not cost the other four.
+    """
+    import asyncio
+
+    from dynaflows.calibration import score
+    from dynaflows.contracts.state import PlanTask, initial_state
+    from dynaflows.gateway.client import get_gateway
+    from dynaflows.graph import nodes
+    from dynaflows.graph.prompts import Finding
+    from dynaflows.playbook import get_playbook_repository
+    from dynaflows.store.run_store import RunStore
+
+    store = RunStore(settings.home)
+    gateway = get_gateway(settings=settings)
+    if model:
+        gateway.registry = _pin_worker(gateway.registry, model)
+
+    task = PlanTask(
+        task_id="calibration",
+        capability="analyse",
+        objective=(
+            "Audit error handling in this file. Report every place an error is swallowed, "
+            "retried when it cannot succeed, stripped of its cause, or exposed in a log."
+        ),
+        inputs=[source.name],
+        playbook_anchors=["AP-09", "§4.1"],
+    )
+    config: dict[str, Any] = {
+        "configurable": {
+            "gateway": gateway,
+            "playbook": get_playbook_repository(),
+            "store": store,
+            "source_root": source.parent,
+        }
+    }
+    state = {**initial_state("calib", "calib", task.objective), "task": task}
+    out = asyncio.run(nodes.worker(state, config))  # type: ignore[arg-type]
+    result = out["results"][0]
+    if result.status == "failed":
+        return None, result.error.message if result.error else "failed"
+
+    findings: list[Any] = []
+    if result.findings_ref is not None:
+        raw = store.read_data(result.findings_ref)
+        findings = [Finding.model_validate(f) for f in raw] if isinstance(raw, list) else []
+
+    card = score(
+        findings,
+        defects,
+        reported=result.findings_reported,
+        discarded=result.findings_reported - result.findings_grounded,
+    )
+    return card, result
 
 
 @app.command()
