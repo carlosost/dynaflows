@@ -44,6 +44,7 @@ from dynaflows.contracts.state import (
 from dynaflows.contracts.tiers import Tier
 from dynaflows.graph import grounding as grounding_check
 from dynaflows.graph import planner as planning
+from dynaflows.graph import synthesis as synth
 from dynaflows.graph.capabilities import render_catalogue
 from dynaflows.graph.deps import (
     auto_approved,
@@ -56,9 +57,11 @@ from dynaflows.graph.grounding import Grounding
 from dynaflows.graph.prompts import (
     ENHANCER_SYSTEM,
     PLANNER_SYSTEM,
+    SYNTHESIZER_SYSTEM,
     WORKER_SYSTEM,
     EnhancedPrompt,
     PlanDraft,
+    SynthesisDraft,
     WorkerReport,
 )
 from dynaflows.playbook.pack import pack
@@ -368,9 +371,14 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
     seen = [c for c in (*playbook_chunks, *source_chunks) if c.id in context.included_ids]
     grounding = grounding_check.verify(report.findings, seen)
 
+    run_id = state.get("run_id", "unknown")
     try:
-        artifact = store.write(
-            state.get("run_id", "unknown"), task.task_id, _render_findings(report, grounding)
+        artifact = store.write(run_id, task.task_id, _render_findings(report, grounding))
+        # ADR-020: the synthesizer needs claims, not prose it has to parse back
+        # out of markdown. Written here, beside the human report, because state
+        # carries references and not payloads (ADR-008).
+        findings_ref = store.write_data(
+            run_id, task.task_id, [f.model_dump() for f in grounding.kept]
         )
     except OSError as exc:
         # The analysis succeeded and the disk did not. Degraded, not failed:
@@ -423,6 +431,7 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
                 cost_usd=result.cost_usd,
                 findings_reported=grounding.reported,
                 findings_grounded=len(grounding.kept),
+                findings_ref=findings_ref,
             )
         ],
         "cost": ledger,
@@ -586,6 +595,117 @@ async def evaluate(state: WorkflowState, config: RunnableConfig | None = None) -
 
 
 async def synthesize(state: WorkflowState, config: RunnableConfig | None = None) -> dict[str, Any]:
-    """Step 1.7. A degraded synthesis must SAY it is degraded rather than
-    quietly returning a shorter answer."""
-    return {}
+    """The final report. ADR-020: two documents, one computed and one written.
+
+    The computed half is written first and comes entirely from state, so a
+    reader always learns what the run actually did -- even when the model call
+    below fails, returns nothing, or is never made. Asking a model to describe
+    the limits of its own output produces an understatement that reads exactly
+    like an accurate summary, which is why that half is not its to write.
+    """
+    ledger = cost_delta()
+    results = state.get("results") or []
+    evaluation = state.get("evaluation")
+
+    try:
+        store = store_from(config)
+    except DynaflowsError as exc:
+        return {"halted": f"cannot write the synthesis: {exc}", "cost": ledger}
+
+    findings, accounting = synth.collect(results, store.read_data)
+    computed = synth.render_accounting(accounting, evaluation)
+
+    # ADR-020: nothing verified means nothing to synthesise. Paying a frontier
+    # model to write prose about an empty list produces confident prose about
+    # nothing, which is run w1's failure relocated to the last step.
+    if not findings:
+        artifact = store.write(
+            state.get("run_id", "unknown"),
+            "synthesis",
+            f"# No verified findings\n\n{computed}\n",
+        )
+        return {"synthesis": artifact, "cost": ledger}
+
+    try:
+        gateway = gateway_from(config)
+        result = await gateway.call(
+            CallRequest(
+                tier=Tier.FRONTIER,
+                system=SYNTHESIZER_SYSTEM,
+                prompt=(
+                    f"OBJECTIVE\n{state.get('enhanced_prompt') or state.get('raw_prompt', '')}"
+                    f"\n\nVERIFIED FINDINGS\n{synth.render_findings(findings)}"
+                ),
+                schema=SynthesisDraft,
+                max_tokens=3072,
+                label="synthesize",
+                metadata=(
+                    ("run_id", state.get("run_id", "")),
+                    ("node", "synthesize"),
+                    ("findings", str(len(findings))),
+                ),
+            )
+        )
+    except DynaflowsError as exc:
+        # The computed half still ships. The findings are all in the run store
+        # and the reader can see every one of them; losing the summary is a
+        # smaller loss than losing the report.
+        artifact = store.write(
+            state.get("run_id", "unknown"),
+            "synthesis",
+            f"# Synthesis unavailable\n\n{computed}\n\n"
+            f"The summary could not be written: {exc}\n\n"
+            f"{_render_raw_findings(findings)}\n",
+        )
+        return {"synthesis": artifact, "degraded": True, "cost": ledger}
+
+    ledger = _merge_delta(ledger, result)
+    draft: SynthesisDraft = result.payload
+    known = {item.id for item in findings}
+    kept = [s for s in draft.sections if s.finding_ids and set(s.finding_ids) <= known]
+    invented = len(draft.sections) - len(kept)
+
+    artifact = store.write(
+        state.get("run_id", "unknown"),
+        "synthesis",
+        _render_synthesis(draft.headline, kept, invented, findings, computed),
+    )
+    return {
+        "synthesis": artifact,
+        "degraded": bool(invented) or (evaluation is not None and not evaluation.passed),
+        "cost": ledger,
+    }
+
+
+def _render_raw_findings(findings: list[synth.Corroborated]) -> str:
+    return "## Verified findings\n\n" + synth.render_findings(findings)
+
+
+def _render_synthesis(
+    headline: str,
+    sections: list[Any],
+    invented: int,
+    findings: list[synth.Corroborated],
+    computed: str,
+) -> str:
+    """Computed first, written second. The order is the decision.
+
+    A reader who stops after the first screen has seen what the run did rather
+    than a confident summary of part of it.
+    """
+    lines = [f"# {headline}", "", computed, ""]
+    if invented:
+        lines.append(
+            f"> {invented} section(s) were discarded for citing findings that do not exist. "
+            "The synthesizer is a summariser and may not introduce claims (ADR-020)."
+        )
+        lines.append("")
+    lines.append("## Summary")
+    lines.append("")
+    for section in sections:
+        lines.append(f"### {section.heading}")
+        lines.append(section.body)
+        lines.append(f"_Findings: {', '.join(section.finding_ids)}_")
+        lines.append("")
+    lines.append(_render_raw_findings(findings))
+    return "\n".join(lines).rstrip() + "\n"

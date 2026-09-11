@@ -310,3 +310,14 @@ def test_resume_recovers_the_root_the_run_was_planned_against(
     worker_prompts = [r.prompt for r in isolated.requests if r.schema.__name__ == "WorkerReport"]
     assert worker_prompts
     assert "def login" in worker_prompts[0]
+
+
+def test_a_finished_run_says_where_the_report_is(isolated: FakeGateway) -> None:
+    """Counters without a path make the user hunt for their own deliverable."""
+    result = CliRunner().invoke(
+        app, ["run", "audit auth", "--thread", "rp1", "--yes-prompt", "--yes-plan"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "report" in result.output
+    assert "synthesis" in result.output

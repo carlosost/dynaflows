@@ -433,6 +433,14 @@ def _report(values: dict[str, Any]) -> None:
         console.print(f"[dim]{report.render()}[/]")
         for reason in report.reasons:
             console.print(f"[yellow]  - {reason}[/]")
+    synthesis = values.get("synthesis")
+    if synthesis is not None:
+        # The point of the run. Printing counters and not saying where the
+        # report is makes the user go looking for their own deliverable.
+        console.print("[bold]report[/] ", end="")
+        console.print(Text(synthesis.path), markup=False)
+        if synthesis.preview:
+            console.print(Text(synthesis.preview.splitlines()[0][:120]), markup=False)
     ledger = values.get("cost")
     if ledger is not None:
         console.print(f"[dim]{_money(ledger)}[/]")

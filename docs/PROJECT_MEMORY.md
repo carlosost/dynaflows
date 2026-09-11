@@ -1082,6 +1082,53 @@ was in the pack or was not, a line either exists or does not, a quote either app
 
 ---
 
+### ADR-020: The synthesis is two documents — one computed, one written
+
+**Date:** 2026-09-11
+**Status:** Accepted — implements ADR-004's "a degraded synthesis must say so"
+
+**Context.**
+ADR-004 required a degraded synthesis to declare itself and left the mechanism open. The obvious
+mechanism is to tell the model about the failures and ask it to mention them. That does not work,
+for the same reason `w2`'s workers reported "no issues found" in one sentence: a model asked to
+describe the limits of its own output will understate them, and there is no way to tell an
+understatement from an accurate summary by reading it.
+
+Three further facts now shape this node. Findings are structured and individually verified
+(ADR-019), so the synthesizer can be given *claims* rather than four markdown blobs. Findings carry
+provenance, so duplicates across workers can be collapsed before the call rather than double-counted
+in the prose. And a run can legitimately produce zero grounded findings, in which case there is
+nothing to synthesise.
+
+**Decision.**
+1. The synthesis artifact is **two documents concatenated**. The first is computed from state —
+   tasks run, failed, degraded, findings reported, findings discarded and why. No model touches it.
+   The second is written by the model from the verified findings only.
+2. Findings are **deduplicated deterministically** before the call, keyed on file plus
+   whitespace-normalised evidence, and the task ids that reported each one are kept. Two workers
+   finding the same thing is corroboration, and it is a fact worth reporting; it is not two findings.
+3. Each finding is given a stable id (`<task_id>#<n>`) and the model's output **cites those ids**. A
+   section citing an id that does not exist is dropped, exactly as in ADR-019. The synthesizer is a
+   summariser and may not introduce claims.
+4. **Zero grounded findings means no model call.** The computed document is the whole answer, and
+   paying a frontier model to write prose about an empty list produces confident prose about
+   nothing — the `w1` failure at the last step instead of the first.
+
+**Consequences.**
+- The user always gets the run's real shape, even when the model call fails, returns nothing, or is
+  skipped. The computed half cannot be lost.
+- Worker findings must survive to this node. They are written to the run store as JSON beside the
+  human-readable report (ADR-008: state carries references, payloads live on disk), and
+  `WorkerResult.findings_ref` points at them.
+- Corroboration count is surfaced. A finding two independent workers reached is more interesting
+  than one, and nothing before this step could say so.
+- **This does not make the synthesis correct.** It makes every claim in it traceable to a verified
+  finding, which is a different and smaller property.
+- **Reversal condition:** a capability whose output is not a list of findings — a narrative
+  comparison, say. That needs a second synthesis shape, not the removal of this one.
+
+---
+
 ## 2. Data Contracts
 
 Written before implementation (§1.4, contract-first). These are the canonical shapes; changes are
@@ -1548,6 +1595,32 @@ that let `run` ship without a gateway.
 `score=0`, `correction=<the edited plan>`). It needs the LangSmith run id surfaced from the invoker
 and is not in this step.
 
+### Step 1.7 — the synthesizer, and the half a model may not write (2026-09-11)
+
+`synthesize` produces the run's deliverable: a computed accounting of what the run did, followed by
+a model-written summary of the verified findings, followed by the findings themselves verbatim.
+
+The ordering is the decision. ADR-004 required a degraded synthesis to declare itself and the
+obvious mechanism — tell the model about the failures and ask it to mention them — does not work,
+for the same reason `w2`'s workers reported "no issues found" in one sentence: a model describing
+the limits of its own output understates them, and an understatement reads exactly like an accurate
+summary. So the accounting is computed from state and comes first, the model writes second, and the
+findings appear in full regardless, so a reader never has to trust the summary to reach them.
+
+Four properties, each with a test that drives it: a good summary is rendered; a section citing a
+finding id that does not exist is discarded and the run marked degraded; a synthesis call that
+fails still ships the accounting and every finding; and **zero verified findings means no model
+call at all** — paying a frontier model to write prose about an empty list is run `w1`'s failure
+relocated to the last step.
+
+Deduplication is deterministic and keyed on file plus normalised evidence, never on the claim: two
+workers describing the same line in different words have found one problem, and the wording is the
+least reliable part of either report. The count of workers that reached a finding independently is
+surfaced, because corroboration is a fact nothing before this step could state.
+
+New: `graph/synthesis.py` (collect, deduplicate, account, render), `SynthesisDraft`,
+`RunStore.write_data`/`read_data`, `WorkerResult.findings_ref`. 388 tests.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
@@ -1696,6 +1769,17 @@ one that names its holes.
   `WorkerResult`. Equal numbers mean a careful worker; a large gap means one that is inventing, and
   a single number cannot say which. Discarded findings are written INTO the artifact, because a
   reader who cannot see six thrown-out claims reads the silence as diligence.
+- **The synthesizer has never run against a live model.** Every prior step in this project has had
+  at least one defect that only a live run found, and there is no reason to expect this one to be
+  different. The most likely failure mode given the pattern so far: a model that cites ids
+  correctly and writes a summary that is accurate about nothing, which no check here would catch.
+- **`SYNTHESIS_MAX_TOKENS = 3072` and the synthesizer's FRONTIER tier are unmeasured** (§4.5). The
+  tier follows ADR-006's cost-asymmetry rule — one call decides what the user reads — but that is
+  reasoning, not a measurement, and the synthesis is now the largest prompt in the system.
+- **Nothing bounds how many findings reach the synthesizer.** Twelve workers at three findings each
+  is thirty-six, and the prompt grows linearly with no cap and no truncation notice. `MAX_FANOUT`
+  bounds the workers, not their output. A run that hits the context limit here would fail at the
+  last step, after paying for everything.
 - **STILL OPEN: the evidence match may be too strict, and the number is not measured.** An exact
   whitespace-normalised match will discard findings that are true but paraphrased. The trade is
   deliberate — a dropped true finding shows up in the counters and the trace, an invented one that

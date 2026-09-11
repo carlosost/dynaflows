@@ -51,6 +51,7 @@ class FakeGateway:
         # Overridden by tests that need a worker to fail, come back short, or
         # admit it lacked context. Default is a clean success.
         self.worker_report: Any = _default_report
+        self.synthesis: Any = _default_synthesis
 
     async def call(self, request: Any, **_: object) -> Any:
         """Answers according to the schema it was asked for.
@@ -59,13 +60,20 @@ class FakeGateway:
         test code, where a fix to one silently misses the other.
         """
         from dynaflows.contracts.calls import CallResult
-        from dynaflows.graph.prompts import EnhancedPrompt, PlanDraft, WorkerReport
+        from dynaflows.graph.prompts import (
+            EnhancedPrompt,
+            PlanDraft,
+            SynthesisDraft,
+            WorkerReport,
+        )
 
         self.requests.append(request)
         if request.schema is PlanDraft:
             payload: Any = self.plan_draft() if callable(self.plan_draft) else self.plan_draft
         elif request.schema is WorkerReport:
             payload = self.worker_report(request)
+        elif request.schema is SynthesisDraft:
+            payload = self.synthesis(request)
         else:
             payload = EnhancedPrompt(
                 enhanced=request.prompt if self.echo else self.enhanced,
@@ -106,6 +114,12 @@ class FakeGateway:
         from dynaflows.graph.prompts import PlanDraft
 
         return sum(1 for r in self.requests if r.schema is PlanDraft)
+
+    @property
+    def synthesis_calls(self) -> int:
+        from dynaflows.graph.prompts import SynthesisDraft
+
+        return sum(1 for r in self.requests if r.schema is SynthesisDraft)
 
     @property
     def worker_calls(self) -> int:
@@ -165,6 +179,26 @@ def _default_report(request: Any) -> Any:
         examined=["src/auth.py"],
         findings=[],
         context_was_sufficient=True,
+    )
+
+
+def _default_synthesis(request: Any) -> Any:
+    """A synthesis that cites every id it was shown.
+
+    Parsed out of the prompt rather than fabricated: a fake that cites ids the
+    node never sent would pass the citation check by luck and prove nothing
+    about it.
+    """
+    import re
+
+    from dynaflows.graph.prompts import SynthesisDraft, SynthesisSection
+
+    ids = re.findall(r"\[([^\]\s]+#\d+)\]", request.prompt)
+    return SynthesisDraft(
+        headline="the thing has problems",
+        sections=[SynthesisSection(heading="Everything", body="All of it.", finding_ids=ids)]
+        if ids
+        else [],
     )
 
 

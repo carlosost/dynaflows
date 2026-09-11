@@ -9,6 +9,7 @@ file and the state carries an `ArtifactRef`.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 from dynaflows.contracts.state import ArtifactRef
@@ -43,6 +44,36 @@ class RunStore:
             tokens=estimate_tokens(text),
             preview=text.strip()[:_PREVIEW_CHARS],
         )
+
+    def write_data(self, run_id: str, task_id: str, payload: object) -> ArtifactRef:
+        """The machine-readable half, beside the human-readable one.
+
+        The synthesizer needs findings as claims, not as prose it has to parse
+        back out of markdown -- and ADR-008 keeps them off the state, because
+        twelve workers' findings re-serialised at every superstep is the exact
+        pressure the run store exists to remove.
+        """
+        text = json.dumps(payload, indent=2, sort_keys=True)
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        directory = self._root / "runs" / _safe(run_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{_safe(task_id)}.{sha}.json"
+        path.write_text(text, encoding="utf-8")
+        return ArtifactRef(
+            sha=sha, path=str(path), kind="json", tokens=estimate_tokens(text), preview=""
+        )
+
+    def read_data(self, ref: ArtifactRef) -> object:
+        """Never raises on a missing or corrupt file.
+
+        This is read at synthesis time, after every worker has finished and
+        been paid for. Losing the whole run because one artifact is unreadable
+        would discard work that succeeded.
+        """
+        try:
+            return json.loads(Path(ref.path).read_text(encoding="utf-8"))
+        except OSError, ValueError:
+            return None
 
     def read(self, ref: ArtifactRef) -> str:
         """The synthesizer's side of ADR-008: refs go through state, the text

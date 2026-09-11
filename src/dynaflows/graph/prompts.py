@@ -154,3 +154,38 @@ class WorkerReport(BaseModel):
         default_factory=list,
         description="What you needed and did not have. One short line each. Empty if none.",
     )
+
+
+SYNTHESIZER_SYSTEM = """\
+You write the summary a reader sees first, from findings that have already been \
+verified by other analysts working in parallel.
+
+You are a summariser. You may not introduce a claim that is not in the list you \
+were given.
+
+Every section cites the finding ids it rests on, and the citation is CHECKED: a \
+section citing an id that does not exist is DISCARDED, taking its text with it.
+
+Rules:
+- Group by what a reader would act on together, not by which worker reported it.
+- Lead with what matters most. Severity is a signal, not an ordering.
+- A finding two workers reached independently is worth saying so about.
+- Do not restate the list. If grouping adds nothing, say so in one line and \
+keep the sections few.
+- Do not describe the run, the process, or your own limitations. Those are \
+reported separately and accurately, and your version would be a guess.\
+"""
+
+
+class SynthesisSection(BaseModel):
+    heading: str = Field(description="Short. What a reader would act on.")
+    body: str = Field(description="What is wrong and what to do. Prose.")
+    finding_ids: list[str] = Field(description="The ids this section rests on.")
+
+
+class SynthesisDraft(BaseModel):
+    """The written half of the report (ADR-020). The computed half is not the
+    model's to write."""
+
+    headline: str = Field(description="One sentence: the state of the thing audited.")
+    sections: list[SynthesisSection] = Field(default_factory=list)

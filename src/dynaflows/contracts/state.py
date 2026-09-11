@@ -147,6 +147,11 @@ class WorkerResult(BaseModel):
     # that is inventing, and one number cannot say which.
     findings_reported: int = 0
     findings_grounded: int = 0
+    # ADR-020: the verified findings, as data, for the synthesizer. Separate
+    # from `artifact` because that one is prose for a human and parsing prose
+    # back into claims is how the structure built in ADR-019 gets thrown away
+    # at the last step.
+    findings_ref: ArtifactRef | None = None
     error: ErrorEnvelope | None = None
 
     @property
