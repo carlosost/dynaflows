@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-10 (rev 12)
+**Last updated:** 2026-09-11 (rev 13)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -1413,6 +1413,30 @@ one that names its holes.
   synthesis can usefully degrade to, which is a measurement nobody has taken.
 - ADR-012's probe ran on aarch64 Linux, not on the macOS arm64 host this project is developed on.
   Closed only when `dynaflows doctor` has run there.
+
+**Learned on 2026-09-11 — the first human at a live gate got stuck in it.**
+Gate G1 worked on its first real run: a good rewrite, two substantive assumptions declared, one
+small-tier call. Then the human chose `edit`, had no `$EDITOR` set, and hit a fallback that was wrong
+twice over — a single-line prompt for a five-line brief, with no default, so an empty Enter re-asked
+forever. There was no way out of the gate except Ctrl-C.
+
+**A gate the user cannot leave is worse than no gate.** ADR-005's whole argument is that stopping
+here is cheap; a stop you cannot exit converts that into the most expensive kind of interruption.
+
+Three rules came out of it, and they generalise past this one prompt:
+
+1. **Every interactive branch needs a way out that is not Ctrl-C.** Empty input now means "keep the
+   text", because "I changed my mind about editing" is the likeliest reason someone submits nothing.
+2. **A fallback is a code path, and untested code paths are where this project keeps finding bugs.**
+   The editor path had no test at all — it was the only branch of `_ask_gate` nothing exercised.
+3. **Defaults should assume the user is not you.** With no `$EDITOR` set, the editor search now
+   prefers `nano` over `vim`/`vi`: someone who never configured one is unlikely to be a vi user, and
+   dropping them into modal editing unannounced is its own trap.
+
+What held up under the same failure, and is worth keeping: Ctrl-C lost nothing. The thread was
+checkpointed at the gate, `resume` re-presented the identical text with the assumptions intact, and
+the enhancer call count stayed at 1 — ADR-007 and ADR-008 paying off on the first run that tested
+them for real.
 
 **Learned on 2026-09-10, fourth pass — 204 green tests and the command was still broken.**
 `dynaflows run` built its config WITHOUT a gateway, so every real run failed inside `enhance_prompt`

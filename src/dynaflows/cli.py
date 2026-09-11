@@ -185,25 +185,41 @@ def _render_gate(payload: dict[str, Any]) -> None:
         console.print("[dim]no assumptions declared[/]")
 
 
-def _edit_text(initial: str) -> str | None:
-    """Open $EDITOR on the text, pre-filled. None if there is no editor.
+def _find_editor() -> list[str] | None:
+    """The editor to open, or None.
 
-    Written directly rather than pulling in a dependency for it: a rewritten
-    brief is a paragraph, and editing a paragraph inside a one-line terminal
-    prompt is worse than rejecting and starting over.
+    Order matters. An explicit $VISUAL/$EDITOR is the user's own choice and
+    wins. Otherwise nano before vim before vi: someone who never set $EDITOR
+    is unlikely to be a vi user, and dropping them into modal editing with no
+    warning is its own kind of trap.
     """
     import os
+    import shutil
+
+    for variable in ("VISUAL", "EDITOR"):
+        value = os.environ.get(variable, "").strip()
+        if value:
+            return value.split()
+    for candidate in ("nano", "vim", "vi"):
+        if shutil.which(candidate):
+            return [candidate]
+    return None
+
+
+def _edit_in_editor(initial: str) -> str | None:
+    """Open the text pre-filled. None if no editor, or the editor failed."""
     import subprocess
     import tempfile
 
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR")
-    if not editor:
+    editor = _find_editor()
+    if editor is None:
         return None
     with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False) as handle:
         handle.write(initial)
         path = handle.name
     try:
-        result = subprocess.run([*editor.split(), path], check=False)  # noqa: S603
+        console.print(f"[dim]opening {editor[0]}…[/]")
+        result = subprocess.run([*editor, path], check=False)  # noqa: S603
         if result.returncode != 0:
             return None
         return Path(path).read_text(encoding="utf-8")
@@ -211,6 +227,39 @@ def _edit_text(initial: str) -> str | None:
         return None
     finally:
         Path(path).unlink(missing_ok=True)
+
+
+def _read_multiline(current: str) -> str:
+    """Last resort when no editor exists at all.
+
+    A one-line `prompt` was the first version of this and it was bad twice
+    over: retyping a paragraph into a single line is miserable, and with no
+    default an empty Enter re-asked forever. Empty input now KEEPS the text,
+    because "I changed my mind about editing" is the likeliest reason someone
+    submits nothing.
+    """
+    console.print(
+        "[dim]No editor found. Paste the replacement brief, then a line containing only '.'[/]"
+    )
+    console.print("[dim]Submit nothing to keep the text above unchanged.[/]")
+    lines: list[str] = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line.strip() == ".":
+            break
+        lines.append(line)
+    return "\n".join(lines).strip() or current
+
+
+def _edit_text(initial: str) -> str:
+    """Always returns usable text. Never loops, never returns empty."""
+    edited = _edit_in_editor(initial)
+    if edited is None:
+        return _read_multiline(initial)
+    return edited.strip() or initial
 
 
 def _ask_gate(payload: dict[str, Any]) -> dict[str, Any]:
@@ -225,10 +274,12 @@ def _ask_gate(payload: dict[str, Any]) -> dict[str, Any]:
     if choice == "r":
         return {"decision": "reject"}
     if choice == "e":
-        edited = _edit_text(payload.get("enhanced", ""))
-        if edited is None:
-            edited = typer.prompt("Replacement brief (no $EDITOR set)")
-        return {"decision": "edit", "replacement": edited.strip()}
+        original = payload.get("enhanced", "")
+        edited = _edit_text(original)
+        if edited == original:
+            console.print("[dim]unchanged — treating as approve[/]")
+            return {"decision": "approve"}
+        return {"decision": "edit", "replacement": edited}
     return {"decision": "approve"}
 
 
