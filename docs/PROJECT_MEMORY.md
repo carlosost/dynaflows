@@ -1102,11 +1102,25 @@ was in the pack or was not, a line either exists or does not, a quote either app
   check cheaply.
 - "Nothing found" becomes legible: `examined` non-empty with `findings` empty is a real negative
   result; `examined` empty is a worker that did not look. Today both produce the same sentence.
-- **A strict evidence match will drop true findings that were paraphrased.** That is a deliberate
-  trade and the wrong one to get wrong quietly: a dropped true finding shows up in the counters and
-  in the trace, while an invented finding that passes does not. The drop rate is a §4.5 number to be
-  measured in step 1.8, and if it is high the fix is a looser match with a recorded threshold, not
-  the removal of the check.
+- **AMENDED 2026-09-11 — the strict match was brittle in a direction nobody predicted.** The
+  recorded risk was paraphrase. What actually happened in run `s4` was narrower and stranger: a
+  model quoting the first line of a MULTI-line docstring closed it with a delimiter the source does
+  not have at that point, and the whole citation was discarded. Five of eight findings died that
+  way and every one cited a line that existed. Runs `s3` and `s4` together discarded twelve
+  findings; the calibration fixture discarded none, because its quotes were single complete lines.
+  A check that rejects everything in one setting and nothing in another is not "too strict" — it is
+  wrong in a specific way, and the difference matters because loosening a threshold would not have
+  fixed it.
+  The match is now line-wise on the alphanumeric CORE of each quoted line, with decoration stripped
+  from the quote and never from the file. An invented line still matches nothing; a real line
+  survives an added delimiter, a trailing ellipsis or a copied line-number prefix. A quote with no
+  line substantial enough to prove anything (`)`, `else:`) is rejected rather than accepted, and
+  every substantial line must be present — one true line must not become cover for a false one.
+- **A finding that proposes no fix is not a finding.** Run `s4` verified three: real file, real
+  lines, verbatim quote, severity `low`, remediation "No remediation needed" — and the synthesis
+  dutifully summarised what the code does. Every structural check passed. `Ungrounded.NOT_A_DEFECT`
+  now rejects an explicit "nothing to do here", deliberately narrowly: it matches a stated no-op,
+  not a short remediation, because a gate that fires on ordinary work gets disabled.
 - Line-numbering source chunks costs roughly 10% more context tokens for the same code.
 - **Reversal condition:** a capability whose findings are not about a location in a file — a
   cross-file architectural claim is the obvious one. That needs a second finding shape, not the
@@ -1948,15 +1962,16 @@ one that names its holes.
   precision claimed for it was not earned. `calibrate --runs N` now reports every run's score plus
   which defects are found **always**, **sometimes** and **never**, because a defect caught every
   time and one caught a third of the time are different facts and a mean hides which is which.
-- **OPEN, and the most interesting result yet: run `s3` claimed 7 findings and ALL 7 were discarded
-  as `EVIDENCE_NOT_FOUND`.** On the calibration fixture the same model discarded none. So the
-  citation check is not uniformly too strict — it rejects everything in one setting and nothing in
-  another, which is a far more specific signal than "too strict" and points at something systematic.
-  Candidate: the planner writes "provide the exact file and line, evidence, impact, severity" into
-  every objective, and a model told what "evidence" means by the objective may be filling the field
-  with prose rather than a quote. **Untested.** The worker report now quotes each rejected string,
-  because the previous version recorded that the quote did not match without recording the quote —
-  the same defect as an error message that names no cause.
+- **CLOSED 2026-09-11: the 100% discard rate had a specific cause, not a threshold.** See ADR-019's
+  amendment. Replaying `s4`'s three rejected quotes against the corrected matcher: all three now
+  pass. The hypothesis recorded at the time — that the planner's "provide evidence, impact,
+  severity" boilerplate was teaching the model to put prose in the evidence field — was **wrong**,
+  and it was wrong in the useful direction: the models were quoting real lines all along.
+- **DELIBERATELY NOT DONE: `Finding` still has no `failure` field.** The narrow NOT_A_DEFECT check
+  catches a stated "no remediation needed" and nothing subtler; a description with a plausible-
+  sounding remediation still passes. Requiring the model to name the condition under which the code
+  misbehaves is the stronger fix and it is a third change to this path in one sitting. It waits so
+  the next run measures the two changes just made, rather than three at once.
 - **STILL OPEN: three of the four tiers are still unbenchmarked.** The enhancer, planner and
   synthesizer have no fixture. "It produced plausible output" is what `mistral-nemo` produced for
   four steps of this project, and it is not a measurement.

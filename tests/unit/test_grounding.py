@@ -177,3 +177,75 @@ def test_ranges_people_actually_write(raw: str, expected: tuple[int, int]) -> No
 @pytest.mark.parametrize("raw", ["", "abc", "0", "9-4", "-3"])
 def test_ranges_that_are_not_ranges(raw: str) -> None:
     assert parse_range(raw) is None
+
+
+# --- the check was brittle in one direction, and s4 found it -------------
+
+
+def test_a_real_quote_with_an_added_delimiter_survives() -> None:
+    """Run `s4`: five of eight findings discarded, every one citing a line that
+    existed. A model quoting the first line of a MULTI-line docstring closes it
+    with a delimiter the source does not have at that point. That is a real
+    quote with a syntactic completion attached, not a fabrication."""
+    chunk = a_chunk(text='"""One line of a docstring.\n\nMore prose.\n"""\nx = 1\n')
+
+    grounding = verify([a_finding(lines="1", evidence='"""One line of a docstring."""')], [chunk])
+
+    assert len(grounding.kept) == 1
+
+
+def test_a_quote_with_a_trailing_ellipsis_survives() -> None:
+    grounding = verify([a_finding(evidence="if not user:  ...")], [a_chunk()])
+
+    assert len(grounding.kept) == 1
+
+
+def test_an_invented_line_still_fails() -> None:
+    """The loosening must not become an opening. `w1` is the reason this file
+    exists."""
+    grounding = verify(
+        [a_finding(evidence='log.audit("this line was never written")')], [a_chunk()]
+    )
+
+    assert grounding.dropped[0].reason is Ungrounded.EVIDENCE_NOT_FOUND
+
+
+def test_a_quote_too_thin_to_prove_anything_fails() -> None:
+    """`)` is in every Python file. Accepting it would make the check a
+    formality."""
+    for thin in (")", "...", "else:", "   "):
+        grounding = verify([a_finding(evidence=thin)], [a_chunk()])
+        assert grounding.dropped, thin
+        assert grounding.dropped[0].reason is Ungrounded.EVIDENCE_NOT_FOUND, thin
+
+
+def test_one_real_line_and_one_invented_line_fails() -> None:
+    """Every substantial line must be present, not one of them -- otherwise a
+    true quote becomes cover for a false one."""
+    grounding = verify(
+        [a_finding(evidence="if not user:\n    self.audit_log.write(password)")], [a_chunk()]
+    )
+
+    assert grounding.dropped[0].reason is Ungrounded.EVIDENCE_NOT_FOUND
+
+
+# --- grounded, and worthless ---------------------------------------------
+
+
+def test_a_finding_proposing_no_fix_is_not_a_finding() -> None:
+    """Run `s4` verified three of these: real file, real lines, verbatim quote,
+    severity "low", remediation "No remediation needed" -- and the synthesis
+    summarised what the code does. Verification that validates form and not
+    substance is a rubber stamp with extra steps."""
+    for remedy in ("No remediation needed", "none", "N/A", "No action required.", ""):
+        grounding = verify([a_finding(remediation=remedy)], [a_chunk()])
+        assert grounding.dropped, remedy
+        assert grounding.dropped[0].reason is Ungrounded.NOT_A_DEFECT, remedy
+
+
+def test_a_real_remediation_is_not_mistaken_for_a_non_finding() -> None:
+    """Deliberately narrow: it matches an explicit "nothing to do here", not a
+    short fix. A gate that fires on ordinary work gets disabled."""
+    for remedy in ("Re-raise it.", "Validate the password", "Use a typed error", "Log and raise"):
+        grounding = verify([a_finding(remediation=remedy)], [a_chunk()])
+        assert len(grounding.kept) == 1, remedy
