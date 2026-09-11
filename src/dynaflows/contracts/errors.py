@@ -22,6 +22,12 @@ class ErrorCode(StrEnum):
     # may come back, so retrying is reasonable. A request you cannot afford
     # costs the same on every attempt, so retrying is three wasted calls.
     INSUFFICIENT_CREDIT = "INSUFFICIENT_CREDIT"
+    # A reasoning model spent the whole output allowance thinking and had
+    # nothing left for the answer. Met live: a model burned 2,297 reasoning
+    # tokens against a 2,048 cap and returned no content at all. Retrying the
+    # same model with the same cap cannot help, so this is not retryable -- but
+    # the next model in the chain may well be fine, so it is not fatal either.
+    OUTPUT_TRUNCATED = "OUTPUT_TRUNCATED"
     AUTH_FAILED = "AUTH_FAILED"
     CONFIG_INVALID = "CONFIG_INVALID"
     UNKNOWN = "UNKNOWN"

@@ -60,22 +60,34 @@ chain = [
     "nvidia/nemotron-3-super-120b-a12b:free",  # in $0.00 out $0.00 ctx 1000k
 ]
 
-[tiers.mid]  # cheapest PAID; :free endpoints are rate-limited and this tier runs N times
+[tiers.mid]  # the workers. Ordered by MEASURED capability first, price second.
+#
+# `mistralai/mistral-nemo` was the head of this chain and scored 0/5 on the
+# ADR-022 calibration fixture -- it read a file with a logged API key and two
+# bare `except` blocks and reported nothing. It is REMOVED, not demoted:
+# ADR-006 already forbids a chain that degrades to a model without structured
+# outputs, because that turns a rate-limit into a wrong answer. A model that
+# cannot do the task does the same thing, more quietly.
+#
+# Re-measure with `dynaflows calibrate --sweep tiers` after any edit here.
 chain = [
-    "mistralai/mistral-nemo",  # in $0.02 out $0.03 ctx 131k
-    "openai/gpt-5-nano",  # in $0.02 out $0.20 ctx 400k
-    "openai/gpt-5-nano:batch",  # in $0.02 out $0.20 ctx 400k
-    "upstage/solar-pro4",  # in $0.03 out $0.12 ctx 524k
-    "openai/gpt-oss-20b",  # in $0.03 out $0.13 ctx 131k
+    "meta-llama/llama-4-scout",  # MEASURED 4/5, $0.0004/call  ctx 10000k
+    "openai/gpt-5-nano",  # UNMEASURED  in $0.02 out $0.20 ctx 400k
+    "upstage/solar-pro4",  # UNMEASURED  in $0.03 out $0.12 ctx 524k
+    "openai/gpt-oss-20b",  # UNMEASURED  in $0.03 out $0.13 ctx 131k
 ]
 
-[tiers.mid_high]  # longest context, family-disjoint from mid per ADR-006
+[tiers.mid_high]  # the Phase 2 verifier: family-disjoint from mid per ADR-006
+#
+# `meta-llama/llama-4-scout` was the head here and moved to `mid` when the
+# calibration measured it. It is removed from this chain: the diversity rule
+# compares whole chains, and a verifier that can fall back to the same model
+# it is checking rubber-stamps exactly when it matters most.
 chain = [
-    "meta-llama/llama-4-scout",  # in $0.10 out $0.30 ctx 10000k
-    "x-ai/grok-4.20-multi-agent",  # in $1.25 out $2.50 ctx 2000k
-    "x-ai/grok-4.20",  # in $1.25 out $2.50 ctx 2000k
-    "google/gemini-3.1-pro-preview-customtools",  # in $2.00 out $12.00 ctx 1048k
-    "deepseek/deepseek-v4-flash-0731",  # in $0.05 out $0.16 ctx 1048k
+    "deepseek/deepseek-v4-flash-0731",  # UNMEASURED  in $0.05 out $0.16 ctx 1048k
+    "x-ai/grok-4.20-multi-agent",  # UNMEASURED  in $1.25 out $2.50 ctx 2000k
+    "x-ai/grok-4.20",  # UNMEASURED  in $1.25 out $2.50 ctx 2000k
+    "google/gemini-3.1-pro-preview-customtools",  # UNMEASURED  in $2.00 out $12.00 ctx 1048k
 ]
 
 [tiers.frontier]

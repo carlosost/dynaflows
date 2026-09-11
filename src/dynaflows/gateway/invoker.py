@@ -55,6 +55,14 @@ def classify(exc: BaseException) -> ErrorCode:
         return ErrorCode.MODEL_UNAVAILABLE
 
     name = type(exc).__name__.lower()
+    # The openai SDK raises this when finish_reason is "length" -- the model
+    # produced no parseable content because the output allowance ran out. On a
+    # reasoning model that can happen with a perfectly reasonable-looking cap:
+    # the reasoning tokens count against it and are invisible until they are
+    # gone. UNKNOWN would still fall through to the next model, but it would
+    # tell the user nothing about the one thing they could change.
+    if "lengthfinishreason" in name:
+        return ErrorCode.OUTPUT_TRUNCATED
     if "ratelimit" in name:
         return ErrorCode.RATE_LIMIT
     if "timeout" in name:
@@ -73,6 +81,12 @@ def remedy_of(exc: BaseException) -> str | None:
     change. Discarding it and printing a stack trace instead makes the user
     rediscover what the response already told them.
     """
+    if "lengthfinishreason" in type(exc).__name__.lower():
+        return (
+            "The model used its whole output allowance and returned nothing parseable. "
+            "On a reasoning model the thinking counts against max_tokens: raise the "
+            "node's allowance, or use a model that reasons less."
+        )
     body = getattr(exc, "body", None)
     if not isinstance(body, dict):
         return None

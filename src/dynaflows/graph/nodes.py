@@ -345,7 +345,13 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
                 system=WORKER_SYSTEM,
                 prompt=prompt,
                 schema=WorkerReport,
-                max_tokens=2048,
+                # 4,096, not 2,048. A model in the small chain spent 2,297
+                # tokens reasoning against a 2,048 cap and returned nothing
+                # parseable at all -- on a reasoning model the thinking counts
+                # against this number and is invisible until it is gone. The
+                # capable worker measured in ADR-006's amendment claimed four
+                # findings inside this allowance.
+                max_tokens=4096,
                 label=f"worker.{task.task_id}",
                 metadata=(
                     ("run_id", state.get("run_id", "")),

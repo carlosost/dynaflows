@@ -78,9 +78,7 @@ def test_a_finding_that_overlaps_the_range_counts(defects: list) -> None:
     """A model citing the `except` line and one citing the `return None`
     beneath it found the same defect. Scoring them differently measures
     citation style, not detection."""
-    assert score([a_finding("33")], defects, reported=1, discarded=0).found == (
-        "swallowed-fetch",
-    )
+    assert score([a_finding("33")], defects, reported=1, discarded=0).found == ("swallowed-fetch",)
     assert score([a_finding("25-30")], defects, reported=1, discarded=0).found == (
         "swallowed-fetch",
     )

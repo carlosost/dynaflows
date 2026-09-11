@@ -294,12 +294,44 @@ and a startup capability probe (`dynaflows doctor`) against
 upstream model swap invalidates every LangSmith baseline with no error and no log line — AP-05 in its
 purest form. Model ids live in `config/models.toml`, one file, versioned, hashed into `plan_hash`.
 
+**AMENDED 2026-09-11 — the selection rule was wrong, and the measurement says so.**
+
+The cost-asymmetry rule above is sound and the way it was *implemented* was not. `models --suggest`
+ordered each chain by price ascending, so "Mid, cost-optimized" became "the cheapest paid endpoint
+that supports structured outputs" — with nothing anywhere asking whether it could do the work.
+
+Measured on the ADR-022 fixture, five planted defects in 57 lines:
+
+| Model | Tier head | Recall | Claims | Discarded | Cost |
+|---|---|---|---|---|---|
+| `mistralai/mistral-nemo` | mid | **0/5** | 0 | — | $0.0000 |
+| `meta-llama/llama-4-scout` | mid_high | **4/5** | 4 | 0 | $0.0004 |
+| `openai/gpt-5.6-luna-pro` | frontier | **4/5** | 6 | 0 | $0.0087 |
+| `nex-agi/nex-n2.5-mini:free` | small | error | — | — | $0.0000 |
+
+**The revised rule: capability is a gate, price is the tiebreaker among models that pass it.** A
+model with zero recall is not a cheap worker, it is not a worker. Ordering by price first selects
+for inability whenever inability is cheapest, which it generally is.
+
+Three further readings of the same table, each closing something that was open:
+- **Frontier costs 22× mid_high for identical recall.** The cost-asymmetry rule pointed the right
+  way; it just had no data about where the capability floor actually sits. It sits below
+  `llama-4-scout`, well under a tenth of a cent per worker call.
+- **The prompt was not the constraint.** Two models scored 4/5 on the same prompt that scored 0/5 on
+  `mistral-nemo`. The asymmetric-incentive theory recorded in §7 was wrong, and it was recorded as
+  the leading suspect — worth keeping for the same reason as the reasoning-budget and `include_raw`
+  hypotheses before it.
+- **ADR-019's evidence match is not too strict.** Ten claims across three models, zero discarded.
+  That §4.5 number is measured and the check is not costing true findings.
+
 **Consequences.**
 - Tier→model assignment is configuration, not code. Swapping a tier is a TOML edit plus a
   `dynaflows doctor` run.
-- The concrete model ids in `models.toml` are **placeholders until benchmarked** (§4.5). Phase 1's
-  DoD includes recording a baseline of cost/latency/schema-failure-rate per tier on a fixed
-  10-request evaluation set.
+- `models --suggest` must not propose a worker model that has not passed calibration. Until it
+  enforces that, a fresh `--suggest` re-introduces this exact defect on any new machine.
+- ~~The concrete model ids in `models.toml` are placeholders until benchmarked~~ — **the worker tier
+  is now measured** (above). The other three tiers remain unbenchmarked: the enhancer, planner and
+  synthesizer have no fixture, and "it produced plausible output" is not a measurement.
 
 **Amendment, 2026-09-10 (Phase 0). `config/models.toml` ships with empty chains, on purpose.**
 
@@ -1900,25 +1932,32 @@ one that names its holes.
   and was still wrong by a factor of four for four steps, because **a placeholder nobody exercises is
   indistinguishable from a correct value.** The register told us it was unmeasured; only a run told
   us it was wrong.
-- **MEASURED 2026-09-11: worker recall on the calibration fixture is 0/5.** `mistralai/mistral-nemo`
-  — the head of the MID chain, chosen by ADR-006's cost-asymmetry argument — read a 57-line file
-  containing a logged API key, two bare `except` blocks that swallow everything, a retry of a
-  non-retryable error and a discarded root cause, and reported **zero findings with status `ok`**.
-  It examined the file; the artifact says so.
-  **Every "no findings" result in this project's history is therefore uninterpretable**, `s2`
-  included, and so is every future one until recall is non-zero. Nothing downstream — the
-  synthesizer, Phase 2's verification — has any value over a worker that reports nothing.
-  Two candidate causes and they are separable: the model (a 12B model at $0.02/M) or the prompt's
-  asymmetric incentives. `dynaflows calibrate --sweep` scores several models on the same fixture,
-  which is how **OQ-01 stops being an opinion**: ADR-006 assigned the cheapest paid model to the
-  workers on a cost argument that never asked whether that model could do the work. The sweep must
-  run before the prompt is touched, or the two causes become one confounded change.
-- **STILL OPEN: the worker prompt's incentives are asymmetric and were made so deliberately.**
-  "Finding nothing is a legitimate result" plus "an unchecked citation is DISCARDED" reward silence.
-  The fix is NOT to demand findings, which is what produced `w1`. The candidate is to make what was
-  checked observable — a worker reporting *what it looked for* and finding nothing is
-  distinguishable from one that skimmed; today they are the same sentence. Do not change the prompt
-  before calibrate gives a baseline, or the change cannot be scored.
+- **CLOSED 2026-09-11 — OQ-01 is answered, by measurement.** See ADR-006's amendment for the table.
+  `mistral-nemo` (the MID head, chosen by price) scored **0/5**; `llama-4-scout` scored **4/5 at
+  $0.0004 a call**; frontier scored the same 4/5 for **22× the cost**. The MID chain now leads with
+  the measured model and `mistral-nemo` is removed rather than demoted — a chain that falls back to
+  a model which cannot do the task is the capability-homogeneity failure ADR-006 already forbids for
+  structured outputs, just quieter.
+  Two hypotheses died here and both were mine: the worker prompt was not the constraint (two models
+  scored 4/5 on the identical prompt), and ADR-019's evidence match is not too strict (ten claims,
+  zero discarded). The second had been carried as an open §4.5 number since ADR-019 was written.
+- **STILL OPEN: three of the four tiers are still unbenchmarked.** The enhancer, planner and
+  synthesizer have no fixture. "It produced plausible output" is what `mistral-nemo` produced for
+  four steps of this project, and it is not a measurement.
+- **STILL OPEN: `models --suggest` still orders by price and would re-introduce the 0/5 worker.**
+  The fix lives in the tool, not the config: a fresh `--suggest` on a new machine reproduces exactly
+  the defect just removed. Until it refuses to propose an uncalibrated worker model, `models.toml`'s
+  comments are the only thing preventing it.
+- **STILL OPEN: `lost-cause` was missed by both capable models**, and the scorer cannot yet say
+  whether that is a real miss or an artifact. A single finding citing lines 43-46 overlaps both
+  `retry-on-fatal` (38-45) and `lost-cause` (46), and `score()` credits the first match only — so
+  one finding covering two adjacent defects hides one of them. `calibrate --model
+  meta-llama/llama-4-scout --show` distinguishes them; the scorer should credit every overlapping
+  defect, not the first.
+- ~~the worker prompt's incentives are asymmetric~~ **DISPROVED 2026-09-11.** Recorded as the
+  leading suspect for the 0/5 result and falsified by the sweep: two models scored 4/5 on the same
+  prompt. Kept, like the reasoning-budget and `include_raw` hypotheses, because a plausible,
+  load-bearing, wrong theory is what this section is for.
 - **STILL OPEN: one fixture, five defects, one file, one language.** Recall against it is a floor
   and nothing more. It says nothing about defects nobody planted, and a change that raises this
   score may be overfitting to it.

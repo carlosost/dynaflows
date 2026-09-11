@@ -186,3 +186,38 @@ def test_an_unrelated_type_error_is_still_unknown() -> None:
     """The rule is narrow on purpose: widening it would swallow real bugs in
     our own code as 'the provider is down'."""
     assert classify(TypeError("unsupported operand type(s)")) is ErrorCode.UNKNOWN
+
+
+# --------------------------------------------------------------------------
+# Met live during the ADR-006 calibration sweep: a reasoning model spent 2,297
+# tokens thinking against a 2,048 cap and returned no content. The reasoning
+# tokens count against max_tokens and are invisible until they are gone.
+# --------------------------------------------------------------------------
+
+
+class _LengthFinishReasonError(Exception):
+    """Named as the openai SDK names it; classify() reads the class name."""
+
+
+def test_output_truncation_is_its_own_code_not_unknown() -> None:
+    from dynaflows.gateway.invoker import classify
+
+    assert classify(_LengthFinishReasonError("length limit reached")) is ErrorCode.OUTPUT_TRUNCATED
+
+
+def test_truncation_is_neither_retryable_nor_fatal() -> None:
+    """Retrying the same model with the same cap cannot help. The next model in
+    the chain may be fine, so the run must not end here."""
+    from dynaflows.gateway.client import _FATAL, _RETRYABLE
+
+    assert ErrorCode.OUTPUT_TRUNCATED not in _RETRYABLE
+    assert ErrorCode.OUTPUT_TRUNCATED not in _FATAL
+
+
+def test_truncation_names_the_one_thing_the_user_can_change() -> None:
+    from dynaflows.gateway.invoker import remedy_of
+
+    remedy = remedy_of(_LengthFinishReasonError("length limit reached"))
+
+    assert remedy is not None
+    assert "max_tokens" in remedy
