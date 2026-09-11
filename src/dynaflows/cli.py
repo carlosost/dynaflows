@@ -352,6 +352,27 @@ def _fail(exc: DynaflowsError) -> None:
     raise typer.Exit(code=3)
 
 
+def _money(ledger: Any) -> str:
+    """The cost line, which must never imply a price it does not have.
+
+    A run that printed "$0.0000 spent" after a real planner call raised no
+    error and failed no test; the only thing wrong with it was the number. So
+    an unpriced call is named here rather than added in as zero -- the reader
+    can see that the total is a floor, not a figure.
+    """
+    line = (
+        f"${ledger.usd_spent:.4f} spent, ${ledger.usd_avoided:.4f} avoided by cache, "
+        f"{ledger.calls_made} call(s)"
+    )
+    if ledger.calls_unpriced:
+        line += (
+            f" -- {ledger.calls_unpriced} unpriced, so the total is a LOWER BOUND."
+            " No provider cost was returned and config/models.toml has no price"
+            " for that model."
+        )
+    return line
+
+
 def _report(values: dict[str, Any]) -> None:
     """How a finished run is described. Shared, so `run` and `resume` cannot
     drift into describing the same state differently."""
@@ -360,7 +381,7 @@ def _report(values: dict[str, Any]) -> None:
         console.print(f"[red]Stopped.[/] {halted}")
         ledger = values.get("cost")
         if ledger is not None:
-            console.print(f"[dim]spent ${ledger.usd_spent:.4f} before stopping[/]")
+            console.print(f"[dim]before stopping: {_money(ledger)}[/]")
         raise typer.Exit(code=2)
 
     console.print("[green]Completed.[/]")
@@ -372,10 +393,7 @@ def _report(values: dict[str, Any]) -> None:
         )
     ledger = values.get("cost")
     if ledger is not None:
-        console.print(
-            f"[dim]${ledger.usd_spent:.4f} spent, ${ledger.usd_avoided:.4f} avoided by cache, "
-            f"{ledger.calls_made} call(s)[/]"
-        )
+        console.print(f"[dim]{_money(ledger)}[/]")
 
 
 @app.command()

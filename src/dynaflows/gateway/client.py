@@ -210,7 +210,7 @@ class GatewayClient:
                     self.breaker.record_failure(model_id)
                 continue
 
-            cost = self.prices.cost(model_id, response.tokens_in, response.tokens_out)
+            cost = self._cost_of(model_id, response)
             try:
                 payload = self._parse(request, response.text)
             except DynaflowsError as exc:
@@ -246,6 +246,23 @@ class GatewayClient:
             f"every model in tier '{request.tier}' is circuit-broken: {', '.join(skipped)}",
         )
 
+    def _cost_of(self, model_id: str, response: RawResponse) -> float | None:
+        """What this call cost, or None when nobody can say.
+
+        Order matters. The provider's own figure wins because it is the only
+        one that knows about markup, cached-prompt discounts and which upstream
+        served the request. The price book is a fallback for providers that
+        report nothing. If neither has an answer the result is None, NOT 0.0 --
+        a run that reported "$0.0000 spent" after a real planner call had no
+        error, no failing test and no warning, which is the whole reason this
+        returns an optional.
+        """
+        if response.cost_usd is not None:
+            return response.cost_usd
+        if model_id in self.prices.prompt or model_id in self.prices.completion:
+            return self.prices.cost(model_id, response.tokens_in, response.tokens_out)
+        return None
+
     def _result(
         self,
         request: CallRequest,
@@ -253,7 +270,7 @@ class GatewayClient:
         response: RawResponse,
         depth: int,
         attempts: int,
-        cost: float,
+        cost: float | None,
         payload: Any,
         *,
         cache_hit: bool = False,

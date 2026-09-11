@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS calls (
     raw_response  TEXT NOT NULL,
     tokens_in     INTEGER NOT NULL,
     tokens_out    INTEGER NOT NULL,
-    cost_usd      REAL NOT NULL,
+    cost_usd      REAL,
     created_at    TEXT NOT NULL
 );
 """
@@ -50,7 +50,7 @@ class CacheBackend(Protocol):
         model_id: str,
         variant: int,
         response: RawResponse,
-        cost_usd: float,
+        cost_usd: float | None,
     ) -> None: ...
     def clear(self) -> int: ...
     def count(self) -> int: ...
@@ -59,7 +59,10 @@ class CacheBackend(Protocol):
 @dataclass(frozen=True, slots=True)
 class CachedCall:
     response: RawResponse
-    cost_usd: float
+    # None where the original call could not be priced. SQLite stores it as
+    # NULL and hands it back as None, so the unknown survives a cache round
+    # trip instead of becoming a confident zero on the next run.
+    cost_usd: float | None
 
 
 class ResponseCache:
@@ -82,6 +85,7 @@ class ResponseCache:
                 tokens_in=row["tokens_in"],
                 tokens_out=row["tokens_out"],
                 served_by=row["served_by"],
+                cost_usd=row["cost_usd"],
             ),
             cost_usd=row["cost_usd"],
         )
@@ -93,7 +97,7 @@ class ResponseCache:
         model_id: str,
         variant: int,
         response: RawResponse,
-        cost_usd: float,
+        cost_usd: float | None,
     ) -> None:
         """Called ONLY for a validated success (ADR-013.5).
 
@@ -146,7 +150,7 @@ class NullCache:
         model_id: str,
         variant: int,
         response: RawResponse,
-        cost_usd: float,
+        cost_usd: float | None,
     ) -> None:
         return None
 
@@ -165,7 +169,32 @@ def connect_cache(db_path: Path) -> sqlite3.Connection:
     # the same pressure the checkpointer sees (ADR-013 consequences).
     connection.execute("PRAGMA journal_mode=WAL")
     connection.executescript(_SCHEMA)
+    _migrate_nullable_cost(connection)
     return connection
+
+
+def _migrate_nullable_cost(connection: sqlite3.Connection) -> None:
+    """`cost_usd` was NOT NULL until an unpriced call had to be stored.
+
+    `CREATE TABLE IF NOT EXISTS` is silent about a table that already exists
+    with the old constraint, so an existing calls.db would keep rejecting the
+    write with an IntegrityError at fan-in -- inside a worker, where ADR-010
+    says nothing may raise. SQLite cannot drop a NOT NULL in place, so the
+    table is rebuilt. Rows are copied, not discarded: this is a cache, but
+    silently emptying one is how a "why is everything suddenly slow and
+    expensive" afternoon starts.
+    """
+    columns = connection.execute("PRAGMA table_info(calls)").fetchall()
+    if not any(c["name"] == "cost_usd" and c["notnull"] for c in columns):
+        return
+    with connection:
+        connection.executescript(
+            "ALTER TABLE calls RENAME TO calls_old;\n"
+            + _SCHEMA
+            + "INSERT INTO calls SELECT key, model_id, served_by, variant, raw_response,"
+            " tokens_in, tokens_out, cost_usd, created_at FROM calls_old;\n"
+            "DROP TABLE calls_old;"
+        )
 
 
 def get_response_cache(db_path: Path | None = None, *, enabled: bool = True) -> CacheBackend:

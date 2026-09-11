@@ -103,14 +103,16 @@ def test_usage_is_read_from_the_message() -> None:
     assert _usage(Message({"input_tokens": 120, "output_tokens": 45})) == {
         "tokens_in": 120,
         "tokens_out": 45,
+        "cost_usd": None,
     }
 
 
 def test_a_provider_that_sends_no_usage_yields_zeros_not_a_crash() -> None:
     from dynaflows.gateway.invoker import _usage
 
-    assert _usage(Message(None)) == {"tokens_in": 0, "tokens_out": 0}
-    assert _usage(None) == {"tokens_in": 0, "tokens_out": 0}
+    zeros = {"tokens_in": 0, "tokens_out": 0, "cost_usd": None}
+    assert _usage(Message(None)) == zeros
+    assert _usage(None) == zeros
 
 
 def test_null_token_fields_are_treated_as_zero() -> None:
@@ -120,6 +122,7 @@ def test_null_token_fields_are_treated_as_zero() -> None:
     assert _usage(Message({"input_tokens": None, "output_tokens": None})) == {
         "tokens_in": 0,
         "tokens_out": 0,
+        "cost_usd": None,
     }
 
 

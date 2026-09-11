@@ -73,7 +73,7 @@ def test_a_rejection_reports_what_it_cost_before_stopping(isolated: FakeGateway)
     result = CliRunner().invoke(
         app, ["run", "audit auth", "--thread", "t4", "--yes-plan"], input="r\n"
     )
-    assert "spent $0.0020" in result.output
+    assert "$0.0020 spent" in result.output
 
 
 def test_yes_prompt_never_asks(isolated: FakeGateway) -> None:

@@ -1411,6 +1411,32 @@ one that names its holes.
     see `max_tokens`; the wire sees `max_completion_tokens`. `tests/architecture/test_wire_payload.py`
     now asserts the exact top-level payload key set and was confirmed to fail against the old code
     before being kept. It is designed to fail on an SDK upgrade: that failure is the notification.
+- **CLOSED 2026-09-11: the cost ledger reported `$0.0000 spent` after a paid call.** `PriceBook` is
+  constructed empty in every code path in `src/` — nothing ever populated it — so
+  `PriceBook.cost()` returned 0.0 for every model and 0.0 formatted as `$0.0000`. The first live
+  end-to-end run spent $0.00501886 on the planner and reported nothing. No error, no failing test,
+  no warning; the only symptom was a number that looked like good news. **This is the third wrong
+  number this project has shipped** (zero tokens, vacuous `passed=True`, zero cost) and all three
+  had the same shape: a value that was structurally valid, semantically false, and never asserted.
+  Fixes, in order of importance:
+  - The cost is now **read, not computed**. OpenRouter states what a call cost in its `usage` block
+    and LangChain passes it through to `response_metadata["token_usage"]` whole. That figure already
+    accounts for provider markup, the cached-prompt discount and which upstream actually served the
+    request — none of which a local price table can know. The price book survives only as a fallback
+    for providers that report nothing.
+  - An unknown cost is `None`, never `0.0`. `CostLedger.calls_unpriced` counts them (AP-20: a call
+    nobody could price and a call that cost nothing are different facts), and the run report says
+    the total is a **lower bound** and why. `RawResponse.cost_usd`, `CallResult.cost_usd` and
+    `CachedCall.cost_usd` are all optional, so the unknown survives a cache round trip instead of
+    becoming a confident zero on the next run.
+  - `calls.cost_usd` was `NOT NULL`. `CREATE TABLE IF NOT EXISTS` says nothing about an existing
+    table, so a pre-existing `calls.db` would have raised `IntegrityError` at fan-in — inside a
+    worker, where ADR-010 says nothing may raise. `connect_cache` now rebuilds the table, copying
+    rows rather than dropping them.
+- **STILL OPEN: the USD budget ceiling has never been able to fire.** ADR-013's `Budget.max_usd` was
+  compared against a total that was structurally always 0.0, so only the token ceiling was ever a
+  real guard. It should work now that costs are real, but "should" is the word that produced this
+  entry — it stays open until a run is deliberately driven into the USD ceiling and stops.
 - `gateway/invoker.py`'s error classifier has now met exactly ONE real failure (402) and was wrong
   about it. 429, 401, 500 and timeout remain unverified against live traffic — and the 402 is the
   reason to treat that as a real gap rather than a formality.

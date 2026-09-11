@@ -96,16 +96,32 @@ def retry_after_of(exc: BaseException) -> float | None:
         return None
 
 
-def _usage(message: Any) -> dict[str, int]:
-    """Token counts from an AIMessage, or zeros.
+def _usage(message: Any) -> dict[str, Any]:
+    """Token counts and the provider's own cost from an AIMessage.
 
     Zeros are honest when the provider sent none. They are NOT honest when we
     threw the message away -- which is what happened before include_raw.
+
+    The cost is read rather than computed. OpenRouter states what a call cost
+    in its `usage` block, and LangChain passes that block through to
+    `response_metadata["token_usage"]` whole. That number already accounts for
+    provider markup, the cached-prompt discount and whichever upstream actually
+    served the request -- none of which a local price table can know. A missing
+    cost stays None; see RawResponse.cost_usd.
     """
     usage = getattr(message, "usage_metadata", None) or {}
+    metadata = getattr(message, "response_metadata", None) or {}
+    reported = metadata.get("token_usage") or {}
+    raw_cost = reported.get("cost") if isinstance(reported, dict) else None
+    cost: float | None
+    try:
+        cost = None if raw_cost is None else float(raw_cost)
+    except TypeError, ValueError:
+        cost = None
     return {
         "tokens_in": int(usage.get("input_tokens", 0) or 0),
         "tokens_out": int(usage.get("output_tokens", 0) or 0),
+        "cost_usd": cost,
     }
 
 

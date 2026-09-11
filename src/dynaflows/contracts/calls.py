@@ -66,6 +66,10 @@ class RawResponse:
     tokens_in: int = 0
     tokens_out: int = 0
     served_by: str | None = None
+    # What the PROVIDER says this call cost, when it says anything. None means
+    # it did not, and None is not 0.0 -- a free model reporting 0.0 and a
+    # provider reporting nothing are different facts (AP-20).
+    cost_usd: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,14 +80,14 @@ class CallResult:
     raw: str
     tokens_in: int
     tokens_out: int
-    cost_usd: float
+    cost_usd: float | None
     fallback_depth: int
     attempts: int
     cache_hit: bool
     repaired: bool = False
     served_by: str | None = None
 
-    def trace_metadata(self) -> dict[str, str | int | float | bool]:
+    def trace_metadata(self) -> dict[str, str | int | float | bool | None]:
         """ADR-011: what LangSmith needs to answer 'why did this cost that'."""
         return {
             "model_id": self.model_id,
@@ -119,17 +123,25 @@ class CostLedger:
     schema_failures: int = 0
     calls_skipped: int = 0
     fallbacks: int = 0
+    # Calls whose cost nobody could state: the provider sent none and the
+    # price book has no entry. Counted rather than folded into usd_spent as
+    # zero, because "$0.0000 spent" after a paid call is not an incomplete
+    # report, it is a false one.
+    calls_unpriced: int = 0
 
     def record(self, result: CallResult) -> CostLedger:
+        unpriced = 1 if result.cost_usd is None else 0
         if result.cache_hit:
             return replace(
                 self,
-                usd_avoided=self.usd_avoided + result.cost_usd,
+                usd_avoided=self.usd_avoided + (result.cost_usd or 0.0),
                 calls_cached=self.calls_cached + 1,
+                calls_unpriced=self.calls_unpriced + unpriced,
             )
         return replace(
             self,
-            usd_spent=self.usd_spent + result.cost_usd,
+            usd_spent=self.usd_spent + (result.cost_usd or 0.0),
+            calls_unpriced=self.calls_unpriced + unpriced,
             tokens_in=self.tokens_in + result.tokens_in,
             tokens_out=self.tokens_out + result.tokens_out,
             calls_made=self.calls_made + 1,
