@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-11 (rev 15)
+**Last updated:** 2026-09-11 (rev 16)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -1386,7 +1386,10 @@ one that names its holes.
   these characters is unknown at pack time. It leans high on purpose. Calibration path: LangSmith
   reports real token counts per call, so step 1.8 compares estimate to actual and replaces the
   constant with a measured one.
-- `gateway/invoker.py`'s error classifier is **unverified against a live provider**. The status-code
+- `gateway/invoker.py`'s error classifier has now met exactly ONE real failure (402) and was wrong
+  about it. 429, 401, 500 and timeout remain unverified against live traffic — and the 402 is the
+  reason to treat that as a real gap rather than a formality.
+- **Superseded 2026-09-11:** ~~the classifier is unverified against a live provider~~ The status-code
   and class-name mapping was written from documentation, not from observed exceptions, and the
   consequences of getting it wrong are not cosmetic: a 401 classified as retryable burns the whole
   chain, a 429 classified as fatal ends a run that would have succeeded. Eighteen tests drive it with
@@ -1433,6 +1436,34 @@ one that names its holes.
   synthesis can usefully degrade to, which is a measurement nobody has taken.
 - ADR-012's probe ran on aarch64 Linux, not on the macOS arm64 host this project is developed on.
   Closed only when `dynaflows doctor` has run there.
+
+**Learned on 2026-09-11, third pass — the first real provider failure, and the ladder got it wrong
+three ways.** A 402 from OpenRouter ("you requested up to 65536 tokens, but can only afford 33333")
+hit the planner. §7 had said for two steps that the error classifier was *unverified against live
+traffic* and that "only real traffic closes it". This is what real traffic found:
+
+1. **402 was classified `MODEL_UNAVAILABLE`, which is retryable.** So a request that could never
+   succeed was sent three times before moving on. The distinction that was missing: a model that is
+   *down* may come back, so retrying is reasonable; a request you cannot *afford* costs exactly the
+   same on every attempt. `INSUFFICIENT_CREDIT` is now its own code — not retryable, but still not
+   fatal, because the next entry in the chain may well be affordable, which is the whole reason a
+   chain has more than one model.
+
+2. **The root cause was ours: we never set `max_tokens`.** Providers price a request as prompt plus
+   the **full output allowance**, so an unset ceiling reserves the model's maximum — 65,536 here —
+   and the account was refused for a request that would have used a fraction of it. The gateway now
+   caps every request it sends, and nodes that know their own answer size declare it. A call site
+   that forgets can no longer reserve the maximum.
+
+3. **The typed error escaped as a 200-line traceback.** §1.4 types errors precisely so a caller can
+   act on them, and the one genuinely useful line — the provider's own `remedy_hint`, naming exactly
+   what to change — was buried at the bottom under LangChain internals. Typed errors now render as a
+   message plus the remedy, with the resume command, and exit 3.
+
+The shared lesson: **the taxonomy was wrong in a way no fake could have shown.** Eighteen tests drove
+the classifier with invented exceptions and all of them passed, because they asserted the mapping I
+had written rather than the mapping the provider needed. A test can only check the rule you thought
+of; live traffic is what supplies the rule you did not.
 
 **Learned on 2026-09-11, second pass — two things the ledger was quietly not counting.**
 A live run at gate G1 exposed both, and neither had a failing test because both reported a

@@ -335,6 +335,23 @@ async def _drive(graph: Any, cfg: dict[str, Any], first_input: Any) -> dict[str,
         payload_in = Command(resume=_ask_gate(gate_payload))
 
 
+def _fail(exc: DynaflowsError) -> None:
+    """A typed error is a message, not a stack trace.
+
+    Playbook §1.4: errors are typed precisely so a caller can act on them. A
+    200-line LangChain traceback for "you are out of credits" throws that away
+    and makes the user rediscover what the response already said.
+    """
+    envelope = exc.envelope
+    console.print(f"\n[red]{envelope.code}[/] {envelope.message}")
+    remedy = getattr(exc, "remedy", None)
+    if remedy:
+        console.print(f"[yellow]→ {remedy}[/]")
+    if envelope.attempts > 1:
+        console.print(f"[dim]after {envelope.attempts} attempt(s)[/]")
+    raise typer.Exit(code=3)
+
+
 def _report(values: dict[str, Any]) -> None:
     """How a finished run is described. Shared, so `run` and `resume` cannot
     drift into describing the same state differently."""
@@ -415,7 +432,13 @@ def run(
             snapshot = await graph.aget_state(cfg)
             return {"next": snapshot.next, "values": snapshot.values}
 
-    outcome = asyncio.run(_go())
+    try:
+        outcome = asyncio.run(_go())
+    except DynaflowsError as exc:
+        console.print(
+            f"[dim]thread[/] {thread_id}  [dim](resume with: dynaflows resume {thread_id})[/]"
+        )
+        _fail(exc)
     console.print(f"[dim]thread[/] {thread_id}")
     if outcome["next"]:
         console.print(f"[yellow]HALTED[/] before {', '.join(outcome['next'])}")
@@ -464,7 +487,10 @@ def resume(
             snapshot = await graph.aget_state(cfg)
             return {"next": snapshot.next, "values": snapshot.values}
 
-    outcome = asyncio.run(_go())
+    try:
+        outcome = asyncio.run(_go())
+    except DynaflowsError as exc:
+        _fail(exc)
     if outcome.get("missing"):
         console.print(f"[red]No checkpoint for thread {thread}.[/]")
         raise typer.Exit(code=1)

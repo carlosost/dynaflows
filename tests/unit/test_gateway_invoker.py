@@ -33,7 +33,7 @@ class Fake(Exception):
     [
         (401, ErrorCode.AUTH_FAILED),
         (403, ErrorCode.AUTH_FAILED),
-        (402, ErrorCode.MODEL_UNAVAILABLE),
+        (402, ErrorCode.INSUFFICIENT_CREDIT),
         (404, ErrorCode.MODEL_UNAVAILABLE),
         (408, ErrorCode.TIMEOUT),
         (429, ErrorCode.RATE_LIMIT),
@@ -121,3 +121,50 @@ def test_null_token_fields_are_treated_as_zero() -> None:
         "tokens_in": 0,
         "tokens_out": 0,
     }
+
+
+# --------------------------------------------------------------------------
+# 402, met live. The classifier's FIRST real failure, and it got it wrong:
+# 402 was MODEL_UNAVAILABLE, which is retryable, so a request that could never
+# succeed was sent three times.
+# --------------------------------------------------------------------------
+
+
+def test_insufficient_credit_is_not_retryable() -> None:
+    """A model that is down may come back, so retrying is reasonable. A
+    request you cannot afford costs the same on every attempt."""
+    from dynaflows.gateway.client import _RETRYABLE
+
+    assert ErrorCode.INSUFFICIENT_CREDIT not in _RETRYABLE
+
+
+def test_insufficient_credit_still_falls_through_to_a_cheaper_model() -> None:
+    """Not fatal either: the next entry in the chain may well be affordable,
+    which is the whole reason a chain has more than one model."""
+    from dynaflows.gateway.client import _FATAL
+
+    assert ErrorCode.INSUFFICIENT_CREDIT not in _FATAL
+
+
+def test_the_providers_own_remedy_is_kept() -> None:
+    """The 402 body names exactly what to change. Discarding it and printing a
+    stack trace makes the user rediscover what the response already said."""
+    from dynaflows.gateway.invoker import remedy_of
+
+    exc = Fake("APIStatusError", 402)
+    exc.body = {
+        "error": {
+            "message": "requires more credits",
+            "metadata": {"remedy_hint": "Add credits, or lower max_tokens"},
+        }
+    }
+    assert remedy_of(exc) == "Add credits, or lower max_tokens"
+
+
+def test_a_response_without_a_remedy_is_not_invented() -> None:
+    from dynaflows.gateway.invoker import remedy_of
+
+    assert remedy_of(Fake("APIStatusError", 500)) is None
+    plain = Fake("APIStatusError", 402)
+    plain.body = {"error": {"message": "no metadata here"}}
+    assert remedy_of(plain) is None

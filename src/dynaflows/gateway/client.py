@@ -25,6 +25,7 @@ import json
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from dataclasses import replace as dc_replace
 from typing import Any
 
 from pydantic import ValidationError
@@ -69,6 +70,12 @@ class GatewayClient:
     max_concurrent: int = 6
     timeout_seconds: float = 60.0
     max_attempts: int = 3
+    # Providers price a request as prompt + the FULL output allowance, so an
+    # unset max_tokens reserves the model's ceiling -- 65,536 on the model that
+    # found this. The result was a 402 for a request that would have used a
+    # fraction of it. A cap is applied HERE so a call site that forgets one
+    # cannot reserve the maximum. PLACEHOLDER (playbook 4.5).
+    default_max_tokens: int = 4096
     breaker: CircuitBreaker = field(default_factory=CircuitBreaker)
     sleeper: Sleeper = asyncio.sleep
     jitter: Callable[[], float] = random.random
@@ -146,6 +153,11 @@ class GatewayClient:
 
     # -- the ladder -------------------------------------------------------
     async def call(self, request: CallRequest, *, _allow_repair: bool = True) -> CallResult:
+        if request.max_tokens is None:
+            # Applied before the cache key is computed, so the key and the
+            # request that produced it always agree.
+            request = dc_replace(request, max_tokens=self.default_max_tokens)
+
         if reason := self.budget.exceeded_by(self.ledger):
             # Halts to a resumable checkpoint, not a crash (ADR-010 layer 1).
             raise DynaflowsError.of(ErrorCode.BUDGET_EXCEEDED, reason)

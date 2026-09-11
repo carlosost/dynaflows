@@ -435,3 +435,52 @@ async def test_a_hanging_provider_becomes_a_typed_timeout(registry) -> None:  # 
     with pytest.raises(DynaflowsError) as excinfo:
         await gateway.call(REQUEST)
     assert excinfo.value.envelope.code is ErrorCode.TIMEOUT
+
+
+# --------------------------------------------------------------------------
+# Output allowance. Providers price a request as prompt + the FULL output
+# allowance, so an unset max_tokens reserves the model's ceiling -- 65,536 on
+# the model that found this live, producing a 402 for a request that would
+# have used a fraction of it.
+# --------------------------------------------------------------------------
+
+
+async def test_an_uncapped_request_is_capped_by_the_gateway(registry) -> None:  # noqa: ANN001
+    """A call site that forgets max_tokens must not reserve the maximum."""
+    recorder = Recorder()
+    gateway = client(registry, recorder, default_max_tokens=4096)
+    await gateway.call(CallRequest(tier=Tier.MID, prompt="hi", schema=Answer))
+    assert recorder.calls[0][1].max_tokens == 4096
+
+
+async def test_an_explicit_max_tokens_is_respected(registry) -> None:  # noqa: ANN001
+    recorder = Recorder()
+    gateway = client(registry, recorder, default_max_tokens=4096)
+    await gateway.call(CallRequest(tier=Tier.MID, prompt="hi", schema=Answer, max_tokens=256))
+    assert recorder.calls[0][1].max_tokens == 256
+
+
+async def test_the_cap_is_applied_before_the_cache_key(registry, cache) -> None:  # noqa: ANN001
+    """Otherwise the key and the request that produced it disagree, and a
+    second identical call misses its own cached answer."""
+    recorder = Recorder(RawResponse(text='{"value":"ok"}'))
+    gateway = client(registry, recorder, cache=cache, default_max_tokens=4096)
+    await gateway.call(CallRequest(tier=Tier.MID, prompt="hi", schema=Answer))
+    second = await gateway.call(CallRequest(tier=Tier.MID, prompt="hi", schema=Answer))
+    assert second.cache_hit is True
+    assert len(recorder.calls) == 1
+
+
+async def test_insufficient_credit_is_tried_once_per_model_not_three_times(
+    registry,  # noqa: ANN001
+) -> None:
+    """The live bug. 402 was classified retryable, so a request that could
+    never succeed was sent three times before moving on."""
+    recorder = Recorder(*[DynaflowsError.of(ErrorCode.INSUFFICIENT_CREDIT, "402")] * 9)
+    gateway = client(registry, recorder)
+    with pytest.raises(DynaflowsError) as excinfo:
+        await gateway.call(REQUEST)
+    assert excinfo.value.envelope.code is ErrorCode.INSUFFICIENT_CREDIT
+    # One attempt per model in the three-model chain, not three each.
+    assert len(recorder.calls) == 3
+    assert recorder.models_tried == ["acme/one", "bolt/two", "cobalt/three"]

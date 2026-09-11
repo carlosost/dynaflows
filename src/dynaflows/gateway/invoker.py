@@ -19,7 +19,7 @@ _STATUS_TO_CODE = {
     401: ErrorCode.AUTH_FAILED,
     403: ErrorCode.AUTH_FAILED,
     404: ErrorCode.MODEL_UNAVAILABLE,
-    402: ErrorCode.MODEL_UNAVAILABLE,
+    402: ErrorCode.INSUFFICIENT_CREDIT,
     408: ErrorCode.TIMEOUT,
     429: ErrorCode.RATE_LIMIT,
     500: ErrorCode.MODEL_UNAVAILABLE,
@@ -54,6 +54,25 @@ def classify(exc: BaseException) -> ErrorCode:
     if "notfound" in name or "unavailable" in name or "connection" in name:
         return ErrorCode.MODEL_UNAVAILABLE
     return ErrorCode.UNKNOWN
+
+
+def remedy_of(exc: BaseException) -> str | None:
+    """The provider's own suggested fix, when it sends one.
+
+    A 402 from OpenRouter carries `metadata.remedy_hint` naming exactly what to
+    change. Discarding it and printing a stack trace instead makes the user
+    rediscover what the response already told them.
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict):
+        return None
+    metadata = error.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("remedy_hint"):
+        return str(metadata["remedy_hint"])
+    return None
 
 
 def retry_after_of(exc: BaseException) -> float | None:
@@ -137,6 +156,7 @@ def build_langchain_invoker(settings: Settings) -> Any:
         except Exception as exc:  # noqa: BLE001 -- translated, never propagated raw
             error = DynaflowsError.of(classify(exc), f"{model_id}: {exc}")
             error.retry_after = retry_after_of(exc)  # type: ignore[attr-defined]
+            error.remedy = remedy_of(exc)  # type: ignore[attr-defined]
             raise error from exc
 
         if request.schema is not None:

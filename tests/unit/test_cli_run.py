@@ -208,3 +208,42 @@ def test_a_completed_run_reports_what_it_cost(isolated: FakeGateway) -> None:
     # Two calls now: the enhancer and the planner.
     assert "$0.0040 spent" in result.output
     assert "2 call(s)" in result.output
+
+
+def test_a_typed_error_is_a_message_not_a_traceback(
+    isolated: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Playbook §1.4: errors are typed so a caller can act on them. A 200-line
+    LangChain traceback for "you are out of credits" throws that away.
+
+    Found live: a 402 from the planner dumped the whole stack, and the one
+    useful line -- the provider's own remedy -- was buried at the bottom.
+    """
+    from dynaflows.contracts.errors import DynaflowsError, ErrorCode
+
+    error = DynaflowsError.of(ErrorCode.INSUFFICIENT_CREDIT, "acme/big: 402 out of credits")
+    error.remedy = "Add credits, or lower max_tokens"  # type: ignore[attr-defined]
+
+    async def boom(request, **_):  # noqa: ANN001, ANN202
+        raise error
+
+    monkeypatch.setattr(isolated, "call", boom)
+    result = CliRunner().invoke(app, ["run", "audit auth", "--thread", "x1", "--yes-prompt"])
+    assert result.exit_code == 3
+    assert "INSUFFICIENT_CREDIT" in result.output
+    assert "Add credits, or lower max_tokens" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_a_failed_run_still_says_how_to_resume(
+    isolated: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The checkpoint survived the failure; the user should not have to guess."""
+    from dynaflows.contracts.errors import DynaflowsError, ErrorCode
+
+    async def boom(request, **_):  # noqa: ANN001, ANN202
+        raise DynaflowsError.of(ErrorCode.INSUFFICIENT_CREDIT, "402")
+
+    monkeypatch.setattr(isolated, "call", boom)
+    result = CliRunner().invoke(app, ["run", "audit auth", "--thread", "x2", "--yes-prompt"])
+    assert "dynaflows resume x2" in result.output

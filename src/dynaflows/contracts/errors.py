@@ -18,6 +18,10 @@ class ErrorCode(StrEnum):
     SCHEMA_INVALID = "SCHEMA_INVALID"
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
+    # 402. Distinct from MODEL_UNAVAILABLE on purpose: a model that is down
+    # may come back, so retrying is reasonable. A request you cannot afford
+    # costs the same on every attempt, so retrying is three wasted calls.
+    INSUFFICIENT_CREDIT = "INSUFFICIENT_CREDIT"
     AUTH_FAILED = "AUTH_FAILED"
     CONFIG_INVALID = "CONFIG_INVALID"
     UNKNOWN = "UNKNOWN"

@@ -66,6 +66,9 @@ async def enhance_prompt(
             system=ENHANCER_SYSTEM,
             prompt=state["raw_prompt"],
             schema=EnhancedPrompt,
+            # A rewritten brief plus a few assumptions. Reserving more is not
+            # free: providers price a request as prompt + the FULL allowance.
+            max_tokens=1024,
             label="enhance_prompt",
             metadata=(("run_id", state.get("run_id", "")), ("node", "enhance_prompt")),
         )
@@ -166,6 +169,8 @@ async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> di
                 system=system,
                 prompt=prompt,
                 schema=PlanDraft,
+                # 12 tasks x objective + anchors, plus a rationale.
+                max_tokens=4096,
                 # A different variant, so the re-plan is a fresh call and not
                 # a cache hit on the answer that was just rejected (ADR-013).
                 variant=attempt - 1,
