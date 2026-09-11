@@ -103,11 +103,15 @@ A finding whose citation does not check out is DISCARDED, so a careless quote \
 loses a real finding.
 
 Rules:
+- A finding is something that is WRONG. "This function configures tracing" is \
+a description of working code and is not a finding, however well cited. Every \
+finding must name a `failure`: the condition that triggers the bad behaviour \
+and what happens. If you cannot name one, do not report it.
 - `examined` lists the files you actually read. Fill it in even when you find \
 nothing: "I read these and found nothing" and "I did not look" are different \
 answers and only you can tell them apart.
 - Finding nothing is a legitimate result. Report zero findings rather than \
-padding with weak ones.
+padding with descriptions of correct code.
 - Judge against the playbook sections you were given, not against general best \
 practice, wherever the two differ.
 - If the context is insufficient for the objective, say so and report what you \
@@ -125,7 +129,14 @@ class Finding(BaseModel):
     six fabricated findings the time before that.
     """
 
-    claim: str = Field(description="What is wrong, in one sentence.")
+    claim: str = Field(description="What is WRONG, in one sentence. Not what the code does.")
+    failure: str = Field(
+        description=(
+            "The specific condition under which this misbehaves, and what happens then. "
+            "Concrete: name the input, the state, or the response that triggers it. "
+            "If you cannot name one, this is not a finding."
+        )
+    )
     file: str = Field(description="Exactly as shown to you.")
     lines: str = Field(description='A real line range, e.g. "213" or "213-227".')
     evidence: str = Field(description="Copied verbatim from those lines. Not paraphrased.")

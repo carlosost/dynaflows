@@ -22,6 +22,9 @@ def a_finding(lines: str, **kwargs: object) -> Finding:
         lines=lines,
         evidence=kwargs.pop("evidence", "except Exception:"),  # type: ignore[arg-type]
         severity=kwargs.pop("severity", "high"),  # type: ignore[arg-type]
+        failure=kwargs.pop(  # type: ignore[arg-type]
+            "failure", "A network error becomes None and the caller retries forever."
+        ),
         remediation=kwargs.pop("remediation", "Re-raise it."),  # type: ignore[arg-type]
     )
 

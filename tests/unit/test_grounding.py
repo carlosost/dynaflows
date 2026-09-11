@@ -47,6 +47,9 @@ def a_finding(**kwargs: object) -> Finding:
         lines=kwargs.pop("lines", "2-3"),  # type: ignore[arg-type]
         evidence=kwargs.pop("evidence", "if not user:"),  # type: ignore[arg-type]
         severity=kwargs.pop("severity", "high"),  # type: ignore[arg-type]
+        failure=kwargs.pop(  # type: ignore[arg-type]
+            "failure", "A request with no user returns None and the caller cannot tell why."
+        ),
         remediation=kwargs.pop("remediation", "Validate the password."),  # type: ignore[arg-type]
     )
 
@@ -249,3 +252,53 @@ def test_a_real_remediation_is_not_mistaken_for_a_non_finding() -> None:
     for remedy in ("Re-raise it.", "Validate the password", "Use a typed error", "Log and raise"):
         grounding = verify([a_finding(remediation=remedy)], [a_chunk()])
         assert len(grounding.kept) == 1, remedy
+
+
+# --- a citation proves it read the file, not that it found anything ------
+
+
+def test_a_finding_with_no_failure_scenario_is_a_description() -> None:
+    """Run `s5` claimed fifteen findings. "Telemetry errors are detected and
+    classified", "Settings are properly configured for telemetry" -- correct
+    statements about working code, correctly cited, worth nothing. Citation
+    checking proves the model READ the file; only this asks whether it found
+    anything."""
+    for failure in ("", "none", "N/A", "bad", "   "):
+        grounding = verify([a_finding(failure=failure)], [a_chunk()])
+        assert grounding.dropped, repr(failure)
+        assert grounding.dropped[0].reason is Ungrounded.NOT_A_DEFECT, repr(failure)
+
+
+def test_a_real_failure_scenario_passes() -> None:
+    """Both fields are checked because either alone is easy to satisfy by
+    accident. This must not fire on a concise, real one."""
+    for failure in (
+        "Returns None on a 404 and the caller retries",
+        "A 401 is retried three times and sleeps between each",
+        "The API key reaches the log at INFO on every call",
+    ):
+        grounding = verify([a_finding(failure=failure)], [a_chunk()])
+        assert len(grounding.kept) == 1, failure
+
+
+def test_an_elided_quote_survives() -> None:
+    """Run `s5`: `def f(...) -> T: ... return T(...)` joins two real but
+    non-adjacent fragments. Both are in the file; the joined string is not. An
+    elision is the model saying "these two real fragments, with something
+    between", which is a true statement about the file."""
+    grounding = verify(
+        [a_finding(evidence="def login(user, password): ... return check(user, password)")],
+        [a_chunk()],
+    )
+
+    assert len(grounding.kept) == 1
+
+
+def test_an_elision_cannot_smuggle_an_invented_fragment() -> None:
+    """Splitting on the ellipsis must not weaken the check: every fragment is
+    still required to be present."""
+    grounding = verify(
+        [a_finding(evidence="def login(user, password): ... audit.write(password)")], [a_chunk()]
+    )
+
+    assert grounding.dropped[0].reason is Ungrounded.EVIDENCE_NOT_FOUND

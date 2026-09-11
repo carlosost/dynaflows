@@ -212,6 +212,7 @@ def a_finding(**kwargs: Any) -> Any:
         lines=kwargs.pop("lines", "4-5"),
         evidence=kwargs.pop("evidence", "def login():"),
         severity=kwargs.pop("severity", "medium"),
+        failure=kwargs.pop("failure", "Any caller passing an empty password is authenticated."),
         remediation=kwargs.pop("remediation", "Check the password."),
     )
 

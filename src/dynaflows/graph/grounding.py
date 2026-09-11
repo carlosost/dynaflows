@@ -75,10 +75,20 @@ class Grounding:
 # file -- the file is the authority and must not be loosened.
 _EDGE_NOISE = re.compile(r"^[^0-9A-Za-z_]+|[^0-9A-Za-z_)\]}:]+$")
 
+# A quote is split on newlines AND on elisions. Run `s5`: a model wrote
+# `def check_langsmith(...) -> TelemetryStatus: ... return TelemetryStatus(...)`
+# joining two real but non-adjacent fragments. Both exist in the file; the
+# combined string does not. An elision is the model saying "these two real
+# fragments, with something between", which is a true statement about the file.
+_ELLIPSIS = re.compile(r"\n|\.{3,}|…")
+
 # Below this, a matching line proves nothing: `)` or `else:` appear everywhere.
 # PLACEHOLDER (playbook 4.5) -- the drop rate this produces is the measurement
 # that should set it.
 _MIN_CORE = 12
+
+# Shorter than this and a "failure scenario" is a label, not a scenario.
+_MIN_FAILURE = 15
 
 # Phrases that mean "there is nothing wrong here". A finding whose remediation
 # is one of these is a description, not a finding.
@@ -199,7 +209,7 @@ def _evidence_present(evidence: str, body: str) -> bool:
     made entirely of those falls back to the strict test.
     """
     haystack = _normalise(body)
-    cores = [_core(line) for line in evidence.splitlines()]
+    cores = [_core(part) for part in _ELLIPSIS.split(evidence)]
     substantial = [core for core in cores if len(core) >= _MIN_CORE]
     if not substantial:
         # Nothing substantial to check. A quote of `)` is in every Python file
@@ -221,11 +231,23 @@ def _core(line: str) -> str:
 
 
 def _is_description(finding: Finding) -> bool:
-    """A finding that proposes no fix and names no failure is not a finding.
+    """A finding that names no failure, or proposes no fix, is a description.
 
-    Deterministic and deliberately narrow: it matches an explicit "nothing to
-    do here", not a short remediation. A model with something to report can
-    always say what to change.
+    Run `s5` claimed fifteen findings. "Telemetry errors are detected and
+    classified", "Settings are properly configured for telemetry", "Telemetry
+    is configured before any provider call exists" -- correct statements about
+    working code, correctly cited, and worth nothing. Citation checking proves
+    a model READ the file; only this asks whether it found anything.
+
+    Both fields are checked because either alone is easy to satisfy by
+    accident: a description can carry a plausible-sounding remediation, and a
+    real defect can have an obvious fix stated in three words.
     """
     remedy = _WHITESPACE.sub(" ", finding.remediation).strip().rstrip(".").lower()
-    return remedy in _NO_REMEDY
+    if remedy in _NO_REMEDY:
+        return True
+    failure = _WHITESPACE.sub(" ", finding.failure).strip().rstrip(".").lower()
+    # PLACEHOLDER (playbook 4.5). "Returns None on a 404" is 21 characters and
+    # is a real failure scenario; the threshold is set below that on purpose,
+    # because a gate that fires on ordinary work gets disabled.
+    return failure in _NO_REMEDY or len(failure) < _MIN_FAILURE

@@ -1967,11 +1967,27 @@ one that names its holes.
   pass. The hypothesis recorded at the time — that the planner's "provide evidence, impact,
   severity" boilerplate was teaching the model to put prose in the evidence field — was **wrong**,
   and it was wrong in the useful direction: the models were quoting real lines all along.
-- **DELIBERATELY NOT DONE: `Finding` still has no `failure` field.** The narrow NOT_A_DEFECT check
-  catches a stated "no remediation needed" and nothing subtler; a description with a plausible-
-  sounding remediation still passes. Requiring the model to name the condition under which the code
-  misbehaves is the stronger fix and it is a third change to this path in one sitting. It waits so
-  the next run measures the two changes just made, rather than three at once.
+- **DONE 2026-09-11, and the measurement is why.** Run `s5` was the clean before/after on the two
+  previous changes and it claimed **15 findings, all 15 discarded**. Reading the rejected quotes gave
+  two distinct causes, neither guessed:
+  - **Elision.** `def check_langsmith(...) -> TelemetryStatus: ... return TelemetryStatus(False, ...)`
+    joins two real but non-adjacent fragments. Both are in the file; the joined string is not. Same
+    family as the docstring delimiter — real content with a formatting convention attached — and the
+    matcher now splits on elisions as well as newlines, requiring every fragment to be present so an
+    ellipsis cannot smuggle an invented one.
+  - **The claims were descriptions, again and mostly.** "Telemetry errors are detected and
+    classified". "Settings are properly configured for telemetry". Correct statements about working
+    code, correctly cited, worth nothing. `Finding.failure` is now required — the condition that
+    triggers the bad behaviour and what happens — and a finding naming no failure is rejected as
+    `NOT_A_DEFECT`. **Citation checking proves a model read the file; only this asks whether it
+    found anything.**
+  Waiting for this measurement was the right call and it changed the design: the failure field was
+  planned as a guess about descriptions, and the run showed elision was an equally large cause that
+  no amount of thinking about the schema would have surfaced.
+- **`s5` scoring zero where `s4` scored three is an improvement, not a regression.** All three of
+  `s4`'s "verified" findings were descriptions that the current checks reject. A number going down
+  because the measurement got honest is the opposite of a regression, and the run report should
+  eventually be able to say so rather than leaving a reader to work it out.
 - **STILL OPEN: three of the four tiers are still unbenchmarked.** The enhancer, planner and
   synthesizer have no fixture. "It produced plausible output" is what `mistral-nemo` produced for
   four steps of this project, and it is not a measurement.
