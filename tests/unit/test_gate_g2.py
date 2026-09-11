@@ -31,6 +31,7 @@ from dynaflows.graph.planner import (
     violation_of,
 )
 from dynaflows.graph.prompts import PlanDraft, PlannedTask
+from dynaflows.store.catalogue import build_catalogue
 from tests.conftest import FakeGateway, cfg_factory, draft_with
 
 pytestmark = [pytest.mark.deterministic, pytest.mark.anyio]
@@ -390,3 +391,112 @@ async def test_every_status_has_a_counter() -> None:
     report = out["evaluation"]
 
     assert report.unaccounted == 0, report.render()
+
+
+# --- ADR-018: a plan that names what does not exist ----------------------
+
+
+def _catalogue_of(tmp_path: Path) -> Any:
+    from tests.conftest import make_workspace
+
+    return build_catalogue(make_workspace(tmp_path))
+
+
+def test_a_task_naming_no_inputs_is_a_violation(tmp_path: Path) -> None:
+    """Run `w1`: five tasks, no inputs, and a worker that invented an audit to
+    fill the vacuum. `analyse` means "read the named inputs"; with none named
+    there is nothing to read, so the plan is sent back rather than run."""
+    draft = PlanDraft(rationale="r", tasks=[a_task("t1")])
+
+    reason = violation_of(draft, _catalogue_of(tmp_path))
+
+    assert reason is not None
+    assert "named no inputs" in reason
+    # Phrased for the model to act on: naming the fix, not the error class.
+    assert "source catalogue" in reason
+
+
+def test_a_task_naming_a_path_that_does_not_exist_is_a_violation(tmp_path: Path) -> None:
+    draft = PlanDraft(rationale="r", tasks=[a_task("t1", inputs=["src/logger.py"])])
+
+    reason = violation_of(draft, _catalogue_of(tmp_path))
+
+    assert reason is not None
+    assert "src/logger.py" in reason
+    assert "not in the source catalogue" in reason
+
+
+def test_a_task_naming_a_real_path_passes(tmp_path: Path) -> None:
+    draft = PlanDraft(rationale="r", tasks=[a_task("t1", inputs=["src/auth.py"])])
+
+    assert violation_of(draft, _catalogue_of(tmp_path)) is None
+
+
+def test_a_directory_input_passes(tmp_path: Path) -> None:
+    draft = PlanDraft(rationale="r", tasks=[a_task("t1", inputs=["src"])])
+
+    assert violation_of(draft, _catalogue_of(tmp_path)) is None
+
+
+def test_without_a_catalogue_the_path_rules_are_off_rather_than_vacuously_green() -> None:
+    """A check that silently passes when its input is missing is worse than one
+    that is not there: it reads as coverage. The other rules still apply."""
+    empty_inputs = PlanDraft(rationale="r", tasks=[a_task("t1")])
+
+    assert violation_of(empty_inputs, None) is None
+    assert violation_of(PlanDraft(rationale="r", tasks=[]), None) is not None
+
+
+async def test_the_planner_is_shown_the_source_catalogue(tmp_path: Path, cfg: Any) -> None:
+    """The prompt is the deliverable here. Without it the planner guesses."""
+    gateway = FakeGateway()
+
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        graph = build_graph(saver)
+        await graph.ainvoke(
+            initial_state("r", "cat1", "audit"), cfg("cat1", gateway, auto_approve=["plan"])
+        )
+
+    system = next(r.system for r in gateway.requests if r.schema is PlanDraft)
+    assert "Source catalogue" in system
+    assert "src/auth.py" in system
+    assert "Login and session handling." in system
+
+
+async def test_an_invented_path_costs_exactly_one_re_plan_then_halts(
+    tmp_path: Path, cfg: Any
+) -> None:
+    """ADR-014's existing path, reached by ADR-018's rule. Never a silent trim
+    and never an unbounded retry loop."""
+    gateway = FakeGateway()
+    gateway.plan_draft = lambda: PlanDraft(
+        rationale="r", tasks=[a_task("t1", inputs=["src/invented.py"])]
+    )
+
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        graph = build_graph(saver)
+        final = await graph.ainvoke(
+            initial_state("r", "cat2", "audit"), cfg("cat2", gateway, auto_approve=["plan"])
+        )
+
+    assert gateway.planner_calls == 2
+    assert final["plan"] is None
+    assert "src/invented.py" in final["plan_rejected_reason"]
+
+
+async def test_the_correction_reaches_the_second_attempt(tmp_path: Path, cfg: Any) -> None:
+    """A re-plan that does not tell the model what was wrong is a re-roll."""
+    gateway = FakeGateway()
+    gateway.plan_draft = lambda: PlanDraft(
+        rationale="r", tasks=[a_task("t1", inputs=["src/invented.py"])]
+    )
+
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        graph = build_graph(saver)
+        await graph.ainvoke(
+            initial_state("r", "cat3", "audit"), cfg("cat3", gateway, auto_approve=["plan"])
+        )
+
+    second = [r for r in gateway.requests if r.schema is PlanDraft][1]
+    assert "PREVIOUS ATTEMPT FAILED" in second.prompt
+    assert "src/invented.py" in second.prompt

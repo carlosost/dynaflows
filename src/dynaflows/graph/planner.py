@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from dynaflows.contracts.state import MAX_FANOUT, Plan, PlanTask
 from dynaflows.graph.capabilities import CATALOGUE_VERSION
 from dynaflows.graph.prompts import PlanDraft
+from dynaflows.store.catalogue import SourceCatalogue, unknown_paths
 
 # Per-task token estimate, used for the G2 summary. PLACEHOLDER (playbook 4.5):
 # the pack budget plus room for the objective and the worker's answer. Step 1.8
@@ -56,15 +57,37 @@ def draft_to_plan(draft: PlanDraft) -> Plan:
     )
 
 
-def violation_of(draft: PlanDraft) -> str | None:
+def violation_of(draft: PlanDraft, catalogue: SourceCatalogue | None = None) -> str | None:
     """Why this draft cannot become a plan, phrased for the model to act on.
 
     Returned to the planner verbatim on the re-plan. A message like
     "ValidationError" teaches it nothing; naming the bound and the offending
     value gives it something to change.
+
+    `catalogue` is optional so the planning rules stay testable without a
+    filesystem, and its absence disables only the rules that need it -- a
+    check that silently passes when its input is missing is worse than one
+    that is not there (ADR-018).
     """
     if not draft.tasks:
         return "The plan had no tasks. Emit at least one."
+    if catalogue is not None and catalogue.total:
+        # ADR-018, the half that matters: the catalogue makes good plans
+        # likely, this makes a bad one impossible to execute silently.
+        for task in draft.tasks:
+            if not task.inputs:
+                return (
+                    f"Task '{task.task_id}' named no inputs. Every task must name at least "
+                    "one file or directory from the source catalogue -- a worker cannot "
+                    "search, and a task with nothing to examine produces guesswork."
+                )
+            missing = unknown_paths(list(task.inputs), catalogue)
+            if missing:
+                return (
+                    f"Task '{task.task_id}' named {', '.join(repr(m) for m in missing)}, "
+                    "which is not in the source catalogue. Copy paths exactly from the "
+                    "catalogue; do not infer or abbreviate them."
+                )
     if len(draft.tasks) > MAX_FANOUT:
         return (
             f"The plan had {len(draft.tasks)} tasks; the hard limit is {MAX_FANOUT}. "

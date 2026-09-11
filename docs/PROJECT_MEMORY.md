@@ -975,6 +975,61 @@ worker touches the filesystem only within these bounds."
 
 ---
 
+### ADR-018: The planner is shown a source catalogue, and a plan naming a path that does not exist is rejected
+
+**Date:** 2026-09-11
+**Status:** Accepted
+
+**Context.**
+Live run `w1` produced five tasks, no `inputs`, and one fabricated audit citing four files that do
+not exist. The proximate cause was not the worker. **The planner has never been shown what the
+repository contains.** It is given the playbook catalogue — 84 lines, 3,956 measured tokens — and
+nothing at all about the code it is planning against, so `inputs` has always been guesswork. On
+thread `p1` it guessed `src/dynaflows/gateway` and was right by luck; on `w1` it declined to guess
+and wrote "verify the package exists" into all five objectives instead, which is a rational response
+to being asked to plan blind.
+
+ADR-009 already established the shape of the answer for the playbook: one frontier call reads a
+compact catalogue and routes context for all N workers. The code side had no equivalent, and
+ADR-017's dispatch-time resolution was therefore machinery with nothing to resolve.
+
+**Decision.**
+Two halves, and neither works alone.
+
+1. **The planner is shown a source catalogue**: one line per file — path, size, and the first line of
+   its module docstring or first markdown heading — built by the same pruning rules that govern
+   reading (`store/sources.py`'s skip list, secret deny-list and text-suffix filter), so the planner
+   cannot name a file the resolver would then refuse.
+2. **A plan naming a path absent from that catalogue is a violation**, handled by ADR-014's existing
+   one-re-plan-then-halt path, with a correction that names the offending path. An `analyse` task
+   with no inputs at all is also a violation while `analyse` is the only registered capability,
+   because "read the named inputs" with no inputs named is a task with nothing to read.
+
+**Why not a search tool for the planner.** It is the richer design and it costs a tool-calling path
+through the gateway, a second place where the filesystem is touched, and a planner whose token
+spend is no longer bounded before the call is made. The catalogue is one render, one budget, one
+lint exemption — and if it proves insufficient the reversal is additive rather than a rewrite.
+
+**Why the existence check matters more than the catalogue.** The catalogue makes good plans likely;
+the check makes bad plans *impossible to execute silently*. A planner that hallucinates a path with
+the catalogue in front of it is a real failure mode, and without the check it produces exactly the
+`w1` outcome again — refusals at dispatch, a hedging worker, and a run that looks like it ran.
+
+**Consequences.**
+- The planner prompt grows. The catalogue is budgeted and **truncation is stated in the prompt**: a
+  planner shown a partial tree it believes is complete will confidently plan against files it cannot
+  see, which is AP-19 relocated into a prompt. Its size is a §4.5 placeholder until step 1.8.
+- Building the catalogue reads every candidate file's first bytes. That is a filesystem traversal at
+  plan time, inside `store/`, covered by lint rule 3.
+- `PlanTask.inputs` stops being advisory. Requiring it is a **narrowing** and the reversal condition
+  is explicit: the first capability that legitimately needs no source — "summarise the playbook's
+  position on retries" is the obvious one — removes the empty-inputs rule, not the existence check.
+- This does NOT make worker output trustworthy. A worker handed `auth.py` can still cite a line
+  number that is not in it. Phase 2's adversarial verification is the designed answer and nothing
+  here should be read as a substitute.
+
+---
+
 ## 2. Data Contracts
 
 Written before implementation (§1.4, contract-first). These are the canonical shapes; changes are
@@ -1547,12 +1602,31 @@ one that names its holes.
     counter fails a test instead of vanishing. Its first version summed `empty_count` too and
     double-counted — caught by the test written beside it, which is the only reason it is not a
     fourth wrong number.
-- **STILL OPEN: the planner names files blind.** It is shown the playbook catalogue and is never
-  shown what the repository contains, so `inputs` is guesswork: on thread `p1` it guessed
-  `src/dynaflows/gateway` correctly, on `w1` it gave up and wrote "verify the package exists" into
-  all five objectives instead. Until the planner can see a source catalogue the way it sees the
-  playbook catalogue, ADR-017's machinery is built and unused, and every fan-out is a fan-out of
-  ungrounded reasoning. This is the next step and it needs an ADR, not a patch.
+- **CLOSED 2026-09-11 by ADR-018: the planner named files blind.** It is now shown a source
+  catalogue — one line per file, path plus size plus the first line of the module docstring or
+  markdown heading — and a plan naming a path absent from that catalogue is a violation routed
+  through ADR-014's one-re-plan-then-halt path. An `analyse` task with no inputs is also a
+  violation, since "read the named inputs" with none named is a task with nothing to read.
+  **Measured**: the catalogue is ~1,914 tokens for 77 files, and the planner's system prompt grew
+  from ~4,280 to ~6,309 tokens. Both are real numbers, not estimates, and they are the first two
+  entries in step 1.8's measurement pass that did not have to wait for it.
+  Two things found while building it:
+  - The first catalogue of this repository came out **60% `.pytest_cache` and `.ruff_cache`**. The
+    skip rule was a deny-list, and a deny-list only knows the tools that existed when it was
+    written — the next tool ships its own cache directory. It is now an allow-list: every dotted
+    directory is skipped except `.github`/`.gitlab`/`.circleci`. This fixed `read_sources` too,
+    which would otherwise have fed ruff cache hashes into a worker prompt. 90 files became 77.
+  - `source_root` was hardcoded to `settings.project_root`, so **dynaflows could only ever analyse
+    its own repository**. `run` and `resume` now take `--root`. That was not a test convenience; the
+    tests merely made it visible.
+- **The analysed root is not recorded in the checkpoint.** `resume` accepts `--root` and defaults to
+  the project root, so resuming a run that used `--root` without passing it again resolves inputs
+  somewhere else entirely and the workers quietly analyse the wrong files. The plan is checkpointed;
+  the tree it was planned against is not. Recording it in `WorkflowState` is the fix and is owed.
+- **ADR-018's empty-inputs rule is a narrowing and will eventually fire on legitimate work.** The
+  first capability that needs no source — "summarise the playbook's position on retries" is the
+  obvious one — makes it wrong. The reversal is explicit in the ADR: remove the empty-inputs rule,
+  keep the existence check.
 - **STILL OPEN: nothing verifies that a finding cites something real.** The no-source prompt is an
   instruction, not a guarantee, and it does not cover the harder case — a worker that WAS given
   `auth.py` and cites a line number that is not in it. Phase 2's adversarial verification is the

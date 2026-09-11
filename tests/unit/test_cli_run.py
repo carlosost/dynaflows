@@ -12,21 +12,46 @@ AP-02) -- so no network is touched.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
 from dynaflows.cli import app
-from tests.conftest import FakeGateway, make_playbook
+from tests.conftest import FakeGateway, make_playbook, make_workspace
 
 _DEFAULT_PLAN_TASKS = range(3)  # what conftest's default draft plans
 
 pytestmark = pytest.mark.deterministic
 
 
+def _settings_rooted_at(root: Path) -> Any:
+    """get_settings(), with the project root moved.
+
+    `find_project_root()` walks up for pyproject.toml, so without this the CLI
+    tests plan against the real repository and the fixture's plan names a file
+    that is not in it.
+    """
+    from dynaflows.settings import get_settings as real
+
+    def _get(*args: Any, **kwargs: Any) -> Any:
+        kwargs.setdefault("root", root)
+        return real(*args, **kwargs)
+
+    return _get
+
+
 @pytest.fixture
 def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGateway:
-    """A gateway that counts calls, and state written under tmp."""
+    """A gateway that counts calls, and state written under tmp.
+
+    `--root` is NOT passed by these tests; instead the project root itself is
+    the workspace, so the fake plan's `src/auth.py` is a path ADR-018's
+    catalogue really contains. Pointing the tests at a special directory the
+    product never uses would test a path the product never takes.
+    """
+    make_workspace(tmp_path)
+    monkeypatch.setattr("dynaflows.cli.get_settings", _settings_rooted_at(tmp_path / "workspace"))
     gateway = FakeGateway("a precise brief", ["assumed the HTTP layer"])
     monkeypatch.setattr("dynaflows.gateway.client.get_gateway", lambda **_: gateway)
     monkeypatch.setattr("dynaflows.playbook.get_playbook_repository", lambda **_: make_playbook())

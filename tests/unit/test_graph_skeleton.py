@@ -7,6 +7,7 @@ expensive or non-deterministic, and the proof stays valid once they are.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,7 @@ from dynaflows.contracts.state import (
 )
 from dynaflows.graph import build_graph, open_checkpointer
 from dynaflows.graph.builder import dispatch_workers
-from tests.conftest import FakeGateway, draft_with, make_playbook
+from tests.conftest import FakeGateway, draft_with, graph_config, make_workspace
 
 pytestmark = [pytest.mark.deterministic, pytest.mark.anyio]
 
@@ -39,21 +40,25 @@ def a_plan(n: int = 3) -> Plan:
     )
 
 
+_WORKSPACE = make_workspace(Path(tempfile.mkdtemp(prefix="dynaflows-skeleton-")))
+
+
 def config(thread: str = "th-1", gateway: FakeGateway | None = None) -> dict:
     """Every graph invocation needs a gateway now that enhance_prompt is real
     (step 1.4). These tests are about topology, reducers and resume, so the
-    gateway is a fake that counts calls and touches nothing."""
-    return {
-        "configurable": {
-            "thread_id": thread,
-            "gateway": gateway or FakeGateway(echo=True),
-            "playbook": make_playbook(),
-            # These tests are about topology, reducers and resume. Both gates
-            # are auto-approved so they never interrupt here -- the gates have
-            # their own suites.
-            "auto_approve": ["prompt", "plan"],
-        }
-    }
+    gateway is a fake that counts calls and touches nothing.
+
+    Built from the shared graph_config. This was the THIRD hand-rolled copy of
+    the `configurable` dict, and it was the one still failing after the other
+    two were collapsed -- which is the whole argument for there being one.
+    Both gates are auto-approved here; the gates have their own suites.
+    """
+    return graph_config(
+        thread,
+        gateway or FakeGateway(echo=True),
+        _WORKSPACE,
+        auto_approve=["prompt", "plan"],
+    )
 
 
 # --- topology ------------------------------------------------------------

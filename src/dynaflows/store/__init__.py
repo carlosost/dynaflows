@@ -6,7 +6,16 @@ branches. Both are enforced by `scripts/lint_architecture.py`, which rejects
 filesystem calls in any module outside this package.
 """
 
+from dynaflows.store.catalogue import SourceCatalogue, build_catalogue, unknown_paths
 from dynaflows.store.run_store import RunStore, get_run_store
 from dynaflows.store.sources import SourceRefusal, read_sources
 
-__all__ = ["RunStore", "SourceRefusal", "get_run_store", "read_sources"]
+__all__ = [
+    "RunStore",
+    "SourceCatalogue",
+    "SourceRefusal",
+    "build_catalogue",
+    "get_run_store",
+    "read_sources",
+    "unknown_paths",
+]

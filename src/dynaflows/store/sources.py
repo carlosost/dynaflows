@@ -32,9 +32,18 @@ _SECRET_NAMES = frozenset({".env", ".netrc", ".npmrc", ".pypirc", "credentials",
 _SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore")
 _SECRET_STEMS = (".env.",)
 
+# Named directories that are never source. The dot-directory rule below covers
+# the rest; these are the ones that do not start with a dot.
 _SKIP_DIRS = frozenset(
-    {".git", ".venv", "node_modules", "__pycache__", ".dynaflows", ".mypy_cache"}
+    {"node_modules", "__pycache__", "build", "dist", "target", "htmlcov", "site-packages"}
 )
+# Every dotted directory is skipped EXCEPT these. The deny-list was tried first
+# and the first catalogue built from this repo came out 60% .pytest_cache and
+# .ruff_cache -- a deny-list only knows the tools that existed when it was
+# written, and the next tool ships its own cache directory. An allow-list is
+# wrong less often, and wrong in the direction that costs a missing file rather
+# than a prompt full of hashes.
+_DOTDIR_ALLOW = frozenset({".github", ".gitlab", ".circleci"})
 
 _TEXT_SUFFIXES = frozenset(
     {
@@ -125,14 +134,37 @@ def _chunk_of(path: Path, root: Path) -> Chunk | None:
     )
 
 
-def _files_under(directory: Path) -> list[Path]:
-    found: list[Path] = []
-    for candidate in sorted(directory.rglob("*")):
-        if any(part in _SKIP_DIRS for part in candidate.parts):
-            continue
-        if candidate.is_file():
-            found.append(candidate)
-    return found
+def _in_skipped_dir(path: Path, root: Path) -> bool:
+    try:
+        parts = path.relative_to(root).parts[:-1]
+    except ValueError:
+        parts = path.parts[:-1]
+    return any(
+        part in _SKIP_DIRS or (part.startswith(".") and part not in _DOTDIR_ALLOW) for part in parts
+    )
+
+
+def is_listable(path: Path, root: Path) -> bool:
+    """Whether a file may appear in the planner's catalogue (ADR-018).
+
+    The same predicate the reader applies, exposed so the catalogue and the
+    resolver cannot disagree. A planner that can see a file the resolver will
+    refuse produces a plan that fails at dispatch with nothing explaining it.
+    """
+    return (
+        _inside(path, root)
+        and not _in_skipped_dir(path, root)
+        and not _is_secret(path)
+        and path.suffix in _TEXT_SUFFIXES
+    )
+
+
+def _files_under(directory: Path, root: Path) -> list[Path]:
+    return [
+        candidate
+        for candidate in sorted(directory.rglob("*"))
+        if candidate.is_file() and not _in_skipped_dir(candidate, root)
+    ]
 
 
 def read_sources(inputs: list[str], root: Path) -> tuple[list[Chunk], list[SourceRefusal]]:
@@ -157,7 +189,7 @@ def read_sources(inputs: list[str], root: Path) -> tuple[list[Chunk], list[Sourc
             refusals.append(SourceRefusal(requested, Refusal.NOT_FOUND))
             continue
 
-        targets = _files_under(candidate) if candidate.is_dir() else [candidate]
+        targets = _files_under(candidate, root) if candidate.is_dir() else [candidate]
         if len(targets) > MAX_FILES_PER_INPUT:
             refusals.append(
                 SourceRefusal(

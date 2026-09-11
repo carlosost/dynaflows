@@ -353,7 +353,9 @@ def _fail(exc: DynaflowsError) -> None:
     raise typer.Exit(code=3)
 
 
-def _graph_config(settings: Any, thread_id: str, *, auto_approve: list[str]) -> dict[str, Any]:
+def _graph_config(
+    settings: Any, thread_id: str, *, auto_approve: list[str], root: Path | None = None
+) -> dict[str, Any]:
     """Every dependency a node can ask for, built in ONE place.
 
     It was built in two, and that is how `run` shipped without a gateway while
@@ -374,8 +376,11 @@ def _graph_config(settings: Any, thread_id: str, *, auto_approve: list[str]) -> 
             "playbook": get_playbook_repository(),
             # ADR-008: worker output goes to disk, state carries the reference.
             "store": get_run_store(settings.home),
-            # ADR-017: the one directory input resolution may read from.
-            "source_root": settings.project_root,
+            # ADR-017: the one directory input resolution may read from, and
+            # ADR-018: the one the planner's catalogue is built from. It
+            # defaults to the project root but is NOT fixed to it -- a tool
+            # that can only ever audit its own repository is a demo.
+            "source_root": root or settings.project_root,
             "auto_approve": auto_approve,
         }
     }
@@ -438,11 +443,17 @@ def run(
     yes_plan: Annotated[
         bool, typer.Option("--yes-plan", help="Skip gate G2. The fan-out runs unreviewed.")
     ] = False,
+    root: Annotated[
+        Path | None,
+        typer.Option(help="Directory to analyse. Defaults to the project root."),
+    ] = None,
 ) -> None:
     """Execute the workflow graph.
 
-    Step 1.4: the enhancer is real and gate G1 asks before anything else runs.
-    The planner, workers and synthesizer are still pass-throughs (1.5-1.7).
+    `--root` is the tree the planner is shown (ADR-018) and the only tree a
+    worker's inputs may resolve within (ADR-017). It defaulted to the project
+    root and was not overridable, which meant dynaflows could only ever
+    analyse its own repository.
     """
     import asyncio
     import uuid
@@ -466,6 +477,7 @@ def run(
                 settings,
                 thread_id,
                 auto_approve=(["prompt"] if yes_prompt else []) + (["plan"] if yes_plan else []),
+                root=root,
             )
             state = initial_state(uuid.uuid4().hex[:8], thread_id, prompt)
             await _drive(graph, cfg, state)
@@ -490,8 +502,19 @@ def run(
 @app.command()
 def resume(
     thread: Annotated[str, typer.Argument(help="The thread id to continue.")],
+    root: Annotated[
+        Path | None,
+        typer.Option(help="Directory to analyse. Must match the original run."),
+    ] = None,
 ) -> None:
-    """Continue a halted or crashed run from its last checkpoint (ADR-008)."""
+    """Continue a halted or crashed run from its last checkpoint (ADR-008).
+
+    `--root` has to be given again when the original run used one: the
+    checkpoint stores the plan, not the tree it was planned against, so a
+    resume without it resolves inputs somewhere else and the workers quietly
+    analyse the wrong files. Recording the root in state is the better fix and
+    is owed (§7).
+    """
     import asyncio
 
     from dynaflows.gateway.telemetry import configure_tracing
@@ -503,7 +526,7 @@ def resume(
     async def _go() -> dict[str, Any]:
         async with open_checkpointer(settings.state_db) as saver:
             graph = build_graph(saver)
-            cfg = _graph_config(settings, thread, auto_approve=[])
+            cfg = _graph_config(settings, thread, auto_approve=[], root=root)
             before = await graph.aget_state(cfg)
             if not before.created_at:
                 return {"missing": True}
@@ -727,6 +750,51 @@ def diagnose(
     console.print("[dim]  both fail  -> the payload; the error body above names which part.[/]")
     console.print("[dim]  1 ok, 2 fails -> the SDK path, not the provider.[/]")
     console.print("[dim]  both ok    -> the failure is upstream of the call.[/]")
+
+
+@app.command()
+def sources(
+    root: Annotated[
+        Path | None, typer.Option(help="Directory to catalogue. Defaults to the project root.")
+    ] = None,
+    show: Annotated[
+        bool, typer.Option("--show/--summary", help="Print the whole listing.")
+    ] = False,
+) -> None:
+    """Print the source catalogue the planner will be shown (ADR-018).
+
+    The planner's view of the code is now the thing that decides whether a plan
+    names real files, and it was invisible: run `w1` produced five tasks with
+    no inputs and a fabricated audit, and nothing in the CLI could have shown
+    why. `dynaflows context` does this for the playbook; this is its other half.
+    """
+    from dynaflows.playbook.tokens import estimate_tokens
+    from dynaflows.store.catalogue import build_catalogue
+
+    settings = get_settings()
+    target = root or settings.project_root
+    catalogue = build_catalogue(target)
+
+    console.print(f"[dim]root[/] {target}")
+    console.print(
+        f"[dim]listed[/] {catalogue.listed} of {catalogue.total} file(s), "
+        f"~{estimate_tokens(catalogue.render())} tokens"
+    )
+    if catalogue.truncated:
+        console.print(
+            "[yellow]TRUNCATED[/] the planner will be told so, but it cannot name what it "
+            "cannot see. Narrow --root or raise the budget."
+        )
+    if not catalogue.total:
+        console.print("[red]Nothing to show.[/] Every task will be planned blind.")
+        raise typer.Exit(code=1)
+    if show:
+        console.print(Text(catalogue.render()), markup=False)
+    else:
+        head = "\n".join(catalogue.text.splitlines()[:15])
+        console.print(Text(head), markup=False)
+        if catalogue.listed > 15:
+            console.print(f"[dim]... {catalogue.listed - 15} more; --show for all[/]")
 
 
 @app.command()

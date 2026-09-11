@@ -130,6 +130,11 @@ def draft_with(count: int) -> Any:
                 task_id=f"task-{i}",
                 capability="analyse",
                 objective=f"objective {i}",
+                # ADR-018: a task naming no inputs is a violation, so the
+                # shared fixture emits plans that are actually valid. The path
+                # must exist in make_workspace(), which is what the catalogue
+                # is built from.
+                inputs=["src/auth.py"],
                 playbook_anchors=["AP-11"],
             )
             for i in range(1, count + 1)
@@ -189,13 +194,26 @@ def make_playbook() -> Any:
     )
 
 
+def make_workspace(parent: Path) -> Path:
+    """A source root for ADR-017's resolution and ADR-018's catalogue.
+
+    Two files, because one cannot show that the planner picked the right one.
+    """
+    root = parent / "workspace"
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    (root / "src" / "auth.py").write_text(
+        '"""Login and session handling."""\n\n\ndef login():\n    return True\n',
+        encoding="utf-8",
+    )
+    (root / "src" / "db.py").write_text(
+        '"""Database engine configuration."""\n\nENGINE = "pg"\n', encoding="utf-8"
+    )
+    return root
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
-    """A source root for ADR-017's input resolution, with one readable file."""
-    root = tmp_path / "workspace"
-    (root / "src").mkdir(parents=True)
-    (root / "src" / "auth.py").write_text("def login():\n    return True\n", encoding="utf-8")
-    return root
+    return make_workspace(tmp_path)
 
 
 def graph_config(thread: str, gateway: Any, root: Path, **extra: Any) -> dict[str, Any]:

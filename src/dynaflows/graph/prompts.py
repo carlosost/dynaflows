@@ -44,8 +44,14 @@ other's output, so a task may never depend on another task's result.
 - `playbook_anchors` selects the reference sections that worker will be shown. \
 Pick from the catalogue by anchor. Two or three per task; omit rather than \
 pad. These are the ONLY sections that worker will see.
-- `inputs` names files, paths or identifiers the worker should examine. Leave \
-empty if the objective is self-contained.
+- `inputs` names the files or directories that worker will be shown. Pick them \
+from the source catalogue below, copying the path exactly. A worker sees ONLY \
+what you name here -- it cannot search, open anything else, or find a file you \
+described but did not name.
+- Every task must name at least one input. A task with no inputs is a task \
+with nothing to examine, and the worker will have no choice but to guess.
+- Never name a path that is not in the catalogue. The plan is rejected if you \
+do.
 - `task_id` is short, lowercase, unique, and describes the task.
 
 Registered capabilities:
@@ -53,6 +59,9 @@ Registered capabilities:
 
 Playbook catalogue (anchor | section | summary):
 {catalogue}
+
+Source catalogue (path | size | what it is):
+{sources}
 """
 
 

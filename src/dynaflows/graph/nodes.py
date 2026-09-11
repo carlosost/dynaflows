@@ -60,6 +60,7 @@ from dynaflows.graph.prompts import (
     WorkerReport,
 )
 from dynaflows.playbook.pack import pack
+from dynaflows.store.catalogue import build_catalogue
 from dynaflows.store.sources import SourceRefusal, read_sources
 
 
@@ -164,10 +165,15 @@ async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> di
     """
     gateway = gateway_from(config)
     repository = playbook_from(config)
+    # ADR-018: the planner has to see the code it is planning against. Before
+    # this it saw the playbook and nothing else, so `inputs` was guesswork --
+    # right by luck on one run, abandoned entirely on the next.
+    catalogue = build_catalogue(Path(source_root_from(config)))
     system = PLANNER_SYSTEM.format(
         max_fanout=MAX_FANOUT,
         capabilities=render_catalogue(),
         catalogue=repository.catalog(),
+        sources=catalogue.render(),
     )
 
     brief = state.get("enhanced_prompt") or state.get("raw_prompt", "")
@@ -195,7 +201,7 @@ async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> di
         )
         ledger = _merge_delta(ledger, result)
         draft: PlanDraft = result.payload
-        correction = planning.violation_of(draft) or ""
+        correction = planning.violation_of(draft, catalogue) or ""
         if not correction:
             plan_obj = planning.draft_to_plan(draft)
             plan_obj.estimated_tokens = planning.estimate_tokens(plan_obj)
