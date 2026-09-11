@@ -856,6 +856,10 @@ def calibrate(
     runs: Annotated[
         int, typer.Option(help="Repeat and report the spread. One run is a sample.")
     ] = 1,
+    lenses: Annotated[
+        bool,
+        typer.Option("--lenses", help="Fan out over the same file with three lenses, and union."),
+    ] = False,
     show: Annotated[bool, typer.Option("--show/--quiet", help="Print every finding.")] = False,
 ) -> None:
     """Run a worker against a fixture whose defects are known. ADR-022.
@@ -908,7 +912,35 @@ def calibrate(
         )
         return
 
-    from dynaflows.calibration import aggregate
+    from dynaflows.calibration import aggregate, score
+
+    if lenses:
+        # The measurement the fan-out pattern has never had: does splitting one
+        # file across three workers find more than one worker does? Every
+        # configuration so far produced exactly three findings regardless of
+        # schema, so if the cap is per-worker rather than per-file, three
+        # workers should clear it.
+        found: list[Any] = []
+        claimed = discarded = 0
+        for name, objective in _LENSES:
+            card, result = _calibrate_once(settings, source, defects, model, objective)
+            if card is None:
+                console.print(f"[yellow]{name}[/] failed: ", end="")
+                console.print(Text(str(result)[:200]), markup=False)
+                continue
+            claimed += card.reported
+            discarded += card.discarded
+            found.extend(card.findings)
+            console.print(
+                f"[dim]{name:<16}[/] {len(card.found)}/{card.planted}  ({card.reported} claimed)"
+            )
+        union = score(found, defects, reported=claimed, discarded=discarded)
+        console.print(
+            f"[bold]union[/] {len(union.found)}/{union.planted} "
+            f"({union.recall:.0%}) from {claimed} claim(s) across {len(_LENSES)} workers"
+        )
+        console.print(f"[red]  still missed[/] {', '.join(d.id for d in union.missed) or '—'}")
+        return
 
     cards = []
     for _ in range(max(runs, 1)):
@@ -996,8 +1028,35 @@ def _sweep_models(settings: Any, sweep: str) -> list[str]:
     return list(dict.fromkeys(heads))
 
 
+# Three lenses over the same file, none of which names a planted defect. They
+# are the split a planner would plausibly produce for "audit error handling",
+# and they exist to test whether findings scale with WORKER COUNT rather than
+# with worker quality -- which is the premise of the whole fan-out pattern and
+# has never been measured.
+_LENSES = (
+    (
+        "exception-flow",
+        "Audit exception handling and control flow. Report every place an error is caught "
+        "and not re-raised, retried when retrying cannot succeed, or allowed to change the "
+        "meaning of a return value.",
+    ),
+    (
+        "caller-contract",
+        "Audit what a caller can learn when something goes wrong. Report every place the "
+        "cause of a failure is discarded, replaced, or flattened into a value the caller "
+        "cannot distinguish from success.",
+    ),
+    (
+        "disclosure",
+        "Audit logging, diagnostics and anything written out on a failure path. Report "
+        "every place a secret, credential or sensitive value can reach a log, and every "
+        "place a failure leaves no trace at all.",
+    ),
+)
+
+
 def _calibrate_once(
-    settings: Any, source: Path, defects: list[Any], model: str | None
+    settings: Any, source: Path, defects: list[Any], model: str | None, objective: str | None = None
 ) -> tuple[Any, Any]:
     """One worker run over the fixture, through the production node.
 
@@ -1023,7 +1082,8 @@ def _calibrate_once(
     task = PlanTask(
         task_id="calibration",
         capability="analyse",
-        objective=(
+        objective=objective
+        or (
             "Audit error handling in this file. Report every place an error is swallowed, "
             "retried when it cannot succeed, stripped of its cause, or exposed in a log."
         ),

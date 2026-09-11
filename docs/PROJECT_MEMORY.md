@@ -1814,10 +1814,32 @@ lever is asking for more findings rather than better ones. Untested.
 | baseline | 3 | 3/5 | 0 |
 | `+ failure` required | 3 | 3/5 (different three) | 0 |
 | `+ quoted_lines` and a worked example | **2** | **2/5** | 0 |
+| `+ "report candidates you doubt"` | 3 | 3/5 | 0 |
 
 Zero discards at every step. The constraints were not rejecting findings — they were stopping the
 model reporting them. Six commits of tightening verification, each one measured only for whether it
 stopped bad findings, and the cost was paid in findings that were never made.
+
+**AMENDED after the fourth configuration.** Telling the worker that an unverifiable candidate
+would be filed rather than held against it recovered the finding the previous constraint had
+suppressed — and did not go past three. **Discards stayed at exactly zero in all four
+configurations, across roughly a dozen runs.** Invited to report things it doubted, the model
+reported the same three, all perfectly cited.
+
+So two conclusions, and the second contradicts a recommendation made earlier in this document:
+- Precision constraints DO suppress reporting: 3 → 2 is proven, and the counter-instruction
+  restored it.
+- **Generate-and-filter would filter nothing here.** It was recommended as the remedy for low
+  recall; this evidence does not support that, because nothing is being withheld. The claim is
+  retracted rather than left standing.
+
+What the numbers do support: **the worker emits about three findings whatever is in front of it** —
+3, 3, 2, 3 across four schemas and a 57-line file with five defects. If that cap is per-worker
+rather than per-file, then findings scale with **worker count**, not worker quality — which is the
+premise of the entire fan-out pattern and has never been measured. `calibrate --lenses` runs three
+workers over the same file with three non-overlapping objectives and unions the result. Above three
+unique findings means the cap is per-worker and the pattern earns its keep; still three means the
+cap is per-file and fan-out buys breadth but not depth.
 
 **The structural error: verification was put inside the generation step.** A model required to
 fully satisfy a strict contract before it may speak says less. That is what strict output contracts
