@@ -288,6 +288,16 @@ record the change and the reason next to the table. A future reader who sees onl
 sequence learns nothing; one who sees that the sequence was corrected, and why, learns the
 most valuable thing in the document.
 
+**The same ordering applies to code: build the producer before the consumer.** A stage built
+before the thing that feeds it can only be tested against input you invented, and invented
+input is always well-formed — so the stage passes, ships, and fails the first time it meets
+the real thing. One project built a parallel worker stage before the planner upstream could
+name real files; the workers were correct and useless, and the defect took two live runs to
+attribute because the failure appeared in the consumer. The tell is the same as for open
+questions: *does the answer to one change what "good" means for the other?* If the shape of
+A's output determines what B must handle, A goes first, and B's tests are worth very little
+until it does.
+
 ---
 
 ## 2. AI-Assisted Development Model
@@ -355,6 +365,28 @@ CI gating:
 it is likely testing implementation rather than behavior. Consider whether it belongs
 in the system-behavior tier instead, where real collaborators are used.
 
+**What a green deterministic tier does not tell you.** It is a hard gate and it is worth
+every second it costs — and it is blind, by construction, to everything below the boundary
+you mocked. That is the point of mocking there, and it is also the cost. In one project a
+suite of 250 deterministic tests stayed green through a client library renaming a request
+parameter, a ledger reporting `$0.0000` for calls that cost real money, and a run reporting
+success while producing nothing. None of those was a gap in coverage; every one of them
+lived *under the fakes*.
+
+Two habits close most of it without a second tier:
+
+- **Assert the payload at any boundary that is a protocol** rather than an interface — the
+  HTTP body, the serialized message, the SQL emitted (AP-02, AP-05).
+- **Treat every number the system reports about itself as a claim needing a test.** Counts,
+  costs, durations, pass/fail summaries. A wrong number raises nothing and looks like good
+  news; it is the single most expensive defect class in this catalogue (AP-20, AP-21).
+
+**Derive fixture-dependent assertions; do not write them out.** A test asserting
+`"$0.0040 spent"` fails when a later change alters the *number of calls*, which is a
+different subject entirely. Write `f"${calls * COST_PER_CALL:.4f} spent"` instead. A test
+whose number moves for unrelated reasons is a test people edit rather than read, and an
+edited test stops being evidence.
+
 ### 2.3 Context Preservation Across Sessions
 
 AI coding assistants start each session with no memory of prior sessions. Projects
@@ -418,7 +450,27 @@ If a test mocks `PostgresClient` directly instead of `get_db_client()`, it will
 silently break when the factory's implementation is swapped. The factory boundary
 is the contract; it is the correct mock target.
 
-**5. Prompt structure for safe codebase edits:**
+**5. Every mechanical edit must be asserted, not assumed.**
+
+Search-and-replace, `sed`, scripted refactors and AI-applied patches all share one failure
+mode: the anchor does not match, the edit does not apply, and *nothing says so*. The tool
+reports success because it did what it was asked. One project shipped a command with a
+missing dependency for exactly this reason — a replacement silently found no match after a
+formatter had reflowed the target line — while its whole suite passed.
+
+Make the edit fail loudly when its anchor is gone:
+
+```python
+assert old in source, f"anchor not found: {old[:60]}"   # then, and only then, replace
+source = source.replace(old, new, 1)
+```
+
+Apply a batch all-or-nothing: check every anchor before writing anything, so a partial
+application is not a state the file can reach. And expect anchors to rot — an auto-formatter
+reflows the line you matched on, and the next edit against the version in your head fails.
+That failure is the protocol working.
+
+**6. Prompt structure for safe codebase edits:**
 
 ```
 Context: [paste the relevant ADR + data contract the function reads/writes]
@@ -475,6 +527,47 @@ implementation work, run them in separate sessions. Session 1 produces the ADR a
 Gherkin. Session 2 reads the ADR, Gherkin, and PMA, then implements. Mixing spec and
 implementation in one session produces code that confirms the spec rather than
 testing it.
+
+---
+
+### 2.6 Reproducing a Failure the Stack Cannot Explain
+
+Some errors name no cause you can act on: `'NoneType' object is not iterable` from four
+frames inside a vendored client, a 404 whose body says nothing, a timeout with no log line.
+The instinct is to reason about it. Reasoning is exactly what fails here, because the
+plausible explanations are numerous and the evidence distinguishes none of them.
+
+**Write a diagnostic that differs from the failing call in exactly one way.** This is the
+whole technique, and getting it wrong wastes more time than not trying. One project's first
+diagnostic sent a two-field schema with no system prompt while the failing call sent a
+nested schema behind a four-thousand-token prompt. It succeeded, proving only that a
+different call works — three differences, so nothing was isolated. The replacement built
+the *real* prompt and the *real* schema and fired it twice: once bare, once through the
+production path. Four outcomes, each naming its own fix:
+
+| Bare call | Production path | Conclusion |
+|---|---|---|
+| fails | fails | the payload; the error body says which part |
+| works | fails | the client library, not the service |
+| works | works | the fault is upstream of the call |
+| fails | works | your "bare" reproduction is not what production sends |
+
+**The reproduction must run *through* the production code path, not beside it.** A
+diagnostic that constructs its own client proves something about a call your system never
+makes, and it drifts from the real one silently — because a reproduction that disagrees
+with production still looks like a reproduction (AP-11). Where both halves are needed, get
+the payload from the production builder rather than writing it out.
+
+**Beware the most recent change.** It is the most seductive false lead available, and in
+one investigation it was wrong twice running: a parameter added in the previous commit had
+perfect temporal correlation with the failure and no causal relationship to it, and the
+"obvious" resource-limit explanation before that was disproved by one command. State the
+hypothesis, then design the cheapest observation that would *falsify* it — and when it is
+falsified, say so plainly rather than quietly moving to the next one. A record of which
+plausible explanations were wrong is worth as much as the fix.
+
+**Keep the diagnostic.** It cost real time to build and it is the thing that answers the
+same class of question next quarter. Ship it as a command, not a scratch file.
 
 ---
 
@@ -897,6 +990,14 @@ call.
 internals are the implementation. Tests coupled to internals break on every internal
 change.
 
+**What this does not cover, and it is easy to forget that it does not.** Mocking at the
+factory makes the suite immune to implementation changes — including the ones you needed to
+know about. Everything *below* the factory is now untested by construction, so a client
+library that rewrites your request between the call site and the wire is invisible to every
+test you have (see AP-05's request-parameter variant). One project had 250 passing tests
+and a parameter the SDK renamed on the way out. Where a boundary is a *protocol* rather
+than an interface, add one test that asserts the payload, not the call.
+
 ---
 
 #### AP-03: Transaction Semantics Differ Between Drivers
@@ -955,6 +1056,32 @@ def check_env():
     if missing:
         raise EnvironmentError(f"Required env vars not set: {', '.join(missing)}")
 ```
+
+**Variant — the SDK renames a REQUEST parameter, between your call site and the wire.**
+The same silence, one layer lower, and harder to see because the rename happens inside a
+library you are calling correctly. A client wrapper accepted `max_tokens` in its
+constructor and emitted `max_completion_tokens` in the HTTP body, unconditionally. The
+provider's routing filter did not recognise that parameter name for those endpoints and
+dropped every candidate — surfacing on one model as a clean `404` naming the failed
+routing step, and on another as `HTTP 200` with a null body that the SDK then iterated into
+a bare `TypeError`. The error named neither the parameter nor the rename, and two plausible
+hypotheses died before anyone looked at the request.
+
+**Fix:** for a boundary that is a wire protocol, assert the payload rather than the call.
+Most clients expose the request they are about to send; if yours does not, a logging
+transport or an event hook will.
+
+```python
+def test_the_wire_keys_are_the_ones_we_chose() -> None:
+    payload = build_client(max_tokens=512)._request_payload(messages)
+    # An EXACT key set, not a subset. A subset assertion passes when the SDK
+    # starts sending something new, and something new is what gets filtered.
+    assert set(payload) - {"messages"} == {"model", "stream", "extra_body"}
+    assert payload["extra_body"]["max_tokens"] == 512
+```
+
+This test is *meant* to fail on a dependency upgrade. That failure is the notification the
+changelog did not give you.
 
 ---
 
@@ -1360,6 +1487,17 @@ obeying them.
    identically whether a daemon is absent or merely not started; writing "there is no
    daemon" into a decision record turns an unverified guess into an institutional fact.
 
+**Variant — two documents that contradict each other.** The failure above is a document
+disagreeing with the code. The harder one is two documents that each agree with the code
+and disagree with each other, because reviewing either in isolation finds nothing. One
+project's ADR granted a component "no filesystem access, nothing else", while the capability
+description written the same day said it would "read the named inputs". Both were sensible;
+together they were incoherent; and nothing surfaced it until a live run produced a plan
+naming files no component could open. Neither review nor tests catch this — only execution
+does, which is an argument for running the thing early rather than for reviewing harder.
+When two documents constrain the same component, the cheap check is to read them
+side by side once, at the moment the second one is written.
+
 **Lesson:** Documentation that lies is worse than documentation that is missing, because it
 is believed. Every claim in a design document is either enforced, dated, or decaying — and
 you do not get to choose which without doing something about it.
@@ -1398,6 +1536,91 @@ mine*, and count them apart.
 
 ---
 
+#### AP-21: The Aggregate That Silently Drops a Field
+
+**Symptom:** A value that is certainly being produced reads as zero, or a warning built on
+it never fires. No exception, no failing test. The only evidence is a number that looks
+plausible — which is why it survives review.
+
+**Root cause:** A field was added to a record, and the place that *aggregates* those
+records — a reducer, a `merge`, a `__add__`, a `SELECT` list, a serializer, a summary
+report — enumerates its fields by hand. The list is maintained in two places and was
+maintained in one.
+
+Four occurrences in one project inside a month, the same shape every time: token counts
+discarded by a wrapper that returned only the parsed payload; a cost field that no code
+path ever populated, so every run reported `$0.0000`; a third status added to a result type
+with no counter in the report that summarised them, so a run where every task degraded
+reported "0 ok, 0 failed" and passed; and a field added to a ledger and not to its reducer,
+so it was discarded at every merge and the warning built on it could not fire in any run
+with more than one stage.
+
+**Why tests do not catch it.** Every one of those values was structurally valid. Zero is a
+number. A status with no counter contributes zero to every counter that exists. Tests
+assert what their author thought of, and nobody writes "assert this field still exists
+after a merge" — until once.
+
+**Fix:** derive the aggregation from the record's own definition instead of restating it.
+
+```python
+# Fragile — a list maintained in two places:
+def merge(a: Ledger, b: Ledger) -> Ledger:
+    return Ledger(calls=a.calls + b.calls, tokens=a.tokens + b.tokens)   # ...and the next field?
+
+# Durable — one place:
+def merge(a: Ledger, b: Ledger) -> Ledger:
+    return Ledger(**{f.name: getattr(a, f.name) + getattr(b, f.name) for f in fields(Ledger)})
+```
+
+Then assert the *property*, not the fields, so the next field added fails a test rather
+than vanishing:
+
+```python
+def test_every_field_survives_a_merge() -> None:
+    for f in fields(Ledger):
+        assert getattr(merged, f.name) == getattr(left, f.name) + getattr(right, f.name)
+```
+
+**Companion rule:** a new fact needs its counter in the same commit that introduces the
+fact. A status with no counter is not "not reported yet" — it is invisible, and invisible
+reads as fine. This is AP-20's neighbour: AP-20 is two facts sharing one counter, AP-21 is
+a fact with no counter at all. Both end as a number nobody can act on.
+
+---
+
+#### AP-22: The Filter List That the Ecosystem Outgrows
+
+**Symptom:** A listing, index, scan or prompt that was clean when written fills up with
+noise — build caches, vendored trees, tool metadata — in proportion to how many tools the
+project has adopted since.
+
+**Root cause:** The filter is a deny-list, and a deny-list enumerates a set that grows
+without you. It knows the tools that existed when it was written; the next tool ships its
+own cache directory and is simply not in it. One project's first file catalogue came out
+**60% `.pytest_cache` and `.ruff_cache`** against a skip-list that correctly named `.git`,
+`.venv` and `.mypy_cache`.
+
+**Fix:** choose the direction by which failure you can live with, and write down which one
+you chose.
+
+| | Fails toward | Right when |
+|---|---|---|
+| **Deny-list** | letting new things IN | the excluded set is closed and known (reserved keywords, a protocol's verbs) |
+| **Allow-list** | keeping new things OUT | the outside world grows on its own (file types, directories, hosts) |
+
+For "which files are source", an allow-list of extensions and an allow-list of dotted
+directories fail closed: a legitimate new file type is excluded until someone adds it,
+which is visible to whoever named the file. A deny-list fails open, and the failure is a
+prompt full of cache hashes that nobody reads closely enough to notice.
+
+**The caveat that matters most.** A deny-list used to exclude *dangerous* things — secret
+filenames, blocked hosts — fails open by construction, so it is a best-effort filter and
+must be documented as one. Naming `.env` and `*.pem` reduces accidental exposure; it does
+not stop a credential hard-coded in a source file, and a comment saying "this is not a
+security boundary" is the difference between a useful filter and a false guarantee (AP-19).
+
+---
+
 ### 4.5 Numeric Thresholds That Require Empirical Tuning
 
 The following parameters are commonly set to "reasonable" defaults and left untouched.
@@ -1414,6 +1637,18 @@ They should be treated as placeholders until measured against real traffic:
 
 The mechanism for each should be implemented and tested before the threshold is
 finalized. The number is provisional until measured.
+
+**Placeholders need one list and a named step that retires them.** Marking a constant
+"provisional" in a comment beside it is necessary and not sufficient: they accumulate, each
+one invisible from where the others live, and a system with eight unmeasured constants
+behaves in a way nobody has reasoned about as a whole. Keep a single register — in the
+project memory document, not in the source — naming every provisional number, what it
+currently is, and **which step will measure it**. A placeholder with no named retirement
+step is not provisional; it is permanent and undocumented.
+
+The register earns its keep the moment a number stops being a guess. Two of one project's
+placeholders were retired as a side effect of unrelated work simply because someone building
+a feature could see they were now measurable, and measured them.
 
 ---
 
@@ -1586,6 +1821,27 @@ generated files that should only ever be produced by their generator, vendored c
 lockfiles. The distinguishing question is whether a well-meaning edit does damage that a
 later report cannot undo. Keep the list short — a gate that fires on ordinary work gets
 disabled, and then nothing is protected.
+
+**That last sentence is not about hooks.** It applies to every automated gate you write —
+lint rules, schema validators, CI checks, content filters — and it is the most common way a
+correct rule dies. Two examples from one project, both within minutes of the rule being
+written: an architectural lint forbidding filesystem calls outside one package matched
+`dataclasses.replace` as a file rename and fired four times on correct code; a validator
+checking that quoted evidence appears in its cited source would have rejected every quote
+copied with its line-number prefix.
+
+So when you write a gate, write the tests that assert it does **not** fire:
+
+```python
+def test_the_rule_catches_the_thing_it_is_for() -> None: ...
+def test_dataclasses_replace_is_not_mistaken_for_a_file_rename() -> None: ...
+def test_a_reindented_quote_is_not_treated_as_fabricated() -> None: ...
+```
+
+The second kind is the one that keeps the rule alive. And when a rule has a hole you chose
+deliberately — a name too ambiguous to match on, a check too strict to apply everywhere —
+name the hole in the source. A gap you documented is a decision; the same gap undocumented
+is a bug someone finds later and uses as the argument for deleting the rule.
 
 ### 5.3 Generic settings.json Template
 
