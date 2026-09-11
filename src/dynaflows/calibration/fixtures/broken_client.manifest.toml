@@ -1,0 +1,44 @@
+# The planted defects in broken_client.py, by line range.
+#
+# Nothing in the fixture itself marks them: a comment saying "bug here" would
+# make this a reading-comprehension test rather than an analysis one.
+#
+# `lines` is inclusive and generous by a line or two on each side -- a finding
+# that overlaps the range counts, because a model citing the `except` line and
+# one citing the `return None` beneath it have found the same defect.
+
+version = "1"
+file = "broken_client.py"
+
+[[defect]]
+id = "swallowed-fetch"
+lines = [28, 33]
+kind = "silent exception swallowing"
+why = "Every failure -- network, 404, malformed JSON -- becomes None. The caller cannot tell a missing invoice from an outage."
+
+[[defect]]
+id = "retry-on-fatal"
+# 38-45: the loop and its handler. Line 46 belongs to `lost-cause` -- ranges
+# must not overlap, or one finding is credited to two defects and recall reads
+# higher than it is.
+lines = [38, 45]
+kind = "retry of a non-retryable error"
+why = "A 401 or 422 is retried three times with a fixed sleep. It cannot succeed, and the delay is paid anyway."
+
+[[defect]]
+id = "lost-cause"
+lines = [46, 46]
+kind = "root cause discarded"
+why = "RuntimeError('charge failed') replaces the provider's status and message. The one useful fact is gone by the time it reaches a caller."
+
+[[defect]]
+id = "logged-credential"
+lines = [48, 49]
+kind = "credential in a log line"
+why = "The API key is written to the log at INFO."
+
+[[defect]]
+id = "swallowed-close"
+lines = [53, 57]
+kind = "silent exception swallowing"
+why = "close() cannot fail visibly, so a leaked connection pool is invisible."

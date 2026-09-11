@@ -842,6 +842,121 @@ def sources(
 
 
 @app.command()
+def calibrate(
+    model: Annotated[str | None, typer.Option(help="Override the worker model.")] = None,
+    show: Annotated[bool, typer.Option("--show/--quiet", help="Print every finding.")] = False,
+) -> None:
+    """Run a worker against a fixture whose defects are known. ADR-022.
+
+    "No findings" is unfalsifiable on its own: a clean codebase and a worker
+    that cannot find anything produce identical output, and run `s2` produced
+    exactly that against the gateway package. This plants five defects, runs
+    the REAL worker path over them, and scores what comes back.
+
+    It measures the worker, not the truth. Five planted defects say nothing
+    about the defects nobody planted, and full recall here is a floor rather
+    than a ceiling.
+    """
+    import asyncio
+
+    from dynaflows.calibration import fixture_paths, load_manifest, score
+    from dynaflows.contracts.state import PlanTask, initial_state
+    from dynaflows.gateway.client import get_gateway
+    from dynaflows.graph import nodes
+    from dynaflows.playbook import get_playbook_repository
+    from dynaflows.store.run_store import RunStore
+
+    settings = get_settings()
+    source, manifest_path = fixture_paths()
+    defects = load_manifest(manifest_path)
+
+    task = PlanTask(
+        task_id="calibration",
+        capability="analyse",
+        objective=(
+            "Audit error handling in this file. Report every place an error is swallowed, "
+            "retried when it cannot succeed, stripped of its cause, or exposed in a log."
+        ),
+        inputs=[source.name],
+        playbook_anchors=["AP-09", "§4.1"],
+    )
+    gateway = get_gateway(settings=settings)
+    if model:
+        gateway.registry = _pin_worker(gateway.registry, model)
+    config: dict[str, Any] = {
+        "configurable": {
+            "gateway": gateway,
+            "playbook": get_playbook_repository(),
+            "store": RunStore(settings.home),
+            "source_root": source.parent,
+        }
+    }
+
+    state = {**initial_state("calib", "calib", task.objective), "task": task}
+    out = asyncio.run(nodes.worker(state, config))  # type: ignore[arg-type]
+    result = out["results"][0]
+
+    findings = []
+    if result.findings_ref is not None:
+        from dynaflows.graph.prompts import Finding
+
+        raw = RunStore(settings.home).read_data(result.findings_ref)
+        findings = [Finding.model_validate(f) for f in raw] if isinstance(raw, list) else []
+
+    card = score(
+        findings,
+        defects,
+        reported=result.findings_reported,
+        discarded=result.findings_reported - result.findings_grounded,
+    )
+
+    console.print(f"[dim]model[/] {result.model_id}   [dim]status[/] {result.status}")
+    console.print(
+        f"[bold]recall[/] {len(card.found)}/{card.planted} planted defect(s) found "
+        f"({card.recall:.0%})"
+    )
+    console.print(
+        f"[bold]citations[/] {card.reported} claimed, {card.discarded} discarded as "
+        f"ungrounded ({card.discard_rate:.0%})"
+    )
+    for defect in card.missed:
+        console.print(
+            f"[yellow]  missed[/] {defect.id} (lines {defect.start}-{defect.end}): ", end=""
+        )
+        console.print(Text(defect.kind), markup=False)
+    if card.unplanted:
+        console.print(
+            f"[dim]  {len(card.unplanted)} finding(s) outside any planted range -- "
+            "possibly real, possibly noise[/]"
+        )
+    if show:
+        for finding in findings:
+            console.print(
+                Text(f"  [{finding.severity}] {finding.file}:{finding.lines} {finding.claim}"),
+                markup=False,
+            )
+    if not card.found:
+        console.print(
+            "\n[red]Zero recall.[/] This worker cannot find a bare `except: pass`, so "
+            "'no findings' from a real run means nothing. The prompt or the tier is the "
+            "subject, not the codebase."
+        )
+        raise typer.Exit(code=1)
+
+
+def _pin_worker(registry: Any, model_id: str) -> Any:
+    from dataclasses import replace
+
+    from dynaflows.contracts.tiers import Tier
+    from dynaflows.gateway.registry import TierChain
+
+    return replace(
+        registry,
+        tiers={**registry.tiers, Tier.MID: TierChain(Tier.MID, "calibration", (model_id,))},
+    )
+
+
+@app.command()
 def cache(
     clear: Annotated[bool, typer.Option("--clear", help="Delete every cached response.")] = False,
 ) -> None:

@@ -63,7 +63,12 @@ src = ["src", "tests", "scripts"]
 # `make lint`. That file is the authoritative standard AND (from Phase 1) the
 # runtime retrieval corpus, so a formatter editing it is a drift source that
 # would make `dynaflows index --check` fail after every lint run.
-extend-exclude = ["docs"]
+#
+# The calibration fixtures are DELIBERATELY defective (ADR-022). They plant
+# silent exception swallowing, a credential in a log line and a retry of a
+# non-retryable error, and a linter that "fixes" them destroys the only
+# falsifiable signal the project has. They are data, not source.
+extend-exclude = ["docs", "src/dynaflows/calibration/fixtures"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "TID"]
@@ -83,3 +88,5 @@ select = ["E", "F", "I", "UP", "B", "SIM", "TID"]
 python_version = "3.14"
 strict = true
 files = ["src", "scripts"]
+# See the ruff note: the calibration fixtures are planted defects, not code.
+exclude = ["src/dynaflows/calibration/fixtures"]

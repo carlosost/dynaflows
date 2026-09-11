@@ -1175,6 +1175,51 @@ Three separate defects, and only the first is the obvious one.
 
 ---
 
+### ADR-022: A known-answer fixture, because "no findings" is unfalsifiable
+
+**Date:** 2026-09-11
+**Status:** Accepted
+
+**Context.**
+Run `s2` was the first with the pipeline fully working: real files reached the workers, all three
+tasks fitted the budget, two workers returned `ok`. All three reported **zero findings** against the
+gateway package.
+
+That result is unfalsifiable as it stands. It has two explanations and the system cannot distinguish
+them: the gateway's error handling is genuinely sound, or the workers cannot find a defect. Every
+number the run produced is consistent with both, and so is every number it will produce next week.
+
+There is also a specific reason to suspect the second. After `w1`'s fabricated audit the worker
+prompt gained "finding nothing is a legitimate result" and "a finding whose citation does not check
+out is DISCARDED". Both are correct and together they are an **asymmetric incentive**: claiming
+something is risky, claiming nothing is free. That was an over-correction and it is exactly the shape
+that produces a quiet, confident, empty report.
+
+**Decision.**
+A fixture with deliberately planted defects, a manifest recording where each one is, and a
+`dynaflows calibrate` command that runs the **real worker path** against it and reports what was
+found, what was missed, and what the citation check discarded.
+
+The defects are planted in ordinary-looking code with no marker a model could read. The manifest
+lives beside the fixture and names each defect by line range and kind.
+
+**Consequences.**
+- "No findings" becomes falsifiable. A worker that misses a bare `except: pass` is not reporting on
+  a clean codebase, and a run of `s2` against a clean package means something only once recall
+  against the fixture is known to be non-zero.
+- It produces the two §4.5 numbers that have had no measurement behind them: **recall** (planted
+  defects found) and the **citation discard rate** (findings rejected as ungrounded). The second is
+  the number ADR-019 said would decide whether the evidence match is too strict.
+- It is a prompt regression test. Every future change to `WORKER_SYSTEM` can be scored instead of
+  argued about, which is the only way to tell a better prompt from a differently-worded one.
+- **It measures the worker, not the truth.** A fixture with four planted defects says nothing about
+  the defects nobody planted, and 100% recall on it must never be read as "the pipeline finds
+  bugs". It is a floor, not a ceiling.
+- **Reversal condition:** none. If this turns out not to predict live behaviour, the answer is a
+  better fixture, not the removal of the only falsifiable signal in the system.
+
+---
+
 ## 2. Data Contracts
 
 Written before implementation (§1.4, contract-first). These are the canonical shapes; changes are
@@ -1667,6 +1712,34 @@ surfaced, because corroboration is a fact nothing before this step could state.
 New: `graph/synthesis.py` (collect, deduplicate, account, render), `SynthesisDraft`,
 `RunStore.write_data`/`read_data`, `WorkerResult.findings_ref`. 388 tests.
 
+### Calibration — making "no findings" falsifiable (2026-09-11)
+
+Runs `s1` and `s2` both reported zero findings against the gateway package. `s1` had a cause
+(ADR-021's budget). `s2` did not: the workers read the real files, two returned `ok`, and all three
+found nothing.
+
+That result cannot be interpreted. A sound gateway and a worker that cannot find a defect produce
+identical output, and no number the run produces distinguishes them. There is also a specific reason
+to suspect the second: after `w1`'s fabricated audit the worker prompt gained "finding nothing is a
+legitimate result" and "a finding whose citation does not check out is DISCARDED". Both are correct,
+and together they make claiming risky and claiming nothing free — an asymmetric incentive introduced
+by a fix, which is the same shape as the 402 fix introducing ADR-021's rename.
+
+`dynaflows calibrate` runs the real worker path against `calibration/fixtures/broken_client.py`,
+which plants five defects — silent swallowing twice, a retry of a non-retryable error, a discarded
+root cause, and a credential in a log line — with a manifest recording each by line range. Scoring
+is deterministic: a finding overlapping a planted range is a hit.
+
+Two things went wrong building it, both caught by tests written beside the code:
+- **The manifest's line numbers were written from memory and all five were wrong.** The answer key
+  was wrong in the artifact whose entire purpose is knowing where things are. A test now asserts
+  every range points at non-blank lines of the real file.
+- **Two ranges overlapped on one line**, so a single finding could be credited to two defects and
+  recall would read higher than it was.
+
+The fixtures are excluded from ruff, mypy and the architecture lint, and the exclusion is documented
+in each: a linter that "fixes" a planted defect destroys the only falsifiable signal in the project.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
@@ -1827,6 +1900,20 @@ one that names its holes.
   and was still wrong by a factor of four for four steps, because **a placeholder nobody exercises is
   indistinguishable from a correct value.** The register told us it was unmeasured; only a run told
   us it was wrong.
+- **STILL OPEN, and now the most important number in the project: worker recall is unmeasured.**
+  Until `dynaflows calibrate` is run against a live model, every "no findings" result in this
+  project's history is uninterpretable, and so is every future one. If recall is zero, the prompt or
+  the tier is the subject and nothing downstream — the synthesizer, Phase 2's verification — has any
+  value.
+- **STILL OPEN: the worker prompt's incentives are asymmetric and were made so deliberately.**
+  "Finding nothing is a legitimate result" plus "an unchecked citation is DISCARDED" reward silence.
+  The fix is NOT to demand findings, which is what produced `w1`. The candidate is to make what was
+  checked observable — a worker reporting *what it looked for* and finding nothing is
+  distinguishable from one that skimmed; today they are the same sentence. Do not change the prompt
+  before calibrate gives a baseline, or the change cannot be scored.
+- **STILL OPEN: one fixture, five defects, one file, one language.** Recall against it is a floor
+  and nothing more. It says nothing about defects nobody planted, and a change that raises this
+  score may be overfitting to it.
 - **STILL OPEN: `reference_share = 0.25` is the judgement call this ADR did not remove** (§4.5). It
   is the one number in the context path with no measurement behind it, and it decides how much
   playbook a worker sees.

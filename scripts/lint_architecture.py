@@ -53,7 +53,17 @@ FILESYSTEM_PACKAGES = (
     Path("src") / "dynaflows" / "store",
     Path("src") / "dynaflows" / "playbook",
     Path("src") / "dynaflows" / "gateway",
+    # Owns its fixtures and manifest the way `playbook` owns its corpus
+    # (ADR-022). Added with the same justification as the others rather than
+    # as a convenience: this package's whole job is reading files it ships.
+    Path("src") / "dynaflows" / "calibration",
 )
+
+# Data, not code. The calibration fixtures are deliberately defective by
+# design -- planted exception swallowing, a logged credential, a retry of a
+# non-retryable error -- so every rule here would fire on them correctly and
+# every fire would be noise.
+NOT_SOURCE = (Path("src") / "dynaflows" / "calibration" / "fixtures",)
 FILESYSTEM_MODULES = frozenset({"settings.py", "cli.py", "doctor.py", "checkpoint.py"})
 # Write calls first: these are what ADR-016 forbids. Reads are listed too,
 # because ADR-017's whole point is that reading happens in ONE place.
@@ -168,6 +178,8 @@ def check_file(path: Path, project_root: Path) -> list[str]:
         relative = path.resolve().relative_to(project_root.resolve())
     except ValueError:
         relative = path
+    if any(directory in relative.parents for directory in NOT_SOURCE):
+        return []
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     except SyntaxError as exc:
