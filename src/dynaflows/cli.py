@@ -20,6 +20,7 @@ from dynaflows.contracts.errors import DynaflowsError
 from dynaflows.contracts.tiers import Tier
 from dynaflows.doctor import Status, run_checks
 from dynaflows.settings import get_settings
+from dynaflows.store.run_store import get_run_store
 
 app = typer.Typer(
     name="dynaflows",
@@ -352,6 +353,34 @@ def _fail(exc: DynaflowsError) -> None:
     raise typer.Exit(code=3)
 
 
+def _graph_config(settings: Any, thread_id: str, *, auto_approve: list[str]) -> dict[str, Any]:
+    """Every dependency a node can ask for, built in ONE place.
+
+    It was built in two, and that is how `run` shipped without a gateway while
+    204 tests passed: a mechanical edit matched one copy and not the other. The
+    node contract only grows -- step 1.6 added two more keys -- so the number
+    of places that must know about it stays at one.
+    """
+    from dynaflows.gateway.client import get_gateway  # noqa: PLC0415
+    from dynaflows.playbook import get_playbook_repository  # noqa: PLC0415
+
+    return {
+        "configurable": {
+            "thread_id": thread_id,
+            # Dependencies ride in `configurable` -- the documented place for
+            # them, and the reason a test injects a fake by passing a config
+            # rather than patching an import.
+            "gateway": get_gateway(settings=settings),
+            "playbook": get_playbook_repository(),
+            # ADR-008: worker output goes to disk, state carries the reference.
+            "store": get_run_store(settings.home),
+            # ADR-017: the one directory input resolution may read from.
+            "source_root": settings.project_root,
+            "auto_approve": auto_approve,
+        }
+    }
+
+
 def _money(ledger: Any) -> str:
     """The cost line, which must never imply a price it does not have.
 
@@ -417,10 +446,8 @@ def run(
     import uuid
 
     from dynaflows.contracts.state import initial_state
-    from dynaflows.gateway.client import get_gateway
     from dynaflows.gateway.telemetry import configure_tracing
     from dynaflows.graph import build_graph, open_checkpointer
-    from dynaflows.playbook import get_playbook_repository
 
     settings = get_settings()
     # ADR-011. LangChain and LangGraph read os.environ directly, and
@@ -433,18 +460,11 @@ def run(
     async def _go() -> dict[str, Any]:
         async with open_checkpointer(settings.state_db) as saver:
             graph = build_graph(saver, interrupt_before=(stop_before,) if stop_before else ())
-            cfg = {
-                "configurable": {
-                    "thread_id": thread_id,
-                    # Dependencies ride in `configurable` -- the documented
-                    # place for them, and the reason a test injects a fake by
-                    # passing a config rather than patching an import.
-                    "gateway": get_gateway(settings=settings),
-                    "playbook": get_playbook_repository(),
-                    "auto_approve": (["prompt"] if yes_prompt else [])
-                    + (["plan"] if yes_plan else []),
-                }
-            }
+            cfg = _graph_config(
+                settings,
+                thread_id,
+                auto_approve=(["prompt"] if yes_prompt else []) + (["plan"] if yes_plan else []),
+            )
             state = initial_state(uuid.uuid4().hex[:8], thread_id, prompt)
             await _drive(graph, cfg, state)
             snapshot = await graph.aget_state(cfg)
@@ -472,10 +492,8 @@ def resume(
     """Continue a halted or crashed run from its last checkpoint (ADR-008)."""
     import asyncio
 
-    from dynaflows.gateway.client import get_gateway
     from dynaflows.gateway.telemetry import configure_tracing
     from dynaflows.graph import build_graph, open_checkpointer
-    from dynaflows.playbook import get_playbook_repository
 
     settings = get_settings()
     configure_tracing(settings)  # ADR-011; see the note in `run`.
@@ -483,14 +501,7 @@ def resume(
     async def _go() -> dict[str, Any]:
         async with open_checkpointer(settings.state_db) as saver:
             graph = build_graph(saver)
-            cfg = {
-                "configurable": {
-                    "thread_id": thread,
-                    "gateway": get_gateway(settings=settings),
-                    "playbook": get_playbook_repository(),
-                    "auto_approve": [],
-                }
-            }
+            cfg = _graph_config(settings, thread, auto_approve=[])
             before = await graph.aget_state(cfg)
             if not before.created_at:
                 return {"missing": True}

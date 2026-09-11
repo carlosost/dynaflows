@@ -10,6 +10,16 @@ src/dynaflows/gateway/.
 
 Rule 2 (ADR-007) -- a function that calls interrupt() performs no I/O.
 
+Rule 3 (ADR-016, ADR-017) -- the filesystem is touched only inside
+src/dynaflows/store/, plus the two packages that own a database.
+
+ADR-016 says a worker never writes outside .dynaflows/, and ADR-017 says the
+files a plan names are read in one place rather than in N parallel branches.
+Both are claims about code, and an ADR that asserts testable behaviour names
+the test that proves it (AP-19 habit 1). This is that test, and it is the
+cheap half: "no module outside store/ calls write_text" is a property a parser
+can check, whereas "every worker stays inside its bounds" would not be.
+
 LangGraph resumes by re-running the interrupted node FROM ITS FIRST LINE. Work
 done before the interrupt is therefore repeated on every resume: a paid call
 is paid again, and worse, the human can be shown different text than the text
@@ -33,6 +43,36 @@ from pathlib import Path
 
 GATEWAY_ONLY_MODULES = frozenset({"httpx", "openai", "langchain_openai", "requests", "aiohttp"})
 GATEWAY_PACKAGE = Path("src") / "dynaflows" / "gateway"
+
+# ADR-016/ADR-017. `store` owns run artifacts and input resolution; `playbook`
+# and `gateway` own their SQLite files and the corpus they index; `settings`
+# resolves the project root and reads .env. Every one of these is a deliberate,
+# reviewed exception, which is why they are listed by name rather than by a
+# pattern that would quietly admit the next module too.
+FILESYSTEM_PACKAGES = (
+    Path("src") / "dynaflows" / "store",
+    Path("src") / "dynaflows" / "playbook",
+    Path("src") / "dynaflows" / "gateway",
+)
+FILESYSTEM_MODULES = frozenset({"settings.py", "cli.py", "doctor.py", "checkpoint.py"})
+# Write calls first: these are what ADR-016 forbids. Reads are listed too,
+# because ADR-017's whole point is that reading happens in ONE place.
+#
+# NOT listed, deliberately: `replace` and `copy`. `Path.replace` renames a file,
+# but `dataclasses.replace` and `dict.copy` are ordinary code and appear all
+# over this repo. An AST walk sees only the attribute name, so including them
+# made the linter fire four times on correct code the first time it ran -- and
+# a gate that fires on ordinary work is a gate people disable (playbook 5.2,
+# Pattern 5). `rename` and `unlink` cover the same ground unambiguously. This
+# is a real hole in the rule and it is named here rather than left to be
+# discovered.
+FILESYSTEM_CALLS = frozenset(
+    {
+        "write_text", "write_bytes", "mkdir", "touch", "unlink", "rmdir", "rename",
+        "chmod", "symlink_to", "rmtree", "remove", "makedirs",
+        "copytree", "read_text", "read_bytes", "iterdir", "rglob", "glob", "walk",
+    }
+)
 
 # Names that mean "this function touches the world". Not exhaustive by
 # construction -- the `await` ban below is the load-bearing half, since every
@@ -104,6 +144,25 @@ def _interrupt_node_violations(tree: ast.AST, relative: Path) -> list[str]:
     return problems
 
 
+def _filesystem_violations(tree: ast.AST, relative: Path) -> list[str]:
+    """ADR-016 and ADR-017, enforced instead of asserted."""
+    if any(package in relative.parents for package in FILESYSTEM_PACKAGES):
+        return []
+    if relative.name in FILESYSTEM_MODULES:
+        return []
+    problems = []
+    for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+        name = _call_name(call)
+        if name in FILESYSTEM_CALLS:
+            problems.append(
+                f"{relative}:{call.lineno}: ADR-016/ADR-017 violation -- "
+                f"'{name}()' touches the filesystem outside "
+                f"{FILESYSTEM_PACKAGES[0]}/; workers read and reason, they do not "
+                "open files, and inputs are resolved once at dispatch"
+            )
+    return problems
+
+
 def check_file(path: Path, project_root: Path) -> list[str]:
     try:
         relative = path.resolve().relative_to(project_root.resolve())
@@ -125,7 +184,11 @@ def check_file(path: Path, project_root: Path) -> list[str]:
             for module, lineno in _imports(tree)
             if module in GATEWAY_ONLY_MODULES
         ]
-    return violations + _interrupt_node_violations(tree, relative)
+    return (
+        violations
+        + _interrupt_node_violations(tree, relative)
+        + _filesystem_violations(tree, relative)
+    )
 
 
 def find_project_root(start: Path) -> Path:
@@ -152,7 +215,7 @@ def main(argv: list[str]) -> int:
     if violations:
         print(f"\n{len(violations)} violation(s) in {checked} file(s).", file=sys.stderr)
         return 1
-    print(f"lint_architecture: {checked} file(s) clean (ADR-007, ADR-010).")
+    print(f"lint_architecture: {checked} file(s) clean (ADR-007, ADR-010, ADR-016/017).")
     return 0
 
 

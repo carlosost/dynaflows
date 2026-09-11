@@ -19,6 +19,8 @@ from typer.testing import CliRunner
 from dynaflows.cli import app
 from tests.conftest import FakeGateway, make_playbook
 
+_DEFAULT_PLAN_TASKS = range(3)  # what conftest's default draft plans
+
 pytestmark = pytest.mark.deterministic
 
 
@@ -202,12 +204,22 @@ def test_run_and_resume_describe_a_finished_run_the_same_way(
 
 
 def test_a_completed_run_reports_what_it_cost(isolated: FakeGateway) -> None:
+    """Enhancer + planner + one call per worker.
+
+    The number is derived from the fake's per-call cost rather than written
+    out. It was written out, and step 1.6 -- which changed the call COUNT and
+    nothing about costing -- made it fail for a reason that had nothing to do
+    with what it was testing. A test whose number moves for unrelated reasons
+    is a test people edit instead of read.
+    """
     result = CliRunner().invoke(
         app, ["run", "audit auth", "--thread", "d3", "--yes-prompt", "--yes-plan"]
     )
-    # Two calls now: the enhancer and the planner.
-    assert "$0.0040 spent" in result.output
-    assert "2 call(s)" in result.output
+
+    calls = 2 + len(_DEFAULT_PLAN_TASKS)
+    assert f"{calls} call(s)" in result.output
+    assert f"${calls * 0.002:.4f} spent" in result.output
+    assert isolated.worker_calls == len(_DEFAULT_PLAN_TASKS)
 
 
 def test_a_typed_error_is_a_message_not_a_traceback(

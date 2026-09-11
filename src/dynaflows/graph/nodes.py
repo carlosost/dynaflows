@@ -22,30 +22,45 @@ Two rules, and the first cost a real bug in this very file:
 # it cannot resolve, so it warns on every node. A warning that fires on
 # ordinary work is a warning people learn to ignore (playbook §5.1), so the
 # annotations here stay real objects.
+from pathlib import Path
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 from dynaflows.contracts.calls import CallRequest
+from dynaflows.contracts.errors import DynaflowsError, ErrorCode
+from dynaflows.contracts.playbook import ContextPack
 from dynaflows.contracts.state import (
     MAX_FANOUT,
     EvaluationReport,
     GateDecision,
     GateOutcome,
+    PlanTask,
+    WorkerResult,
     WorkflowState,
     cost_delta,
 )
 from dynaflows.contracts.tiers import Tier
 from dynaflows.graph import planner as planning
 from dynaflows.graph.capabilities import render_catalogue
-from dynaflows.graph.deps import auto_approved, gateway_from, playbook_from
+from dynaflows.graph.deps import (
+    auto_approved,
+    gateway_from,
+    playbook_from,
+    source_root_from,
+    store_from,
+)
 from dynaflows.graph.prompts import (
     ENHANCER_SYSTEM,
     PLANNER_SYSTEM,
+    WORKER_SYSTEM,
     EnhancedPrompt,
     PlanDraft,
+    WorkerReport,
 )
+from dynaflows.playbook.pack import pack
+from dynaflows.store.sources import SourceRefusal, read_sources
 
 
 async def enhance_prompt(
@@ -264,14 +279,160 @@ async def approve_plan(
     return update
 
 
-async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> dict[str, Any]:
-    """Step 1.6, dispatched by Send. Returns a DELTA on every reduced key.
+# PLACEHOLDER (playbook 4.5). Sized so twelve workers at MAX_FANOUT stay well
+# inside the 32,000-token floor `doctor` enforces, with room for the objective,
+# the system prompt and the answer. Step 1.8 replaces it with a measurement.
+WORKER_CONTEXT_BUDGET = 6_000
 
-    A worker must never raise: an exception inside a Send branch aborts the
-    whole superstep, turning 'one of twelve failed' into 'the run is gone'
-    (ADR-010).
+
+async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> dict[str, Any]:
+    """One analysis task. Dispatched by Send; returns a DELTA on reduced keys.
+
+    ADR-017: the context is assembled HERE from things already resolved, not
+    fetched by the model. Playbook anchors go into the pack before source
+    files, so a tight budget drops the code before it drops the rules the code
+    is being judged against -- and `dropped_ids` says which, in the trace.
+
+    A worker must never raise. An exception inside a Send branch aborts the
+    whole superstep, turning "one of twelve failed" into "the run is gone", so
+    every failure below becomes a `failed` WorkerResult that the evaluator can
+    count (ADR-004) instead of an exception nobody catches.
     """
-    return {}
+    task = state.get("task")
+    if not isinstance(task, PlanTask):
+        # Not reachable through dispatch_workers, and that is exactly why it
+        # is handled: an unreachable branch that returns {} would erase nothing
+        # and report nothing, which is the quietest possible bug.
+        return {}
+
+    ledger = cost_delta()
+    try:
+        gateway = gateway_from(config)
+        repository = playbook_from(config)
+        store = store_from(config)
+        root = Path(source_root_from(config))
+    except DynaflowsError as exc:
+        return {"results": [_failed(task, exc)], "cost": ledger}
+
+    playbook_chunks = repository.by_anchor(list(task.playbook_anchors))
+    source_chunks, refusals = read_sources(list(task.inputs), root)
+    context = pack([*playbook_chunks, *source_chunks], WORKER_CONTEXT_BUDGET)
+
+    prompt = _worker_prompt(task, context, refusals)
+    try:
+        result = await gateway.call(
+            CallRequest(
+                tier=task.tier_override or Tier.MID,
+                system=WORKER_SYSTEM,
+                prompt=prompt,
+                schema=WorkerReport,
+                max_tokens=2048,
+                label=f"worker.{task.task_id}",
+                metadata=(
+                    ("run_id", state.get("run_id", "")),
+                    ("node", "worker"),
+                    ("task_id", task.task_id),
+                    ("capability", task.capability),
+                    # ADR-011: what this worker saw and what it did not, in the
+                    # trace, so "why did it miss that" is answerable without
+                    # re-running anything.
+                    ("context_pack_tokens", str(context.tokens)),
+                    ("context_dropped_ids", ",".join(context.dropped_ids)),
+                    ("source_refusals", ",".join(r.render() for r in refusals)),
+                ),
+            )
+        )
+    except DynaflowsError as exc:
+        return {"results": [_failed(task, exc)], "cost": ledger}
+    except Exception as exc:  # noqa: BLE001 -- see the docstring: never raise
+        return {
+            "results": [_failed(task, DynaflowsError.of(ErrorCode.UNKNOWN, str(exc)))],
+            "cost": ledger,
+        }
+
+    ledger = _merge_delta(ledger, result)
+    report: WorkerReport = result.payload
+
+    try:
+        artifact = store.write(state.get("run_id", "unknown"), task.task_id, report.findings)
+    except OSError as exc:
+        # The analysis succeeded and the disk did not. Degraded, not failed:
+        # the summary is still in state and still worth synthesising, and
+        # saying "failed" here would discard work already paid for.
+        return {
+            "results": [
+                WorkerResult(
+                    task_id=task.task_id,
+                    status="degraded",
+                    summary=f"{report.summary}\n\n(report not saved: {exc})",
+                    model_id=result.model_id,
+                    tier=result.tier,
+                    fallback_depth=result.fallback_depth,
+                    tokens_in=result.tokens_in,
+                    tokens_out=result.tokens_out,
+                    cost_usd=result.cost_usd,
+                )
+            ],
+            "cost": ledger,
+        }
+
+    # A model that says it lacked context is reporting a real limitation, and
+    # ADR-004 needs that separable from a clean success. `degraded` is what the
+    # evaluator counts; hiding it as `ok` is how a run passes while telling the
+    # user nothing.
+    incomplete = not report.context_was_sufficient or bool(context.dropped_ids) or bool(refusals)
+    return {
+        "results": [
+            WorkerResult(
+                task_id=task.task_id,
+                status="degraded" if incomplete else "ok",
+                summary=report.summary,
+                artifact=artifact,
+                model_id=result.model_id,
+                tier=result.tier,
+                fallback_depth=result.fallback_depth,
+                tokens_in=result.tokens_in,
+                tokens_out=result.tokens_out,
+                cost_usd=result.cost_usd,
+            )
+        ],
+        "cost": ledger,
+    }
+
+
+def _failed(task: PlanTask, exc: DynaflowsError) -> WorkerResult:
+    """One failure shape, so eleven siblings keep going and the twelfth is
+    visible rather than merely absent."""
+    return WorkerResult(
+        task_id=task.task_id,
+        status="failed",
+        summary="",
+        error=exc.envelope,
+    )
+
+
+def _worker_prompt(task: PlanTask, context: ContextPack, refusals: list[SourceRefusal]) -> str:
+    """What the worker is shown, including what it is NOT shown.
+
+    The refusals and drops are in the prompt, not only in the trace. A model
+    told "these files were withheld" reports a gap; a model shown a silently
+    shorter context reports confidently on a subset (AP-19, applied to a
+    prompt).
+    """
+    parts = [f"OBJECTIVE\n{task.objective}"]
+    if task.inputs:
+        parts.append("INPUTS REQUESTED\n" + "\n".join(f"- {i}" for i in task.inputs))
+    if refusals:
+        parts.append(
+            "NOT AVAILABLE (do not speculate about these)\n"
+            + "\n".join(f"- {r.render()}" for r in refusals)
+        )
+    if context.dropped_ids:
+        parts.append(
+            f"CONTEXT TRUNCATED: {len(context.dropped_ids)} section(s) did not fit the budget."
+        )
+    parts.append("CONTEXT\n" + (context.text or "(nothing was retrievable)"))
+    return "\n\n".join(parts)
 
 
 async def evaluate(state: WorkflowState, config: RunnableConfig | None = None) -> dict[str, Any]:

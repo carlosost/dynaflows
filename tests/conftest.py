@@ -48,6 +48,9 @@ class FakeGateway:
         self.assumptions = assumptions or []
         self.requests: list[Any] = []
         self.plan_draft: Any = _default_draft
+        # Overridden by tests that need a worker to fail, come back short, or
+        # admit it lacked context. Default is a clean success.
+        self.worker_report: Any = _default_report
 
     async def call(self, request: Any, **_: object) -> Any:
         """Answers according to the schema it was asked for.
@@ -56,11 +59,13 @@ class FakeGateway:
         test code, where a fix to one silently misses the other.
         """
         from dynaflows.contracts.calls import CallResult
-        from dynaflows.graph.prompts import EnhancedPrompt, PlanDraft
+        from dynaflows.graph.prompts import EnhancedPrompt, PlanDraft, WorkerReport
 
         self.requests.append(request)
         if request.schema is PlanDraft:
             payload: Any = self.plan_draft() if callable(self.plan_draft) else self.plan_draft
+        elif request.schema is WorkerReport:
+            payload = self.worker_report(request)
         else:
             payload = EnhancedPrompt(
                 enhanced=request.prompt if self.echo else self.enhanced,
@@ -102,6 +107,12 @@ class FakeGateway:
 
         return sum(1 for r in self.requests if r.schema is PlanDraft)
 
+    @property
+    def worker_calls(self) -> int:
+        from dynaflows.graph.prompts import WorkerReport
+
+        return sum(1 for r in self.requests if r.schema is WorkerReport)
+
 
 @pytest.fixture
 def fake_gateway() -> FakeGateway:
@@ -127,8 +138,23 @@ def draft_with(count: int) -> Any:
 
 
 def _default_draft() -> Any:
-
     return draft_with(3)
+
+
+def _default_report(request: Any) -> Any:
+    """A clean worker answer, identifiable per task.
+
+    The task id is echoed into the findings so a fan-out test can prove the N
+    artifacts are N DIFFERENT artifacts rather than one written N times.
+    """
+    from dynaflows.graph.prompts import WorkerReport
+
+    task_id = dict(request.metadata).get("task_id", "?")
+    return WorkerReport(
+        summary=f"findings for {task_id}",
+        findings=f"# {task_id}\n\nEvidence.",
+        context_was_sufficient=True,
+    )
 
 
 @pytest.fixture
@@ -161,3 +187,53 @@ def make_playbook() -> Any:
             ),
         ]
     )
+
+
+@pytest.fixture
+def workspace(tmp_path: Path) -> Path:
+    """A source root for ADR-017's input resolution, with one readable file."""
+    root = tmp_path / "workspace"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "auth.py").write_text("def login():\n    return True\n", encoding="utf-8")
+    return root
+
+
+def graph_config(thread: str, gateway: Any, root: Path, **extra: Any) -> dict[str, Any]:
+    """The `configurable` every graph test passes.
+
+    Shared rather than copied. It was copied -- once per test module -- and the
+    moment the worker node needed two more dependencies, every copy had to
+    learn about them independently. That is the AP-11 shape in test code.
+    """
+    from dynaflows.store.run_store import RunStore
+
+    return {
+        "configurable": {
+            "thread_id": thread,
+            "gateway": gateway,
+            "playbook": make_playbook(),
+            "store": RunStore(root / ".dynaflows"),
+            "source_root": root,
+            # No default. Which gate a module skips is the thing that module
+            # is about -- g1 skips plan, g2 skips prompt -- and picking one
+            # here made every g1 test sail past its own subject.
+            "auto_approve": list(extra.pop("auto_approve", []) or []),
+            **extra,
+        }
+    }
+
+
+def cfg_factory(workspace: Path, skip: list[str]) -> Any:
+    """A `cfg(thread, gateway, **extra)` that skips `skip` by default.
+
+    The shared part -- gateway, playbook, store, source root -- lives in
+    graph_config; the gate default does not, because it is what distinguishes
+    the modules. Merged rather than overridden, so a test adding a gate does
+    not silently lose the module's own.
+    """
+
+    def _cfg(thread: str, gateway: Any, **extra: Any) -> dict[str, Any]:
+        gates = [*skip, *(extra.pop("auto_approve", []) or [])]
+        return graph_config(thread, gateway, workspace, auto_approve=gates, **extra)
+
+    return _cfg

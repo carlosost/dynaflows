@@ -8,13 +8,21 @@ shows the task list itself and stops before the fan-out spends anything.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from langgraph.types import Command
 
-from dynaflows.contracts.state import MAX_FANOUT, GateDecision, Plan, PlanTask, initial_state
+from dynaflows.contracts.state import (
+    MAX_FANOUT,
+    GateDecision,
+    Plan,
+    PlanTask,
+    WorkerResult,
+    initial_state,
+)
 from dynaflows.contracts.tiers import Tier
-from dynaflows.graph import build_graph, open_checkpointer
+from dynaflows.graph import build_graph, nodes, open_checkpointer
 from dynaflows.graph.planner import (
     draft_to_plan,
     estimate_tokens,
@@ -23,7 +31,7 @@ from dynaflows.graph.planner import (
     violation_of,
 )
 from dynaflows.graph.prompts import PlanDraft, PlannedTask
-from tests.conftest import FakeGateway, draft_with, make_playbook
+from tests.conftest import FakeGateway, cfg_factory, draft_with
 
 pytestmark = [pytest.mark.deterministic, pytest.mark.anyio]
 
@@ -33,16 +41,10 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def cfg(thread: str, gateway: FakeGateway, **extra: object) -> dict:
-    return {
-        "configurable": {
-            "thread_id": thread,
-            "gateway": gateway,
-            "playbook": make_playbook(),
-            "auto_approve": ["prompt", *(extra.pop("auto_approve", []) or [])],  # type: ignore[misc]
-            **extra,
-        }
-    }
+@pytest.fixture
+def cfg(workspace: Path) -> Any:
+    """G2 is the subject here; G1 is auto-approved so it never appears."""
+    return cfg_factory(workspace, ["prompt"])
 
 
 def a_task(task_id: str = "t", **kwargs: object) -> PlannedTask:
@@ -115,7 +117,7 @@ def test_the_token_estimate_scales_with_the_fan_out() -> None:
 # --- the planner node ----------------------------------------------------
 
 
-async def test_the_planner_runs_at_frontier_tier(tmp_path: Path) -> None:
+async def test_the_planner_runs_at_frontier_tier(tmp_path: Path, cfg: Any) -> None:
     """ADR-006's cost asymmetry: one call that decides the cost of N."""
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
@@ -125,7 +127,7 @@ async def test_the_planner_runs_at_frontier_tier(tmp_path: Path) -> None:
     assert planner_request.tier is Tier.FRONTIER
 
 
-async def test_the_planner_is_shown_the_playbook_catalogue(tmp_path: Path) -> None:
+async def test_the_planner_is_shown_the_playbook_catalogue(tmp_path: Path, cfg: Any) -> None:
     """ADR-009: one frontier call routes context for every worker, so it has
     to see what there is to route."""
     gateway = FakeGateway()
@@ -137,7 +139,7 @@ async def test_the_planner_is_shown_the_playbook_catalogue(tmp_path: Path) -> No
     assert "analyse" in system, "the capability catalogue is missing"
 
 
-async def test_the_planner_is_shown_the_brief_the_human_approved(tmp_path: Path) -> None:
+async def test_the_planner_is_shown_the_brief_the_human_approved(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway("APPROVED BRIEF")
     async with open_checkpointer(tmp_path / "s.db") as saver:
         graph = build_graph(saver)
@@ -145,7 +147,7 @@ async def test_the_planner_is_shown_the_brief_the_human_approved(tmp_path: Path)
     assert next(r for r in gateway.requests if r.schema is PlanDraft).prompt == "APPROVED BRIEF"
 
 
-async def test_an_oversized_plan_is_re_planned_not_trimmed(tmp_path: Path) -> None:
+async def test_an_oversized_plan_is_re_planned_not_trimmed(tmp_path: Path, cfg: Any) -> None:
     """ADR-014. Silently dropping tasks produces a synthesis that is
     incomplete without saying so."""
     gateway = FakeGateway()
@@ -160,7 +162,7 @@ async def test_an_oversized_plan_is_re_planned_not_trimmed(tmp_path: Path) -> No
     assert len(final["plan"].tasks) == 4
 
 
-async def test_the_re_plan_tells_the_model_what_was_wrong(tmp_path: Path) -> None:
+async def test_the_re_plan_tells_the_model_what_was_wrong(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway()
     attempts = iter([draft_with(MAX_FANOUT + 1), draft_with(2)])
     gateway.plan_draft = lambda: next(attempts)
@@ -174,7 +176,7 @@ async def test_the_re_plan_tells_the_model_what_was_wrong(tmp_path: Path) -> Non
     assert str(MAX_FANOUT) in second.prompt
 
 
-async def test_the_re_plan_is_not_served_from_cache(tmp_path: Path) -> None:
+async def test_the_re_plan_is_not_served_from_cache(tmp_path: Path, cfg: Any) -> None:
     """A re-plan must be a fresh call, not a cache hit on the answer that was
     just rejected -- hence a different variant (ADR-013)."""
     gateway = FakeGateway()
@@ -189,7 +191,7 @@ async def test_the_re_plan_is_not_served_from_cache(tmp_path: Path) -> None:
     assert planner_requests[0].variant != planner_requests[1].variant
 
 
-async def test_two_failed_attempts_stop_the_run_and_say_why(tmp_path: Path) -> None:
+async def test_two_failed_attempts_stop_the_run_and_say_why(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway()
     gateway.plan_draft = lambda: draft_with(MAX_FANOUT + 2)
     async with open_checkpointer(tmp_path / "s.db") as saver:
@@ -205,7 +207,7 @@ async def test_two_failed_attempts_stop_the_run_and_say_why(tmp_path: Path) -> N
 # --- the gate ------------------------------------------------------------
 
 
-async def test_the_gate_shows_every_task_not_a_count(tmp_path: Path) -> None:
+async def test_the_gate_shows_every_task_not_a_count(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway()
     gateway.plan_draft = lambda: draft_with(5)
     async with open_checkpointer(tmp_path / "s.db") as saver:
@@ -219,7 +221,7 @@ async def test_the_gate_shows_every_task_not_a_count(tmp_path: Path) -> None:
     assert payload["estimated_tokens"] > 0
 
 
-async def test_rejecting_at_g2_stops_before_any_worker_runs(tmp_path: Path) -> None:
+async def test_rejecting_at_g2_stops_before_any_worker_runs(tmp_path: Path, cfg: Any) -> None:
     """The whole point of the gate: the fan-out is the irreversible spend."""
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
@@ -232,7 +234,7 @@ async def test_rejecting_at_g2_stops_before_any_worker_runs(tmp_path: Path) -> N
     assert final.get("results") == []
 
 
-async def test_approving_at_g2_dispatches_one_branch_per_task(tmp_path: Path) -> None:
+async def test_approving_at_g2_dispatches_one_branch_per_task(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway()
     gateway.plan_draft = lambda: draft_with(4)
     async with open_checkpointer(tmp_path / "s.db") as saver:
@@ -242,7 +244,7 @@ async def test_approving_at_g2_dispatches_one_branch_per_task(tmp_path: Path) ->
     assert final["evaluation"].task_count == 4
 
 
-async def test_resuming_does_not_re_run_the_planner(tmp_path: Path) -> None:
+async def test_resuming_does_not_re_run_the_planner(tmp_path: Path, cfg: Any) -> None:
     """ADR-007 again, at the expensive gate. A re-planned brief on resume
     would cost a frontier call AND could differ from what was approved."""
     gateway = FakeGateway()
@@ -258,7 +260,7 @@ async def test_resuming_does_not_re_run_the_planner(tmp_path: Path) -> None:
     assert final["plan_hash"] == shown, "the approved plan is not the plan that ran"
 
 
-async def test_yes_plan_skips_the_gate(tmp_path: Path) -> None:
+async def test_yes_plan_skips_the_gate(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
         graph = build_graph(saver)
@@ -272,21 +274,37 @@ async def test_yes_plan_skips_the_gate(tmp_path: Path) -> None:
 # --- ADR-004 rule 1: no vacuous pass -------------------------------------
 
 
-async def test_a_plan_whose_tasks_produced_nothing_does_not_pass(tmp_path: Path) -> None:
-    """Five planned tasks, zero results, `passed=True` -- the report the stub
-    workers produced before ADR-004's first rule was implemented. A missing
-    result is not a silent success: it means a branch never ran or never
-    returned, which is strictly worse than one that failed and said so.
+async def test_a_planned_task_with_no_result_at_all_does_not_pass() -> None:
+    """ADR-004 rule 1, tested on the evaluator rather than through the graph.
+
+    It used to be provoked by running a graph whose workers were stubs. Step
+    1.6 gave those workers bodies, so the graph can no longer produce this
+    state on demand -- and a test that can only be set up by a bug that has
+    since been fixed is a test that quietly stops testing anything.
+
+    The rule still matters and is still reachable: a `Send` branch that returns
+    {} contributes no result, and a missing result is strictly worse than a
+    failed one, because nothing says it happened.
     """
-    gateway = FakeGateway()
-    gateway.plan_draft = lambda: draft_with(5)
-    async with open_checkpointer(tmp_path / "s.db") as saver:
-        graph = build_graph(saver)
-        final = await graph.ainvoke(
-            initial_state("r", "ev1", "audit"), cfg("ev1", gateway, auto_approve=["plan"])
-        )
-    report = final["evaluation"]
+    plan = Plan(
+        rationale="r",
+        tasks=[PlanTask(task_id=f"t{i}", capability="analyse", objective="o") for i in range(5)],
+    )
+    state = {
+        "plan": plan,
+        # Two of five came back. The other three left no trace at all.
+        "results": [
+            WorkerResult(task_id="t0", status="ok", summary="found things"),
+            WorkerResult(task_id="t1", status="ok", summary="found things"),
+        ],
+    }
+
+    out = await nodes.evaluate(state)  # type: ignore[arg-type]
+    report = out["evaluation"]
+
     assert report.task_count == 5
     assert report.passed is False
-    assert final["degraded"] is True
     assert "produced no result at all" in " ".join(report.reasons)
+    # AP-20: a task that produced nothing is not a task that failed. Counting
+    # it as failed would have made the vacuous pass merely a wrong number.
+    assert report.failed_count == 0

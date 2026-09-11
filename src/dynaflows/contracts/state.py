@@ -139,7 +139,9 @@ class WorkerResult(BaseModel):
     fallback_depth: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
-    cost_usd: float = 0.0
+    # Optional for the same reason as CallResult.cost_usd: a call nobody
+    # could price and a call that cost nothing are different facts.
+    cost_usd: float | None = None
     error: ErrorEnvelope | None = None
 
     @property
@@ -205,6 +207,11 @@ class WorkflowState(TypedDict, total=False):
     # --- concurrent keys: reducers are mandatory (see FAN_OUT_KEYS) --------
     results: Annotated[list[WorkerResult], operator.add]
     cost: Annotated[CostLedger, merge_cost]
+
+    # Present ONLY inside a Send branch: dispatch_workers puts one task on
+    # each copy of the state. Declared here so the worker node reads a typed
+    # field rather than an untyped bag, and absent everywhere else on purpose.
+    task: PlanTask | None
 
     evaluation: EvaluationReport | None
     degraded: bool

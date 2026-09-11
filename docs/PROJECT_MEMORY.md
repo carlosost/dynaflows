@@ -920,8 +920,58 @@ in their repository, they copy it there themselves.
   check. An ADR asserting testable behaviour names the test that proves it (AP-19 habit 1);
   `tests/architecture/test_worker_write_boundary.py` is that test, and it is written in step 1.6
   rather than now, because its subject does not exist yet.
+- **Amended by ADR-017 (2026-09-11):** "the playbook repository (read)" was incomplete — a worker
+  also needs the files the plan names. ADR-017 resolves them at dispatch rather than granting a
+  read tool, so the grant above still holds verbatim: a worker receives text, never a tool.
 - **Reversal condition:** a task that cannot be expressed as "read, reason, report." Reversing this
   requires a sandbox ADR first, not a code change first.
+
+---
+
+### ADR-017: The plan's `inputs` are resolved once at dispatch, not by the worker
+
+**Date:** 2026-09-11
+**Status:** Accepted — amends ADR-016's consequences
+
+**Context.**
+ADR-016 grants a worker "the playbook repository (read), the run store (write), and the gateway.
+Nothing else." The `analyse` capability, written the same day, says a worker will "read the named
+inputs and the retrieved playbook sections." Those two sentences contradict each other, and the
+contradiction was invisible until a live plan emitted `inputs: ["src/dynaflows/gateway",
+"src/dynaflows/contracts"]` — files no worker could open. Either `inputs` is real or it is
+decoration, and a decorative field the planner spends frontier tokens populating is worse than no
+field at all.
+
+This is AP-19 caught by execution rather than by review: two documents, each internally consistent,
+asserting incompatible things about code that did not exist yet.
+
+**Decision.**
+The **graph** resolves `inputs` once, at dispatch, and folds the resulting text into each worker's
+context pack alongside the playbook chunks. Workers receive text and nothing else.
+
+**Why not a per-worker read tool.** It is the obvious design and it is worse on four counts: the
+path allow-list, symlink-escape check, secrets deny-list and binary/size guard would each have to
+hold across N parallel branches instead of one; the token cost per worker becomes unbounded, which
+defeats the pack budget that already exists; a read tool is a tool, so ADR-016's grant would need
+amending rather than merely clarifying; and the architectural lint that proves ADR-016 gets harder
+to write, because "no worker touches the filesystem" is a far easier property to enforce than "every
+worker touches the filesystem only within these bounds."
+
+**Consequences.**
+- ADR-016's tool grant is **unchanged**. A worker still receives no file tool, no shell and no
+  network client. This ADR narrows where a read may happen; it does not add a capability.
+- Source text and playbook text compete for one budget, ordered: playbook anchors first (the planner
+  chose them deliberately), then source. A tight budget therefore drops source before it drops the
+  rules the source is being judged against. `ContextPack.dropped_ids` records what was lost, so a
+  worker's blind spot is visible in the trace rather than inferred (ADR-011).
+- The read boundary is `src/dynaflows/store/`, which is also the only package permitted to write —
+  so ONE lint rule covers both directions of ADR-016 and this ADR.
+- A path outside the project root, a symlink leaving it, a file matching the secrets deny-list, and a
+  file over the size cap are four different refusals and are reported as four different reasons
+  (AP-20). A worker that saw nothing must say why it saw nothing.
+- **Reversal condition:** a task that cannot name its inputs in advance — one that must follow a
+  reference discovered mid-analysis. That is a real limitation of this design and the honest trigger
+  for revisiting it. Reversing requires a tool-grant ADR first, not a code change first.
 
 ---
 
@@ -1351,6 +1401,46 @@ Inherited verbatim from playbook §1.6, with two project-specific additions:
 
 ---
 
+### Step 1.6 — the fan-out, and what it is allowed to touch (2026-09-11)
+
+`Send` now dispatches one real worker per plan task. Each worker gets a context pack assembled at
+dispatch (ADR-017), makes one MID-tier call, writes its report to the run store and returns a
+`WorkerResult` delta. It never raises: a gateway failure, an unexpected exception from below the
+gateway, a missing dependency and an unwritable disk are four different results, not four ways to
+lose the run.
+
+New: `src/dynaflows/store/` (run store + input resolution), `graph/prompts.WorkerReport`,
+`graph/deps.store_from`/`source_root_from`, `WorkflowState.task`, and lint rule 3.
+
+**ADR-017 exists because a live run found a contradiction two documents could not.** ADR-016's tool
+grant and the `analyse` capability's description were written the same day and disagreed about
+whether a worker may read the files a plan names. Nothing caught it until a real plan emitted
+`inputs: ["src/dynaflows/gateway"]` — files no worker could open. Both documents were internally
+consistent; only running the thing exposed it.
+
+**`status` has three values and they are separable on purpose.** A model that reports insufficient
+context, a context pack that dropped sections, and a refused input all produce `degraded` rather than
+`ok`, because ADR-004's evaluator cannot distinguish "went fine" from "went fine as far as it could
+tell" if both say `ok`. An unwritable store is also `degraded`, not `failed`: the analysis was paid
+for and the summary is still worth synthesising.
+
+**The linter fired on correct code the first time it ran** — `replace` matched `dataclasses.replace`
+four times. Fixed by dropping `replace` and `copy` from the watch list and saying so in the source: a
+gate that fires on ordinary work is a gate people switch off (playbook §5.2, Pattern 5), and the
+resulting hole in the rule is named rather than left to be found.
+
+**Two test-code fixes that were the same bug as a production one.** The graph `configurable` was
+copied into two test modules; when the worker gained two dependencies, both copies needed the same
+edit and neither could fail if only one got it. It is now one `graph_config`. Collapsing it, however,
+also flattened a real difference — g1 auto-approves `plan`, g2 auto-approves `prompt` — and every g1
+test silently sailed past its own subject until the suite caught it. The shared part is shared; the
+gate default is not. The same reasoning applies to `cli._graph_config`, which replaces the two copies
+that let `run` ship without a gateway.
+
+**Still owed from 1.5:** ADR-011's feedback write on a G2 rejection (`key="plan_accepted"`,
+`score=0`, `correction=<the edited plan>`). It needs the LangSmith run id surfaced from the invoker
+and is not in this step.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
@@ -1433,6 +1523,22 @@ one that names its holes.
     table, so a pre-existing `calls.db` would have raised `IntegrityError` at fan-in — inside a
     worker, where ADR-010 says nothing may raise. `connect_cache` now rebuilds the table, copying
     rows rather than dropping them.
+- **`WORKER_CONTEXT_BUDGET = 6_000`, `MAX_FILE_BYTES = 200_000` and `MAX_FILES_PER_INPUT = 25` are
+  placeholders** (§4.5), sized so twelve workers stay inside the 32,000-token floor `doctor`
+  enforces. None is measured. Step 1.8 owes all three, and they now sit alongside `MAX_FANOUT`, the
+  semaphore, the retry count, `CHARS_PER_TOKEN_ESTIMATE`, `min_context_tokens` and
+  `EVAL_MAX_FAILURE_RATE` on that list.
+- **The source reader's secrets deny-list is a name-and-suffix match, not a scanner.** It stops
+  `.env`, `*.pem` and friends. It does NOT stop a credential hard-coded in a `.py` file the plan
+  named, and nothing here should be read as a claim that it does. ADR-016 removed the need for a
+  sandbox; it did not remove the need to think about what leaves the machine.
+- **ADR-017's dispatch-time read cannot serve a task that discovers what it needs mid-analysis.**
+  That is the stated reversal condition and it is a real limitation, not a hypothetical one: a task
+  like "follow the auth flow wherever it goes" is not expressible under this design.
+- **Worker behaviour has never run against a live model.** 308 deterministic tests drive the node
+  with a fake that always returns a well-formed `WorkerReport`. Every prior step in this project has
+  had at least one defect that only a live run found, and there is no reason to expect this one to
+  be different.
 - **STILL OPEN: the USD budget ceiling has never been able to fire.** ADR-013's `Budget.max_usd` was
   compared against a total that was structurally always 0.0, so only the token ceiling was ever a
   real guard. It should work now that costs are real, but "should" is the word that produced this

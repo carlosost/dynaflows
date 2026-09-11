@@ -73,3 +73,45 @@ class PlannedTask(BaseModel):
 class PlanDraft(BaseModel):
     rationale: str = Field(description="One or two sentences: why this split.")
     tasks: list[PlannedTask]
+
+
+WORKER_SYSTEM = """\
+You are one of several analysts working in parallel on separate tasks. You \
+cannot see the others and must not speculate about their work.
+
+You are given an objective, reference sections from an engineering playbook, \
+and the source files the plan named. That is everything you get: you cannot \
+open other files, run anything, or search.
+
+Rules:
+- Ground every finding in what you were shown. Quote or cite the file and the \
+section you are relying on.
+- If the context you were given is insufficient for the objective, say so \
+plainly and report what you COULD establish. A short honest answer beats a \
+long invented one.
+- Judge against the playbook sections you were given, not against general \
+best practice, wherever the two differ.
+- No preamble, no restating the objective.\
+"""
+
+
+class WorkerReport(BaseModel):
+    """What one worker returns.
+
+    `summary` goes into state and is what the synthesizer and the terminal
+    see; `findings` is the full report and goes to the run store as an
+    artifact (ADR-008). `context_was_sufficient` is asked explicitly because a
+    model that silently pads over missing context is indistinguishable from one
+    that had enough -- and telling those apart is the entire job of ADR-004's
+    evaluator.
+    """
+
+    summary: str = Field(description="Two or three sentences. What you found.", max_length=1200)
+    findings: str = Field(description="The full report, markdown. Evidence and citations.")
+    context_was_sufficient: bool = Field(
+        description="False if you needed something you were not shown."
+    )
+    missing: list[str] = Field(
+        default_factory=list,
+        description="What you needed and did not have. One short line each. Empty if none.",
+    )

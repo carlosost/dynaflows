@@ -10,6 +10,7 @@ proves the split works.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 from langgraph.types import Command
@@ -18,7 +19,7 @@ from dynaflows.contracts.state import GateDecision, initial_state
 from dynaflows.contracts.tiers import Tier
 from dynaflows.graph import build_graph, open_checkpointer
 from dynaflows.graph.prompts import EnhancedPrompt
-from tests.conftest import FakeGateway, make_playbook
+from tests.conftest import FakeGateway, cfg_factory
 
 pytestmark = [pytest.mark.deterministic, pytest.mark.anyio]
 
@@ -28,22 +29,13 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def cfg(thread: str, gateway: FakeGateway, **extra: object) -> dict:
-    return {
-        "configurable": {
-            "thread_id": thread,
-            "gateway": gateway,
-            "playbook": make_playbook(),
-            # G1 is the subject here; G2 is auto-approved so it never appears.
-            # Merged, not overridden: a test that adds "prompt" must not
-            # accidentally re-enable G2 and hang on a gate it never asked for.
-            "auto_approve": ["plan", *(extra.pop("auto_approve", []) or [])],  # type: ignore[misc]
-            **extra,
-        }
-    }
+@pytest.fixture
+def cfg(workspace: Path) -> Any:
+    """G1 is the subject here; G2 is auto-approved so it never appears."""
+    return cfg_factory(workspace, ["plan"])
 
 
-async def run_to_gate(saver, thread: str, gateway: FakeGateway, prompt: str = "audit auth"):  # noqa: ANN001, ANN201
+async def run_to_gate(saver, thread: str, gateway: FakeGateway, cfg, prompt: str = "audit auth"):  # noqa: ANN001, ANN201
     graph = build_graph(saver)
     out = await graph.ainvoke(initial_state("r", thread, prompt), cfg(thread, gateway))
     return graph, out
@@ -52,22 +44,24 @@ async def run_to_gate(saver, thread: str, gateway: FakeGateway, prompt: str = "a
 # --- the enhancer --------------------------------------------------------
 
 
-async def test_the_enhancer_runs_at_small_tier_and_halts_at_the_gate(tmp_path: Path) -> None:
+async def test_the_enhancer_runs_at_small_tier_and_halts_at_the_gate(
+    tmp_path: Path, cfg: Any
+) -> None:
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
-        _, out = await run_to_gate(saver, "t1", gateway)
+        _, out = await run_to_gate(saver, "t1", gateway, cfg)
     assert gateway.enhancer_calls == 1
     assert gateway.requests[0].tier is Tier.SMALL
     assert gateway.requests[0].schema is EnhancedPrompt
     assert "__interrupt__" in out
 
 
-async def test_the_gate_payload_shows_the_human_what_was_assumed(tmp_path: Path) -> None:
+async def test_the_gate_payload_shows_the_human_what_was_assumed(tmp_path: Path, cfg: Any) -> None:
     """A human approving a rewrite needs to see what was assumed on their
     behalf, not just the result."""
     gateway = FakeGateway("rewritten", ["assumed the HTTP layer, not the DB"])
     async with open_checkpointer(tmp_path / "s.db") as saver:
-        _, out = await run_to_gate(saver, "t2", gateway, "audit auth")
+        _, out = await run_to_gate(saver, "t2", gateway, cfg, "audit auth")
     payload = out["__interrupt__"][0].value
     assert payload["gate"] == "prompt"
     assert payload["original"] == "audit auth"
@@ -75,10 +69,10 @@ async def test_the_gate_payload_shows_the_human_what_was_assumed(tmp_path: Path)
     assert payload["assumptions"] == ["assumed the HTTP layer, not the DB"]
 
 
-async def test_the_enhancer_records_its_own_cost(tmp_path: Path) -> None:
+async def test_the_enhancer_records_its_own_cost(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
-        graph, _ = await run_to_gate(saver, "t3", gateway)
+        graph, _ = await run_to_gate(saver, "t3", gateway, cfg)
         snapshot = await graph.aget_state(cfg("t3", gateway))
     ledger = snapshot.values["cost"]
     assert (ledger.calls_made, ledger.tokens_in, ledger.tokens_out) == (1, 40, 12)
@@ -88,7 +82,7 @@ async def test_the_enhancer_records_its_own_cost(tmp_path: Path) -> None:
 # --- ADR-007: the reason the gate is its own node ------------------------
 
 
-async def test_resuming_does_not_re_run_the_enhancer(tmp_path: Path) -> None:
+async def test_resuming_does_not_re_run_the_enhancer(tmp_path: Path, cfg: Any) -> None:
     """The whole point of ADR-007.
 
     A resumed graph re-runs the interrupted node from its first line. If the
@@ -98,7 +92,7 @@ async def test_resuming_does_not_re_run_the_enhancer(tmp_path: Path) -> None:
     gateway = FakeGateway()
     db = tmp_path / "s.db"
     async with open_checkpointer(db) as saver:
-        graph, out = await run_to_gate(saver, "t4", gateway)
+        graph, out = await run_to_gate(saver, "t4", gateway, cfg)
         shown = out["__interrupt__"][0].value["enhanced"]
 
     # A fresh process resumes the same thread.
@@ -109,10 +103,10 @@ async def test_resuming_does_not_re_run_the_enhancer(tmp_path: Path) -> None:
     assert final["enhanced_prompt"] == shown, "the approved text is not the text that proceeded"
 
 
-async def test_the_text_that_proceeds_is_the_text_that_was_shown(tmp_path: Path) -> None:
+async def test_the_text_that_proceeds_is_the_text_that_was_shown(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway("EXACT TEXT SHOWN")
     async with open_checkpointer(tmp_path / "s.db") as saver:
-        graph, out = await run_to_gate(saver, "t5", gateway)
+        graph, out = await run_to_gate(saver, "t5", gateway, cfg)
         assert out["__interrupt__"][0].value["enhanced"] == "EXACT TEXT SHOWN"
         final = await graph.ainvoke(Command(resume={"decision": "approve"}), cfg("t5", gateway))
     assert final["enhanced_prompt"] == "EXACT TEXT SHOWN"
@@ -121,21 +115,21 @@ async def test_the_text_that_proceeds_is_the_text_that_was_shown(tmp_path: Path)
 # --- the three answers ---------------------------------------------------
 
 
-async def test_approve_lets_the_run_continue(tmp_path: Path) -> None:
+async def test_approve_lets_the_run_continue(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
-        graph, _ = await run_to_gate(saver, "t6", gateway)
+        graph, _ = await run_to_gate(saver, "t6", gateway, cfg)
         final = await graph.ainvoke(Command(resume={"decision": "approve"}), cfg("t6", gateway))
     assert final["prompt_gate"].decision is GateDecision.APPROVE
     assert final["evaluation"] is not None
     assert final.get("halted") is None
 
 
-async def test_edit_replaces_the_model_text_without_asking_again(tmp_path: Path) -> None:
+async def test_edit_replaces_the_model_text_without_asking_again(tmp_path: Path, cfg: Any) -> None:
     """The human's text beats the model's. Re-asking would defeat the option."""
     gateway = FakeGateway("model wording")
     async with open_checkpointer(tmp_path / "s.db") as saver:
-        graph, _ = await run_to_gate(saver, "t7", gateway)
+        graph, _ = await run_to_gate(saver, "t7", gateway, cfg)
         final = await graph.ainvoke(
             Command(resume={"decision": "edit", "replacement": "my wording"}),
             cfg("t7", gateway),
@@ -144,12 +138,12 @@ async def test_edit_replaces_the_model_text_without_asking_again(tmp_path: Path)
     assert gateway.enhancer_calls == 1
 
 
-async def test_reject_ends_the_run_before_anything_else_is_spent(tmp_path: Path) -> None:
+async def test_reject_ends_the_run_before_anything_else_is_spent(tmp_path: Path, cfg: Any) -> None:
     """ADR-005: the value of gating here is that a 'no' costs one small-tier
     call and nothing else."""
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
-        graph, _ = await run_to_gate(saver, "t8", gateway)
+        graph, _ = await run_to_gate(saver, "t8", gateway, cfg)
         final = await graph.ainvoke(Command(resume={"decision": "reject"}), cfg("t8", gateway))
     assert final["prompt_gate"].decision is GateDecision.REJECT
     assert final["halted"] == "rejected by human at gate G1"
@@ -157,21 +151,23 @@ async def test_reject_ends_the_run_before_anything_else_is_spent(tmp_path: Path)
     assert gateway.enhancer_calls == 1
 
 
-async def test_an_unparseable_answer_is_a_rejection_not_an_approval(tmp_path: Path) -> None:
+async def test_an_unparseable_answer_is_a_rejection_not_an_approval(
+    tmp_path: Path, cfg: Any
+) -> None:
     """Defaulting an unreadable answer to approval would let a typo authorise
     a fan-out."""
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
-        graph, _ = await run_to_gate(saver, "t9", gateway)
+        graph, _ = await run_to_gate(saver, "t9", gateway, cfg)
         final = await graph.ainvoke(Command(resume=12345), cfg("t9", gateway))
     assert final["prompt_gate"].decision is GateDecision.REJECT
     assert "unparseable" in (final["prompt_gate"].note or "")
 
 
-async def test_a_bare_string_answer_is_accepted(tmp_path: Path) -> None:
+async def test_a_bare_string_answer_is_accepted(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
-        graph, _ = await run_to_gate(saver, "t10", gateway)
+        graph, _ = await run_to_gate(saver, "t10", gateway, cfg)
         final = await graph.ainvoke(Command(resume="approve"), cfg("t10", gateway))
     assert final["prompt_gate"].decision is GateDecision.APPROVE
 
@@ -179,7 +175,7 @@ async def test_a_bare_string_answer_is_accepted(tmp_path: Path) -> None:
 # --- --yes-prompt (ADR-005) ---------------------------------------------
 
 
-async def test_auto_approve_skips_the_gate_entirely(tmp_path: Path) -> None:
+async def test_auto_approve_skips_the_gate_entirely(tmp_path: Path, cfg: Any) -> None:
     gateway = FakeGateway()
     async with open_checkpointer(tmp_path / "s.db") as saver:
         graph = build_graph(saver)
@@ -205,7 +201,7 @@ async def test_a_missing_gateway_is_a_typed_config_error(tmp_path: Path) -> None
 
 
 async def test_a_gateway_in_config_does_not_break_strict_checkpointing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cfg: Any
 ) -> None:
     """Dependencies ride in `configurable`, and checkpoints are strict.
 
@@ -217,7 +213,7 @@ async def test_a_gateway_in_config_does_not_break_strict_checkpointing(
     gateway = FakeGateway()
     db = tmp_path / "s.db"
     async with open_checkpointer(db) as saver:
-        graph, out = await run_to_gate(saver, "strict-1", gateway)
+        graph, out = await run_to_gate(saver, "strict-1", gateway, cfg)
         assert "__interrupt__" in out
     async with open_checkpointer(db) as saver:
         graph = build_graph(saver)
