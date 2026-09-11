@@ -116,8 +116,13 @@ and what happens. If you cannot name one, do not report it.
 - `examined` lists the files you actually read. Fill it in even when you find \
 nothing: "I read these and found nothing" and "I did not look" are different \
 answers and only you can tell them apart.
-- Finding nothing is a legitimate result. Report zero findings rather than \
-padding with descriptions of correct code.
+- Report EVERY candidate you find, including ones you are not sure about. \
+Each finding is checked afterwards and an unverifiable one is filed separately \
+rather than counted against you, so withholding a real problem because you \
+cannot quote it perfectly loses it entirely. Be exhaustive first; the checks \
+are what make it safe to be.
+- Finding nothing is still a legitimate result, and padding with descriptions \
+of correct code is not. Report a candidate you doubt; do not invent one.
 - Judge against the playbook sections you were given, not against general best \
 practice, wherever the two differ.
 - If the context is insufficient for the objective, say so and report what you \

@@ -1807,6 +1807,29 @@ fixed number of findings and the schema reorders which three, rather than changi
 find. If that is right, **recall is bounded by output budget rather than by analysis**, and the
 lever is asking for more findings rather than better ones. Untested.
 
+**Every precision constraint cost recall, and the discard rate never moved.**
+
+| Worker schema | Claims/run | Recall | Discarded |
+|---|---|---|---|
+| baseline | 3 | 3/5 | 0 |
+| `+ failure` required | 3 | 3/5 (different three) | 0 |
+| `+ quoted_lines` and a worked example | **2** | **2/5** | 0 |
+
+Zero discards at every step. The constraints were not rejecting findings — they were stopping the
+model reporting them. Six commits of tightening verification, each one measured only for whether it
+stopped bad findings, and the cost was paid in findings that were never made.
+
+**The structural error: verification was put inside the generation step.** A model required to
+fully satisfy a strict contract before it may speak says less. That is what strict output contracts
+do, and it is not fixable by wording the contract better — the previous two attempts to reword it
+are the evidence.
+
+The fix is generate-and-filter (the Phase 5 pattern): let the worker be exhaustive, let the checks
+sort the output into verified and unverified, and show both. The machinery already exists — every
+discarded finding is written into the worker's artifact — so the cheap version is one prompt change
+telling the worker that an unverifiable candidate is filed rather than held against it. If claims
+per run do not rise, the model is not withholding and the limit is analysis after all.
+
 **Live runs, same prompt each time, as the checks tightened:**
 
 | Run | Claimed | Survived | Dominant cause of loss |
