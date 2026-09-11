@@ -485,7 +485,12 @@ def run(
                 auto_approve=(["prompt"] if yes_prompt else []) + (["plan"] if yes_plan else []),
                 root=root,
             )
-            state = initial_state(uuid.uuid4().hex[:8], thread_id, prompt)
+            state = initial_state(
+                uuid.uuid4().hex[:8],
+                thread_id,
+                prompt,
+                source_root=str(cfg["configurable"]["source_root"]),
+            )
             await _drive(graph, cfg, state)
             snapshot = await graph.aget_state(cfg)
             return {"next": snapshot.next, "values": snapshot.values}
@@ -532,8 +537,15 @@ def resume(
     async def _go() -> dict[str, Any]:
         async with open_checkpointer(settings.state_db) as saver:
             graph = build_graph(saver)
-            cfg = _graph_config(settings, thread, auto_approve=[], root=root)
-            before = await graph.aget_state(cfg)
+            # Read state FIRST, with a config carrying only the thread id, so
+            # the root this run was actually planned against can be recovered
+            # rather than guessed. Resuming against a different tree analyses
+            # different files and says nothing about it.
+            probe_cfg: dict[str, Any] = {"configurable": {"thread_id": thread}}
+            before = await graph.aget_state(probe_cfg)
+            recorded = before.values.get("source_root") if before.values else None
+            target = root or (Path(recorded) if recorded else None)
+            cfg = _graph_config(settings, thread, auto_approve=[], root=target)
             if not before.created_at:
                 return {"missing": True}
             if not before.next:

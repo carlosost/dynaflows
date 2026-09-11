@@ -118,19 +118,33 @@ def _inside(path: Path, root: Path) -> bool:
     return True
 
 
+def number_lines(text: str) -> str:
+    """Prefix every line with its number, as the worker will see it.
+
+    ADR-019 requires a worker to cite a line range, and a worker that cannot
+    see line numbers can only invent one. The prefix costs roughly 10% more
+    context tokens for the same code, and is what makes a citation checkable
+    rather than merely plausible.
+    """
+    lines = text.splitlines()
+    width = len(str(len(lines))) if lines else 1
+    return "\n".join(f"{i:>{width}}| {line}" for i, line in enumerate(lines, start=1))
+
+
 def _chunk_of(path: Path, root: Path) -> Chunk | None:
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError, OSError:
         return None
     relative = str(path.resolve().relative_to(root.resolve()))
+    numbered = number_lines(text)
     return Chunk(
         id="src:" + hashlib.sha256(relative.encode()).hexdigest()[:16],
         source_path=relative,
         heading_path=relative,
         anchors=(relative,),
-        body=text,
-        tokens=estimate_tokens(text),
+        body=numbered,
+        tokens=estimate_tokens(numbered),
     )
 
 

@@ -149,16 +149,36 @@ def _default_draft() -> Any:
 def _default_report(request: Any) -> Any:
     """A clean worker answer, identifiable per task.
 
-    The task id is echoed into the findings so a fan-out test can prove the N
+    The task id is echoed into the summary so a fan-out test can prove the N
     artifacts are N DIFFERENT artifacts rather than one written N times.
+
+    No findings by default: ADR-019 checks every citation against what the
+    worker was shown, and a default that cites something would make every test
+    that does not set up a workspace depend on grounding. Tests about grounding
+    supply their own report.
     """
     from dynaflows.graph.prompts import WorkerReport
 
     task_id = dict(request.metadata).get("task_id", "?")
     return WorkerReport(
         summary=f"findings for {task_id}",
-        findings=f"# {task_id}\n\nEvidence.",
+        examined=["src/auth.py"],
+        findings=[],
         context_was_sufficient=True,
+    )
+
+
+def a_finding(**kwargs: Any) -> Any:
+    """A finding that grounds against make_workspace()'s src/auth.py."""
+    from dynaflows.graph.prompts import Finding
+
+    return Finding(
+        claim=kwargs.pop("claim", "login always returns True"),
+        file=kwargs.pop("file", "src/auth.py"),
+        lines=kwargs.pop("lines", "4-5"),
+        evidence=kwargs.pop("evidence", "def login():"),
+        severity=kwargs.pop("severity", "medium"),
+        remediation=kwargs.pop("remediation", "Check the password."),
     )
 
 

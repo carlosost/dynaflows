@@ -142,6 +142,11 @@ class WorkerResult(BaseModel):
     # Optional for the same reason as CallResult.cost_usd: a call nobody
     # could price and a call that cost nothing are different facts.
     cost_usd: float | None = None
+    # ADR-019, and AP-20 again: claims made and claims that survived checking
+    # are two facts. Equal numbers mean a careful worker; a large gap means one
+    # that is inventing, and one number cannot say which.
+    findings_reported: int = 0
+    findings_grounded: int = 0
     error: ErrorEnvelope | None = None
 
     @property
@@ -157,6 +162,10 @@ class WorkerResult(BaseModel):
             return False
         has_artifact = self.artifact is not None and self.artifact.tokens > 0
         return bool(self.summary.strip()) or has_artifact
+
+    @property
+    def findings_dropped(self) -> int:
+        return self.findings_reported - self.findings_grounded
 
 
 class EvaluationReport(BaseModel):
@@ -260,6 +269,13 @@ class WorkflowState(TypedDict, total=False):
     results: Annotated[list[WorkerResult], operator.add]
     cost: Annotated[CostLedger, merge_cost]
 
+    # The tree this run was planned against and whose files its workers read
+    # (ADR-017, ADR-018). Checkpointed because `resume` builds its config
+    # BEFORE it can read state, and a resume that guesses a different root
+    # analyses different files without saying so -- a wrong answer, not an
+    # inconvenience.
+    source_root: str
+
     # Present ONLY inside a Send branch: dispatch_workers puts one task on
     # each copy of the state. Declared here so the worker node reads a typed
     # field rather than an untyped bag, and absent everywhere else on purpose.
@@ -271,7 +287,9 @@ class WorkflowState(TypedDict, total=False):
     halted: str | None
 
 
-def initial_state(run_id: str, thread_id: str, raw_prompt: str) -> WorkflowState:
+def initial_state(
+    run_id: str, thread_id: str, raw_prompt: str, source_root: str = ""
+) -> WorkflowState:
     """The only place an initial state is built.
 
     Reduced keys are seeded explicitly: a reducer is called with whatever is
@@ -281,6 +299,7 @@ def initial_state(run_id: str, thread_id: str, raw_prompt: str) -> WorkflowState
         run_id=run_id,
         thread_id=thread_id,
         raw_prompt=raw_prompt,
+        source_root=source_root,
         enhanced_prompt=None,
         enhancer_assumptions=[],
         prompt_gate=None,

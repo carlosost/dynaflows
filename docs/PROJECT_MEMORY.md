@@ -1030,6 +1030,58 @@ the catalogue in front of it is a real failure mode, and without the check it pr
 
 ---
 
+### ADR-019: Findings are structured and their citations are checked mechanically
+
+**Date:** 2026-09-11
+**Status:** Accepted
+
+**Context.**
+Two live runs failed in opposite directions and neither was caught by the system.
+
+Run `w1`: workers given no source. One invented `gateway/logger.py`,
+`gateway/middleware.py`, `gateway/handlers.py` and `gateway/metrics.py`, cited line numbers in them,
+and reported six findings including a HIGH severity one. Run `w2`: workers given real source. Three
+of four returned a single sentence — "no issues were found" — and one returned a zero-byte file,
+despite a prompt demanding file, line, impact, severity and evidence for every finding.
+
+`WorkerReport.findings` is free text. A prompt can ask for evidence; free text cannot require it.
+And "I found nothing" is indistinguishable from "I did not look", which is why `w2` read as a
+success and `w1` read as an audit.
+
+The decisive observation: **the graph knows exactly what text each worker was shown.** A citation is
+therefore checkable without a model, without a second call, and without judgement — a file either
+was in the pack or was not, a line either exists or does not, a quote either appears or does not.
+`w1`'s fabrication would have been caught by a string search.
+
+**Decision.**
+1. `Finding` is a typed record: `claim`, `file`, `lines`, `evidence` (quoted verbatim),
+   `severity`, `remediation`. `WorkerReport` carries `examined` (what it actually read) and
+   `findings: list[Finding]`.
+2. Source chunks are rendered **with line numbers**, because requiring a line citation from a worker
+   that cannot see line numbers is an invitation to invent one.
+3. `verify_citations` runs in the worker node, deterministically, and **drops** any finding whose
+   file was not in the pack, whose line range is outside the file, or whose evidence does not appear
+   in the cited file. Three counters, not one: reported, grounded, dropped (AP-20).
+
+**Consequences.**
+- A worker's output is **falsifiable**. It is NOT thereby true: a worker can quote a real line and
+  draw a wrong conclusion. Phase 2's adversarial verification is still the answer to that, and
+  nothing here should be read as a substitute — this only makes the claims something Phase 2 can
+  check cheaply.
+- "Nothing found" becomes legible: `examined` non-empty with `findings` empty is a real negative
+  result; `examined` empty is a worker that did not look. Today both produce the same sentence.
+- **A strict evidence match will drop true findings that were paraphrased.** That is a deliberate
+  trade and the wrong one to get wrong quietly: a dropped true finding shows up in the counters and
+  in the trace, while an invented finding that passes does not. The drop rate is a §4.5 number to be
+  measured in step 1.8, and if it is high the fix is a looser match with a recorded threshold, not
+  the removal of the check.
+- Line-numbering source chunks costs roughly 10% more context tokens for the same code.
+- **Reversal condition:** a capability whose findings are not about a location in a file — a
+  cross-file architectural claim is the obvious one. That needs a second finding shape, not the
+  removal of this one.
+
+---
+
 ## 2. Data Contracts
 
 Written before implementation (§1.4, contract-first). These are the canonical shapes; changes are
@@ -1633,16 +1685,31 @@ one that names its holes.
   True, `empty_count` stayed 0 and the task reported `ok`. A reference to nothing is nothing:
   `produced_something` now requires a non-blank summary or an artifact with tokens, and a worker
   whose `findings` is blank is `degraded` regardless of what it says about its context.
-- **STILL OPEN: the worker output contract does not require evidence.** Run `w2` was the first with
-  real code in front of the workers, and three of four returned a single sentence — "no issues were
-  found" — despite a prompt demanding file, line, impact, severity and evidence per finding.
-  `WorkerReport.findings` is free text, so "I found nothing" and "I looked and here is what I
-  checked" are indistinguishable, and neither can be verified. Making findings a structured list
-  with required citations is the candidate fix and is a design change, not a patch.
-- **The analysed root is not recorded in the checkpoint.** `resume` accepts `--root` and defaults to
-  the project root, so resuming a run that used `--root` without passing it again resolves inputs
-  somewhere else entirely and the workers quietly analyse the wrong files. The plan is checkpointed;
-  the tree it was planned against is not. Recording it in `WorkflowState` is the fix and is owed.
+- **CLOSED 2026-09-11 by ADR-019: the worker output contract required no evidence.** `findings` is
+  now `list[Finding]` — claim, file, lines, evidence, severity, remediation — source chunks are
+  rendered with line numbers (a worker asked to cite a line it cannot see can only invent one), and
+  `graph/grounding.py` discards any finding whose file was not in that worker's pack, whose range is
+  past the end of it, or whose quoted evidence does not appear. Deterministic: no model, no second
+  call. `w1`'s four invented filenames fail the first check by string search. `examined` separates
+  "I read these and found nothing" from "I did not look", which run `w2` could not.
+  The counters are kept apart (AP-20): `findings_reported` and `findings_grounded` on every
+  `WorkerResult`. Equal numbers mean a careful worker; a large gap means one that is inventing, and
+  a single number cannot say which. Discarded findings are written INTO the artifact, because a
+  reader who cannot see six thrown-out claims reads the silence as diligence.
+- **STILL OPEN: the evidence match may be too strict, and the number is not measured.** An exact
+  whitespace-normalised match will discard findings that are true but paraphrased. The trade is
+  deliberate — a dropped true finding shows up in the counters and the trace, an invented one that
+  passes does not — but the drop RATE is a §4.5 number with no measurement behind it. Step 1.8 owes
+  it. If it is high the answer is a looser match with a recorded threshold, not the removal of the
+  check.
+- **STILL OPEN: grounding makes a finding falsifiable, not true.** A worker can quote a real line
+  and draw a wrong conclusion from it, and nothing here notices. Phase 2's adversarial verification
+  remains the answer; ADR-019 only makes the claims cheap for it to check.
+- **CLOSED 2026-09-11: the analysed root is now checkpointed.** `WorkflowState.source_root` records
+  the tree a run was planned against, and `resume` reads state with a thread-only config BEFORE
+  building the real one so it can recover that root rather than defaulting to the project root. The
+  old behaviour analysed different files than the plan named and produced a plausible report about
+  them — a wrong answer, not an inconvenience.
 - **ADR-018's empty-inputs rule is a narrowing and will eventually fire on legitimate work.** The
   first capability that needs no source — "summarise the playbook's position on retries" is the
   obvious one — makes it wrong. The reversal is explicit in the ADR: remove the empty-inputs rule,

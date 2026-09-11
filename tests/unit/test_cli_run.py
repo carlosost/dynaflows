@@ -284,3 +284,29 @@ def test_a_failed_run_still_says_how_to_resume(
     monkeypatch.setattr(isolated, "call", boom)
     result = CliRunner().invoke(app, ["run", "audit auth", "--thread", "x2", "--yes-prompt"])
     assert "dynaflows resume x2" in result.output
+
+
+def test_resume_recovers_the_root_the_run_was_planned_against(
+    isolated: FakeGateway, tmp_path: Path
+) -> None:
+    """The checkpoint stores the plan; it has to store the tree too.
+
+    `resume` builds its config before it can read state, so without this it
+    defaults to the project root and the workers analyse different files than
+    the ones the plan named -- silently, and with a plausible-looking report at
+    the end. A wrong answer, not an inconvenience.
+    """
+    runner = CliRunner()
+    runner.invoke(
+        app, ["run", "audit auth", "--thread", "rr1", "--yes-prompt", "--stop-before", "plan"]
+    )
+
+    resumed = runner.invoke(app, ["resume", "rr1"], input="a\n")
+
+    assert resumed.exit_code == 0, resumed.output
+    # The proof is in what a worker was handed: src/auth.py exists only in the
+    # recorded workspace, so its contents in the prompt means the right tree
+    # was read after the process boundary.
+    worker_prompts = [r.prompt for r in isolated.requests if r.schema.__name__ == "WorkerReport"]
+    assert worker_prompts
+    assert "def login" in worker_prompts[0]

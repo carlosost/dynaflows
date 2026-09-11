@@ -42,6 +42,7 @@ from dynaflows.contracts.state import (
     cost_delta,
 )
 from dynaflows.contracts.tiers import Tier
+from dynaflows.graph import grounding as grounding_check
 from dynaflows.graph import planner as planning
 from dynaflows.graph.capabilities import render_catalogue
 from dynaflows.graph.deps import (
@@ -51,6 +52,7 @@ from dynaflows.graph.deps import (
     source_root_from,
     store_from,
 )
+from dynaflows.graph.grounding import Grounding
 from dynaflows.graph.prompts import (
     ENHANCER_SYSTEM,
     PLANNER_SYSTEM,
@@ -359,8 +361,17 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
     ledger = _merge_delta(ledger, result)
     report: WorkerReport = result.payload
 
+    # ADR-019. Checked against what this worker ACTUALLY saw -- the packed
+    # chunks, after truncation -- not what it was meant to see. A claim about a
+    # section dropped for budget is ungrounded from this worker's point of
+    # view, which is the honest reading: it could not have read what it quotes.
+    seen = [c for c in (*playbook_chunks, *source_chunks) if c.id in context.included_ids]
+    grounding = grounding_check.verify(report.findings, seen)
+
     try:
-        artifact = store.write(state.get("run_id", "unknown"), task.task_id, report.findings)
+        artifact = store.write(
+            state.get("run_id", "unknown"), task.task_id, _render_findings(report, grounding)
+        )
     except OSError as exc:
         # The analysis succeeded and the disk did not. Degraded, not failed:
         # the summary is still in state and still worth synthesising, and
@@ -377,24 +388,25 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
                     tokens_in=result.tokens_in,
                     tokens_out=result.tokens_out,
                     cost_usd=result.cost_usd,
+                    findings_reported=grounding.reported,
+                    findings_grounded=len(grounding.kept),
                 )
             ],
             "cost": ledger,
         }
 
-    # A model that says it lacked context is reporting a real limitation, and
-    # ADR-004 needs that separable from a clean success. `degraded` is what the
-    # evaluator counts; hiding it as `ok` is how a run passes while telling the
-    # user nothing.
-    # A worker that wrote nothing did not succeed, whatever it says about its
-    # context. Run `w2`: one worker produced a zero-byte findings file and
-    # three produced one sentence each, and three of the four reported `ok`.
-    wrote_nothing = not report.findings.strip()
+    # Four separate reasons to distrust this result, kept apart rather than
+    # collapsed into one flag (AP-20). `degraded` is what ADR-004 counts, and
+    # hiding any of these as `ok` is how a run passes while telling the user
+    # nothing -- which is exactly what runs w1 and w2 did.
+    looked_at_nothing = not report.examined
+    everything_invented = grounding.all_ungrounded
     incomplete = (
         not report.context_was_sufficient
         or bool(context.dropped_ids)
         or bool(refusals)
-        or wrote_nothing
+        or looked_at_nothing
+        or everything_invented
     )
     return {
         "results": [
@@ -409,10 +421,46 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
                 tokens_in=result.tokens_in,
                 tokens_out=result.tokens_out,
                 cost_usd=result.cost_usd,
+                findings_reported=grounding.reported,
+                findings_grounded=len(grounding.kept),
             )
         ],
         "cost": ledger,
     }
+
+
+def _render_findings(report: WorkerReport, grounding: Grounding) -> str:
+    """The artifact. Verified findings, and what was discarded.
+
+    The discarded ones are written down rather than dropped silently. A worker
+    that made six claims and had all six thrown out is a very different thing
+    from one that made none, and a reader who cannot see the difference will
+    read the second as diligence.
+    """
+    lines = [f"# {report.summary}", ""]
+    lines.append("## Examined")
+    lines.extend(f"- {item}" for item in report.examined or ["(nothing recorded)"])
+    lines.append("")
+    lines.append(f"## Findings ({len(grounding.kept)} verified)")
+    if not grounding.kept:
+        lines.append("_None._")
+    for finding in grounding.kept:
+        lines.append(f"### [{finding.severity}] {finding.claim}")
+        lines.append(f"`{finding.file}:{finding.lines}`")
+        lines.append("")
+        lines.append("```")
+        lines.append(finding.evidence)
+        lines.append("```")
+        lines.append(f"**Remediation.** {finding.remediation}")
+        lines.append("")
+    if grounding.dropped:
+        lines.append(f"## Discarded as ungrounded ({len(grounding.dropped)})")
+        lines.extend(f"- {d.render()}: {d.finding.claim}" for d in grounding.dropped)
+        lines.append("")
+    if report.missing:
+        lines.append("## Not available to this worker")
+        lines.extend(f"- {item}" for item in report.missing)
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def _failed(task: PlanTask, exc: DynaflowsError) -> WorkerResult:

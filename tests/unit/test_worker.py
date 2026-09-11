@@ -111,7 +111,9 @@ async def test_a_clean_run_writes_an_artifact_and_keeps_state_small(workspace: P
     result = out["results"][0]
     assert result.status == "ok"
     assert result.artifact is not None
-    assert Path(result.artifact.path).read_text(encoding="utf-8").startswith("# t1")
+    written = Path(result.artifact.path).read_text(encoding="utf-8")
+    assert written.startswith("# findings for t1")
+    assert "## Examined" in written
     # The full report is NOT in state; only a preview of it.
     assert len(result.summary) < 200
 
@@ -121,7 +123,8 @@ async def test_a_model_that_says_it_lacked_context_is_degraded_not_ok(workspace:
     gateway = FakeGateway()
     gateway.worker_report = lambda request: WorkerReport(
         summary="partial",
-        findings="# partial",
+        examined=["src/auth.py"],
+        findings=[],
         context_was_sufficient=False,
         missing=["the session store"],
     )
@@ -291,18 +294,35 @@ async def test_a_worker_that_saw_source_is_not_told_that(workspace: Path) -> Non
     assert "NO SOURCE FILES WERE PROVIDED" not in gateway.requests[-1].prompt
 
 
-async def test_a_worker_that_writes_nothing_is_not_ok(workspace: Path) -> None:
-    """Run `w2`: one worker wrote a ZERO-BYTE findings file and three wrote a
-    single sentence each, and three of the four reported `ok`. An empty report
-    is not a clean result."""
+async def test_a_worker_that_examined_nothing_is_not_ok(workspace: Path) -> None:
+    """Run `w2` produced four reports where "I read these and found nothing"
+    and "I did not look" were the same sentence. `examined` separates them, so
+    an empty one cannot be a clean result."""
     gateway = FakeGateway()
     gateway.worker_report = lambda request: WorkerReport(
-        summary="nothing to report", findings="   ", context_was_sufficient=True
+        summary="nothing to report", examined=[], findings=[], context_was_sufficient=True
     )
 
     out = await run_worker(a_task(inputs=["src/auth.py"]), gateway, workspace)
 
     assert out["results"][0].status == "degraded"
+
+
+async def test_examining_files_and_finding_nothing_is_a_clean_result(workspace: Path) -> None:
+    """The other half, and why the rule is about `examined` and not about
+    findings: a negative result is a result. A rule demanding findings would
+    push every worker to invent one."""
+    gateway = FakeGateway()
+    gateway.worker_report = lambda request: WorkerReport(
+        summary="read it, nothing wrong",
+        examined=["src/auth.py"],
+        findings=[],
+        context_was_sufficient=True,
+    )
+
+    out = await run_worker(a_task(inputs=["src/auth.py"]), gateway, workspace)
+
+    assert out["results"][0].status == "ok"
 
 
 async def test_an_empty_artifact_does_not_count_as_output(workspace: Path) -> None:
@@ -325,3 +345,97 @@ async def test_an_empty_artifact_does_not_count_as_output(workspace: Path) -> No
 
     assert empty.produced_something is False
     assert real.produced_something is True
+
+
+# --- ADR-019: grounding, through the node --------------------------------
+
+
+async def test_a_grounded_finding_reaches_the_artifact(workspace: Path) -> None:
+    from tests.conftest import a_finding
+
+    gateway = FakeGateway()
+    gateway.worker_report = lambda request: WorkerReport(
+        summary="one real problem",
+        examined=["src/auth.py"],
+        findings=[a_finding()],
+        context_was_sufficient=True,
+    )
+
+    out = await run_worker(a_task(inputs=["src/auth.py"]), gateway, workspace)
+
+    result = out["results"][0]
+    assert result.status == "ok"
+    assert (result.findings_reported, result.findings_grounded) == (1, 1)
+    written = Path(result.artifact.path).read_text(encoding="utf-8")
+    assert "login always returns True" in written
+    assert "1 verified" in written
+
+
+async def test_an_invented_finding_is_discarded_and_degrades_the_worker(
+    workspace: Path,
+) -> None:
+    """Run `w1` through the node: a worker citing a file it never saw."""
+    from tests.conftest import a_finding
+
+    gateway = FakeGateway()
+    gateway.worker_report = lambda request: WorkerReport(
+        summary="six findings",
+        examined=["src/auth.py"],
+        findings=[a_finding(file="src/logger.py", claim="logs the password")],
+        context_was_sufficient=True,
+    )
+
+    out = await run_worker(a_task(inputs=["src/auth.py"]), gateway, workspace)
+
+    result = out["results"][0]
+    assert result.status == "degraded"
+    assert (result.findings_reported, result.findings_grounded) == (1, 0)
+    assert result.findings_dropped == 1
+
+
+async def test_a_discarded_finding_is_written_down_not_hidden(workspace: Path) -> None:
+    """Silence about six thrown-out claims reads as diligence."""
+    from tests.conftest import a_finding
+
+    gateway = FakeGateway()
+    gateway.worker_report = lambda request: WorkerReport(
+        summary="s",
+        examined=["src/auth.py"],
+        findings=[a_finding(file="src/ghost.py", claim="invented thing")],
+        context_was_sufficient=True,
+    )
+
+    out = await run_worker(a_task(inputs=["src/auth.py"]), gateway, workspace)
+
+    written = Path(out["results"][0].artifact.path).read_text(encoding="utf-8")
+    assert "Discarded as ungrounded (1)" in written
+    assert "invented thing" in written
+
+
+async def test_a_mix_of_real_and_invented_keeps_the_real_one(workspace: Path) -> None:
+    from tests.conftest import a_finding
+
+    gateway = FakeGateway()
+    gateway.worker_report = lambda request: WorkerReport(
+        summary="s",
+        examined=["src/auth.py"],
+        findings=[a_finding(), a_finding(file="src/ghost.py")],
+        context_was_sufficient=True,
+    )
+
+    out = await run_worker(a_task(inputs=["src/auth.py"]), gateway, workspace)
+
+    result = out["results"][0]
+    # Not all-ungrounded, so not degraded on that count -- but the numbers say
+    # what happened, which is the whole point of keeping them apart.
+    assert (result.findings_reported, result.findings_grounded) == (2, 1)
+
+
+async def test_the_worker_sees_line_numbers(workspace: Path) -> None:
+    """A worker asked to cite a line range without being shown line numbers
+    can only invent one."""
+    gateway = FakeGateway()
+
+    await run_worker(a_task(inputs=["src/auth.py"]), gateway, workspace)
+
+    assert "1| " in gateway.requests[-1].prompt
