@@ -276,12 +276,34 @@ async def evaluate(state: WorkflowState, config: RunnableConfig | None = None) -
     task_count = len(plan_obj.tasks) if plan_obj else len(results)
     failed = sum(1 for r in results if r.status == "failed")
     empty = sum(1 for r in results if r.status != "failed" and not r.produced_something)
+
+    reasons: list[str] = []
+
+    # ADR-004 rule 1: every plan task has exactly one result.
+    #
+    # Checked first and separately, because its absence is the only way to
+    # report a VACUOUS pass -- five planned tasks, zero results, and
+    # `passed=True` because nothing came back to fail. A missing result is not
+    # a silent success; it means a branch never ran or never returned, which
+    # is strictly worse than one that failed and said so.
+    missing = task_count - len(results)
+    if missing > 0:
+        reasons.append(f"{missing} of {task_count} task(s) produced no result at all")
+    elif missing < 0:
+        reasons.append(f"{-missing} more result(s) than planned tasks")
+
+    if failed:
+        reasons.append(f"{failed} task(s) failed")
+    if empty:
+        reasons.append(f"{empty} task(s) returned nothing usable")
+
     report = EvaluationReport(
         task_count=task_count,
         ok_count=sum(1 for r in results if r.status == "ok"),
         failed_count=failed,
         empty_count=empty,
-        passed=not (failed or empty),
+        passed=not reasons,
+        reasons=reasons,
     )
     return {"evaluation": report, "degraded": not report.passed}
 

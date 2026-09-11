@@ -1,7 +1,7 @@
 # PROJECT_MEMORY.md — `dynaflows`
 
 **Status:** Seed document. Written before any implementation, per §1.1 of `GENERAL_ENGINEERING_PLAYBOOK.md`.
-**Last updated:** 2026-09-11 (rev 14)
+**Last updated:** 2026-09-11 (rev 15)
 **Rule:** append-only for decisions. Superseded ADRs are marked `Superseded`, never deleted.
 
 > **This file is the single source of truth for the architecture.**
@@ -1433,6 +1433,26 @@ one that names its holes.
   synthesis can usefully degrade to, which is a measurement nobody has taken.
 - ADR-012's probe ran on aarch64 Linux, not on the macOS arm64 host this project is developed on.
   Closed only when `dynaflows doctor` has run there.
+
+**Learned on 2026-09-11, second pass — two things the ledger was quietly not counting.**
+A live run at gate G1 exposed both, and neither had a failing test because both reported a
+*plausible* number rather than an error.
+
+1. **Every structured call recorded 0 tokens and $0.00.** `with_structured_output()` returns only
+   the parsed model and discards the `AIMessage` carrying `usage_metadata`, so the invoker never saw
+   it. The ledger, ADR-010's budget ceiling and the G2 estimate were all counting nothing — and
+   counting nothing looks exactly like a cheap run. Fixed with `include_raw=True`, which returns the
+   raw message alongside the parsed object. Zeros are honest when a provider sends none; they were
+   not honest when we threw the message away.
+2. **ADR-004's first rule was specified and never implemented.** "Every plan task has exactly one
+   `WorkerResult`" is rule 1 of the evaluator, and without it five planned tasks with zero results
+   reported `passed=True` — a vacuous pass, because nothing came back to fail. A missing result is
+   not a silent success: it means a branch never ran or never returned, which is strictly worse than
+   one that failed and said so. The report now carries `reasons`, so the gap is named rather than
+   implied by a boolean.
+
+The general shape, and it is the third time this project has hit it: **a wrong number is harder to
+notice than an error.** Both of these passed every test, rendered fine, and would have been believed.
 
 **Learned on 2026-09-11 — the first human at a live gate got stuck in it.**
 Gate G1 worked on its first real run: a good rewrite, two substantive assumptions declared, one

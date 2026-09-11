@@ -67,6 +67,19 @@ def retry_after_of(exc: BaseException) -> float | None:
         return None
 
 
+def _usage(message: Any) -> dict[str, int]:
+    """Token counts from an AIMessage, or zeros.
+
+    Zeros are honest when the provider sent none. They are NOT honest when we
+    threw the message away -- which is what happened before include_raw.
+    """
+    usage = getattr(message, "usage_metadata", None) or {}
+    return {
+        "tokens_in": int(usage.get("input_tokens", 0) or 0),
+        "tokens_out": int(usage.get("output_tokens", 0) or 0),
+    }
+
+
 def build_langchain_invoker(settings: Settings) -> Any:
     """The production invoker. The ONLY construction of a chat client."""
     from langchain_openai import ChatOpenAI
@@ -100,8 +113,14 @@ def build_langchain_invoker(settings: Settings) -> Any:
         # with_structured_output returns a Runnable, not a ChatOpenAI. Binding
         # it to a separate name keeps the type honest instead of widening the
         # first one to Any to make the assignment fit.
+        #
+        # include_raw=True is not optional here. Without it the runnable
+        # returns ONLY the parsed model, and the AIMessage carrying
+        # usage_metadata is discarded -- so every structured call recorded
+        # 0 tokens and $0.00, and the ledger, the budget ceiling and the G2
+        # estimate were all quietly counting nothing.
         runnable: Any = (
-            chat.with_structured_output(request.schema, method="json_schema")
+            chat.with_structured_output(request.schema, method="json_schema", include_raw=True)
             if request.schema is not None
             else chat
         )
@@ -121,14 +140,23 @@ def build_langchain_invoker(settings: Settings) -> Any:
             raise error from exc
 
         if request.schema is not None:
-            return RawResponse(text=result.model_dump_json(), served_by=model_id)
+            # include_raw gives {"raw": AIMessage, "parsed": Model, "parsing_error": ...}
+            parsed = result.get("parsed")
+            if parsed is None:
+                raise DynaflowsError.of(
+                    ErrorCode.SCHEMA_INVALID,
+                    f"{model_id}: {result.get('parsing_error') or 'no parsed output'}",
+                )
+            return RawResponse(
+                text=parsed.model_dump_json(),
+                served_by=model_id,
+                **_usage(result.get("raw")),
+            )
         text = getattr(result, "content", None)
-        usage = getattr(result, "usage_metadata", None) or {}
         return RawResponse(
             text=text if isinstance(text, str) else str(result),
-            tokens_in=int(usage.get("input_tokens", 0)),
-            tokens_out=int(usage.get("output_tokens", 0)),
             served_by=model_id,
+            **_usage(result),
         )
 
     return invoke

@@ -81,3 +81,43 @@ def test_a_missing_or_unparseable_retry_after_is_none_not_zero() -> None:
     missing header means."""
     assert retry_after_of(Fake("RateLimitError", 429)) is None
     assert retry_after_of(Fake("RateLimitError", 429, {"retry-after": "soon"})) is None
+
+
+# --------------------------------------------------------------------------
+# Usage metadata. Every structured call recorded 0 tokens and $0.00 because
+# with_structured_output returns only the parsed model and discards the
+# AIMessage that carries usage_metadata. The ledger, the budget ceiling and
+# the G2 estimate were all counting nothing.
+# --------------------------------------------------------------------------
+
+
+class Message:
+    def __init__(self, usage: dict | None = None, content: str = "hi") -> None:
+        self.usage_metadata = usage
+        self.content = content
+
+
+def test_usage_is_read_from_the_message() -> None:
+    from dynaflows.gateway.invoker import _usage
+
+    assert _usage(Message({"input_tokens": 120, "output_tokens": 45})) == {
+        "tokens_in": 120,
+        "tokens_out": 45,
+    }
+
+
+def test_a_provider_that_sends_no_usage_yields_zeros_not_a_crash() -> None:
+    from dynaflows.gateway.invoker import _usage
+
+    assert _usage(Message(None)) == {"tokens_in": 0, "tokens_out": 0}
+    assert _usage(None) == {"tokens_in": 0, "tokens_out": 0}
+
+
+def test_null_token_fields_are_treated_as_zero() -> None:
+    """Some providers send the keys with null values rather than omitting them."""
+    from dynaflows.gateway.invoker import _usage
+
+    assert _usage(Message({"input_tokens": None, "output_tokens": None})) == {
+        "tokens_in": 0,
+        "tokens_out": 0,
+    }

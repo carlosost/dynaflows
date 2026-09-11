@@ -267,3 +267,26 @@ async def test_yes_plan_skips_the_gate(tmp_path: Path) -> None:
         )
     assert "__interrupt__" not in final
     assert final["plan_gate"].note == "--yes-plan"
+
+
+# --- ADR-004 rule 1: no vacuous pass -------------------------------------
+
+
+async def test_a_plan_whose_tasks_produced_nothing_does_not_pass(tmp_path: Path) -> None:
+    """Five planned tasks, zero results, `passed=True` -- the report the stub
+    workers produced before ADR-004's first rule was implemented. A missing
+    result is not a silent success: it means a branch never ran or never
+    returned, which is strictly worse than one that failed and said so.
+    """
+    gateway = FakeGateway()
+    gateway.plan_draft = lambda: draft_with(5)
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        graph = build_graph(saver)
+        final = await graph.ainvoke(
+            initial_state("r", "ev1", "audit"), cfg("ev1", gateway, auto_approve=["plan"])
+        )
+    report = final["evaluation"]
+    assert report.task_count == 5
+    assert report.passed is False
+    assert final["degraded"] is True
+    assert "produced no result at all" in " ".join(report.reasons)
