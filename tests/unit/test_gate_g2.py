@@ -500,3 +500,55 @@ async def test_the_correction_reaches_the_second_attempt(tmp_path: Path, cfg: An
     second = [r for r in gateway.requests if r.schema is PlanDraft][1]
     assert "PREVIOUS ATTEMPT FAILED" in second.prompt
     assert "src/invented.py" in second.prompt
+
+
+# --- ADR-021: the gate must authorise against a number that means something --
+
+
+async def test_the_gate_shows_measured_context_not_an_estimate(tmp_path: Path, cfg: Any) -> None:
+    """Run `s1` displayed "~10,500 tokens estimated" for three tasks whose
+    inputs came to 40,000 -- the task count times a constant I invented. The
+    gate that authorises the entire fan-out spend was showing a number with no
+    relationship to what the workers would receive."""
+    gateway = FakeGateway()
+    gateway.plan_draft = lambda: PlanDraft(
+        rationale="r", tasks=[a_task("t1", inputs=["src/auth.py"])]
+    )
+
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        graph = build_graph(saver)
+        out = await graph.ainvoke(initial_state("r", "cb1", "audit"), cfg("cb1", gateway))
+
+    payload = out["__interrupt__"][0].value
+    task = payload["tasks"][0]
+    assert task["context_tokens"] > 0
+    assert payload["context_budget"] > 0
+    # The measurement is of the real file, through the real resolver.
+    assert task["context_tokens"] < payload["context_budget"]
+    assert payload["over_budget"] == []
+
+
+async def test_a_task_that_will_not_fit_is_named_at_the_gate(
+    tmp_path: Path, cfg: Any, workspace: Path
+) -> None:
+    """Not an error -- the worker is shown what fits and told what it did not
+    get. It IS something the person approving the spend has to see, because
+    the remedy is theirs."""
+    # Large, but under MAX_FILE_BYTES -- a file over that cap never enters the
+    # catalogue at all, so the plan naming it is rejected before the gate. That
+    # is correct and it is a different test.
+    big = workspace / "src" / "huge.py"
+    big.write_text('"""Big."""\n' + "x = 1\n" * 25_000, encoding="utf-8")
+
+    gateway = FakeGateway()
+    gateway.plan_draft = lambda: PlanDraft(
+        rationale="r", tasks=[a_task("t1", inputs=["src/huge.py"])]
+    )
+
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        graph = build_graph(saver)
+        out = await graph.ainvoke(initial_state("r", "cb2", "audit"), cfg("cb2", gateway))
+
+    payload = out["__interrupt__"][0].value
+    assert payload["over_budget"] == ["t1"]
+    assert payload["tasks"][0]["context_tokens"] > payload["context_budget"]

@@ -1129,6 +1129,52 @@ nothing to synthesise.
 
 ---
 
+### ADR-021: The context budget is derived, split by kind, and measured at the gate
+
+**Date:** 2026-09-11
+**Status:** Accepted — supersedes `WORKER_CONTEXT_BUDGET`
+
+**Context.**
+Live run `s1` was the first with structured findings, verified citations and a synthesizer. It
+produced nothing, and every layer reported honestly that it had produced nothing. The cause was one
+number I invented in step 1.6.
+
+Measured afterwards, on the plan the run actually made: task 1 named seven files totalling **19,979
+tokens** of source plus 1,101 tokens of playbook. The budget was **6,000**. The playbook sections
+were packed first — by design — and consumed 1,101; `client.py` consumed 4,358; the remaining six
+files had 541 tokens to fit into. The worker reported, accurately, that six of its seven inputs were
+"not available to this worker", found nothing, and was correctly marked degraded.
+
+Three separate defects, and only the first is the obvious one.
+
+**Decision.**
+1. **The budget is derived, not chosen.** `min_context_tokens` in models.toml is a floor the
+   operator has already declared and `doctor` already checks. The worker budget is that floor, minus
+   what the call itself needs, times a safety fraction — currently 32,000 → 21,000. Raising the
+   floor raises the budget, in the place an operator already looks.
+2. **Reference and subject get separate shares of it.** Packing the playbook first so that a tight
+   budget drops code before the rules the code is judged against sounded careful and was wrong:
+   dropping *all* the subject matter to protect the rules is not a trade-off, it is a failure.
+   `pack_sections` caps the reference at 25% and gives the subject the rest, including whatever the
+   reference did not use.
+3. **Gate G2 shows measured context, not an estimate.** `TOKENS_PER_TASK_ESTIMATE = 3_500` multiplied
+   by the task count produced "~10,500 tokens estimated" for a plan whose inputs came to 40,000. The
+   plan node now builds each task's context through the same resolver the dispatcher uses and records
+   the real number per task, with a warning naming any task that exceeds the budget.
+
+**Consequences.**
+- One extra read of every named file per run, at plan time. That is the cost of the gate authorising
+  the fan-out against a number that means something.
+- A task over budget is **not** an error. The worker is shown what fits and told what it did not get,
+  and the remedy — split the task, name fewer files — belongs to the human at G2, who can now see it.
+- `TOKENS_PER_TASK_ESTIMATE` survives only for the no-input case and is marked superseded.
+- **The 25% reference share is itself a placeholder** (§4.5) and is the only judgement call left in
+  this decision. It is recorded as one rather than presented as a finding.
+- **Reversal condition:** per-model context lengths becoming available in the registry. The floor is
+  a lower bound across the whole chain, so a 200k-context model is budgeted as if it were 32k.
+
+---
+
 ## 2. Data Contracts
 
 Written before implementation (§1.4, contract-first). These are the canonical shapes; changes are
@@ -1769,6 +1815,25 @@ one that names its holes.
   `WorkerResult`. Equal numbers mean a careful worker; a large gap means one that is inventing, and
   a single number cannot say which. Discarded findings are written INTO the artifact, because a
   reader who cannot see six thrown-out claims reads the silence as diligence.
+- **CLOSED 2026-09-11 by ADR-021: the worker context budget starved every run.** `s1`, the first
+  run with the full pipeline, produced nothing while every layer reported honestly. Measured after
+  the fact: one task named seven files totalling 19,979 tokens against a 6,000-token budget, and the
+  playbook — packed first, by design — took 1,101 of it. The worker received one file, said so, and
+  was correctly marked degraded. **The system was working exactly as built and the number was
+  wrong.** Budget is now derived from `min_context_tokens` (32,000 → 21,000), reference and subject
+  get separate shares so neither can starve the other, and G2 shows measured context per task with a
+  warning naming anything over budget.
+  The lesson generalises past the number: `WORKER_CONTEXT_BUDGET` was recorded as a §4.5 placeholder
+  and was still wrong by a factor of four for four steps, because **a placeholder nobody exercises is
+  indistinguishable from a correct value.** The register told us it was unmeasured; only a run told
+  us it was wrong.
+- **STILL OPEN: `reference_share = 0.25` is the judgement call this ADR did not remove** (§4.5). It
+  is the one number in the context path with no measurement behind it, and it decides how much
+  playbook a worker sees.
+- **STILL OPEN: the budget is a floor across the whole chain, not a per-model window.** A model with
+  a 200,000-token context is budgeted as if it had 32,000, because the registry stores the floor and
+  not the per-model length. That is a large amount of wasted capacity and the stated reversal
+  condition for ADR-021.
 - **The synthesizer has never run against a live model.** Every prior step in this project has had
   at least one defect that only a live run found, and there is no reason to expect this one to be
   different. The most likely failure mode given the pattern so far: a model that cites ids

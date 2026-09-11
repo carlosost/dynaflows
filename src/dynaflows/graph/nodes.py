@@ -45,6 +45,7 @@ from dynaflows.contracts.tiers import Tier
 from dynaflows.graph import grounding as grounding_check
 from dynaflows.graph import planner as planning
 from dynaflows.graph import synthesis as synth
+from dynaflows.graph.budgets import worker_context_budget
 from dynaflows.graph.capabilities import render_catalogue
 from dynaflows.graph.deps import (
     auto_approved,
@@ -64,7 +65,7 @@ from dynaflows.graph.prompts import (
     SynthesisDraft,
     WorkerReport,
 )
-from dynaflows.playbook.pack import pack
+from dynaflows.playbook.pack import pack_sections
 from dynaflows.store.catalogue import build_catalogue
 from dynaflows.store.sources import SourceRefusal, read_sources
 
@@ -209,7 +210,12 @@ async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> di
         correction = planning.violation_of(draft, catalogue) or ""
         if not correction:
             plan_obj = planning.draft_to_plan(draft)
-            plan_obj.estimated_tokens = planning.estimate_tokens(plan_obj)
+            plan_obj = planning.measure_context(
+                plan_obj,
+                repository,
+                Path(source_root_from(config)),
+                worker_context_budget(getattr(gateway, "registry", None)),
+            )
             return {
                 "plan": plan_obj,
                 "plan_hash": planning.plan_hash(plan_obj, _models_version(gateway)),
@@ -271,6 +277,8 @@ async def approve_plan(
             "rationale": plan_obj.rationale,
             "plan_hash": state.get("plan_hash"),
             "estimated_tokens": plan_obj.estimated_tokens,
+            "context_budget": plan_obj.context_budget,
+            "over_budget": planning.over_budget(plan_obj),
             "tasks": [
                 {
                     "task_id": t.task_id,
@@ -278,6 +286,7 @@ async def approve_plan(
                     "objective": t.objective,
                     "inputs": list(t.inputs),
                     "anchors": list(t.playbook_anchors),
+                    "context_tokens": t.context_tokens,
                 }
                 for t in plan_obj.tasks
             ],
@@ -288,12 +297,6 @@ async def approve_plan(
     if outcome.decision is GateDecision.REJECT:
         update["halted"] = "rejected by human at gate G2"
     return update
-
-
-# PLACEHOLDER (playbook 4.5). Sized so twelve workers at MAX_FANOUT stay well
-# inside the 32,000-token floor `doctor` enforces, with room for the objective,
-# the system prompt and the answer. Step 1.8 replaces it with a measurement.
-WORKER_CONTEXT_BUDGET = 6_000
 
 
 async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> dict[str, Any]:
@@ -327,7 +330,12 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
 
     playbook_chunks = repository.by_anchor(list(task.playbook_anchors))
     source_chunks, refusals = read_sources(list(task.inputs), root)
-    context = pack([*playbook_chunks, *source_chunks], WORKER_CONTEXT_BUDGET)
+    # Two shares of one budget, not one ordered list. Passing the playbook
+    # first so a tight budget drops code before rules sounded careful and
+    # starved run `s1`'s workers of six of their seven files (ADR-021).
+    context = pack_sections(
+        playbook_chunks, source_chunks, worker_context_budget(getattr(gateway, "registry", None))
+    )
 
     prompt = _worker_prompt(task, context, refusals, sources=len(source_chunks))
     try:
@@ -613,7 +621,7 @@ async def synthesize(state: WorkflowState, config: RunnableConfig | None = None)
         return {"halted": f"cannot write the synthesis: {exc}", "cost": ledger}
 
     findings, accounting = synth.collect(results, store.read_data)
-    computed = synth.render_accounting(accounting, evaluation)
+    computed = synth.render_accounting(accounting, evaluation, has_summary=bool(findings))
 
     # ADR-020: nothing verified means nothing to synthesise. Paying a frontier
     # model to write prose about an empty list produces confident prose about

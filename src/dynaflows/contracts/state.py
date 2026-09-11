@@ -81,6 +81,11 @@ class PlanTask(BaseModel):
     playbook_anchors: list[str] = Field(default_factory=list)
     tier_override: Tier | None = None
     depends_on: list[str] = Field(default_factory=list)
+    # Measured after validation, not planned: how many tokens of context this
+    # task's inputs and anchors actually come to. Gate G2 authorises the spend
+    # and until now it did so against a per-task constant that had nothing to
+    # do with what the workers would receive (ADR-021).
+    context_tokens: int = 0
 
     @field_validator("capability")
     @classmethod
@@ -118,6 +123,9 @@ class Plan(BaseModel):
     tasks: list[PlanTask] = Field(min_length=1, max_length=MAX_FANOUT)
     rationale: str = ""
     estimated_tokens: int = 0
+    # The per-worker budget these numbers were measured against, so the
+    # gate can say 'over budget' rather than showing a number with no scale.
+    context_budget: int = 0
     estimated_cost_usd: float = 0.0
 
     @field_validator("tasks")

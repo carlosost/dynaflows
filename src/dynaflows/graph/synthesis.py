@@ -115,7 +115,12 @@ def collect(results: list[WorkerResult], load: object) -> tuple[list[Corroborate
     return findings, accounting
 
 
-def render_accounting(accounting: Accounting, evaluation: EvaluationReport | None) -> str:
+def render_accounting(
+    accounting: Accounting,
+    evaluation: EvaluationReport | None,
+    *,
+    has_summary: bool = True,
+) -> str:
     """The computed half of the report. ADR-020.
 
     Written first and written from state, so it survives a synthesis call that
@@ -146,7 +151,16 @@ def render_accounting(accounting: Accounting, evaluation: EvaluationReport | Non
         lines.append("")
         lines.append("**This run did not pass its own checks:**")
         lines.extend(f"- {reason}" for reason in evaluation.reasons)
-    if accounting.degraded or accounting.failed or accounting.findings_discarded:
+    if not has_summary:
+        # Saying "read the section below in that light" above nothing is the
+        # document asserting what it does not contain (AP-19), in miniature and
+        # in the one report a user is guaranteed to read.
+        lines.append("")
+        lines.append(
+            "No summary follows: no finding survived checking, so there is nothing to "
+            "summarise. That is a result about this run, not about the code."
+        )
+    elif accounting.degraded or accounting.failed or accounting.findings_discarded:
         lines.append("")
         lines.append(
             "Read the section below in that light: it summarises only the findings that "

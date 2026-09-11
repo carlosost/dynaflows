@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -16,6 +18,7 @@ from dynaflows.contracts.state import MAX_FANOUT, Plan, PlanTask
 from dynaflows.graph.capabilities import CATALOGUE_VERSION
 from dynaflows.graph.prompts import PlanDraft
 from dynaflows.store.catalogue import SourceCatalogue, unknown_paths
+from dynaflows.store.sources import read_sources
 
 # Per-task token estimate, used for the G2 summary. PLACEHOLDER (playbook 4.5):
 # the pack budget plus room for the objective and the worker's answer. Step 1.8
@@ -126,5 +129,43 @@ def plan_hash(plan: Plan, models_version: str) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 
+def measure_context(plan: Plan, repository: Any, root: Path, budget: int) -> Plan:
+    """Fill in what each task's worker will actually be given, by building it.
+
+    Not an estimate. The old `estimate_tokens` multiplied the task count by a
+    constant I invented, so gate G2 -- the gate that authorises the entire
+    fan-out spend -- showed a number with no relationship to what the workers
+    would receive. Run `s1` displayed "~10,500 tokens estimated" for three
+    tasks whose inputs came to 40,000, and the workers were handed a fraction
+    of their files.
+
+    This reads the same files the dispatcher will read, through the same
+    resolver, so the number at the gate is the number that happens. It costs
+    one extra read of each named file per run, at the point where a human is
+    about to approve spending real money on them.
+    """
+    for task in plan.tasks:
+        chunks, _ = read_sources(list(task.inputs), root)
+        anchors = repository.by_anchor(list(task.playbook_anchors))
+        task.context_tokens = sum(c.tokens for c in (*anchors, *chunks))
+    plan.context_budget = budget
+    plan.estimated_tokens = sum(min(t.context_tokens, budget) for t in plan.tasks)
+    return plan
+
+
+def over_budget(plan: Plan) -> list[str]:
+    """Tasks whose inputs do not fit, named so the human can act at G2.
+
+    A task over budget is not an error -- `pack_sections` will fill what fits
+    and the worker will be told what it did not get. It IS something the person
+    approving the spend has to see, because the remedy is theirs: split the
+    task, or name fewer files.
+    """
+    if not plan.context_budget:
+        return []
+    return [t.task_id for t in plan.tasks if t.context_tokens > plan.context_budget]
+
+
 def estimate_tokens(plan: Plan) -> int:
+    """Superseded by `measure_context`. Kept for the zero-input case only."""
     return len(plan.tasks) * TOKENS_PER_TASK_ESTIMATE

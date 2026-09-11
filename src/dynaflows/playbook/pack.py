@@ -92,3 +92,44 @@ def pack(chunks: Iterable[Chunk], budget_tokens: int) -> ContextPack:
         dropped_ids=tuple(dict.fromkeys(dropped)),
         truncated_id=truncated_id,
     )
+
+
+def pack_sections(
+    reference: Iterable[Chunk],
+    subject: Iterable[Chunk],
+    budget_tokens: int,
+    *,
+    reference_share: float = 0.25,
+) -> ContextPack:
+    """Two kinds of context, two shares of one budget.
+
+    A single ordered `pack()` starves whichever kind comes second. Run `s1`
+    proved it: reference material was passed first so a tight budget would drop
+    the code before the rules the code is judged against, and the result was a
+    worker holding four playbook sections, one of the seven source files it was
+    asked to review, and nothing to say. Dropping *all* the subject matter to
+    protect the rules is not a trade-off, it is a failure.
+
+    So the reference gets a capped share and the subject gets the rest --
+    including whatever the reference did not use. Neither can starve the other,
+    and the cap is the only number here that is a judgement call.
+    """
+    reference = list(reference)
+    subject = list(subject)
+    if not subject:
+        return pack(reference, budget_tokens)
+    if not reference:
+        return pack(subject, budget_tokens)
+
+    cap = int(budget_tokens * reference_share)
+    first = pack(reference, cap)
+    second = pack(subject, budget_tokens - first.tokens)
+
+    text = _SEPARATOR.join(t for t in (first.text, second.text) if t)
+    return ContextPack(
+        text=text,
+        tokens=estimate_tokens(text),
+        included_ids=(*first.included_ids, *second.included_ids),
+        dropped_ids=(*first.dropped_ids, *second.dropped_ids),
+        truncated_id=first.truncated_id or second.truncated_id,
+    )

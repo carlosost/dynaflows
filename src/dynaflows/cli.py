@@ -171,20 +171,38 @@ def _render_plan_gate(payload: dict[str, Any]) -> None:
     table.add_column("does", style="bold")
     table.add_column("objective", overflow="fold")
     table.add_column("playbook", no_wrap=True)
+    table.add_column("context", no_wrap=True, justify="right")
+    budget = int(payload.get("context_budget") or 0)
+    over = set(payload.get("over_budget") or [])
     for index, task in enumerate(tasks, start=1):
+        tokens = int(task.get("context_tokens") or 0)
+        # Measured, not estimated. The column exists because this gate used to
+        # authorise the whole fan-out against a per-task constant that had no
+        # relationship to what the workers would be given (ADR-021).
+        size = f"{tokens:,}" + (" ⚠" if task.get("task_id") in over else "")
         table.add_row(
             str(index),
             Text(task.get("task_id", "")),
             Text(task.get("capability", "")),
             Text(task.get("objective", "")),
             Text(" ".join(task.get("anchors") or []) or "—"),
+            Text(size),
         )
     console.print(table)
     console.print(
         f"[yellow]{len(tasks)} parallel worker(s)[/], "
-        f"[dim]~{payload.get('estimated_tokens', 0):,} tokens estimated · "
+        f"[dim]{payload.get('estimated_tokens', 0):,} context tokens measured · "
         f"plan {payload.get('plan_hash', '?')}[/]"
     )
+    if over:
+        console.print(
+            f"[yellow]⚠ {len(over)} task(s) name more than the {budget:,}-token worker "
+            f"budget:[/] {', '.join(sorted(over))}"
+        )
+        console.print(
+            "[dim]  Those workers will be shown what fits and told what they did not get. "
+            "Edit the plan to split them or name fewer files.[/]"
+        )
 
 
 def _render_gate(payload: dict[str, Any]) -> None:
