@@ -478,7 +478,17 @@ def _render_findings(report: WorkerReport, grounding: Grounding) -> str:
         lines.append("")
     if grounding.dropped:
         lines.append(f"## Discarded as ungrounded ({len(grounding.dropped)})")
-        lines.extend(f"- {d.render()}: {d.finding.claim}" for d in grounding.dropped)
+        for dropped in grounding.dropped:
+            lines.append(f"- {dropped.render()}: {dropped.finding.claim}")
+            # The QUOTE, not just the verdict. The first version of this said
+            # "quoted evidence does not appear" and did not say what was
+            # quoted, so a run where all seven findings were discarded could
+            # not be diagnosed at all -- the same defect as an error message
+            # that names no cause.
+            lines.append("")
+            lines.append("  ```")
+            lines.extend(f"  {line}" for line in dropped.finding.evidence.splitlines()[:12])
+            lines.append("  ```")
         lines.append("")
     if report.missing:
         lines.append("## Not available to this worker")

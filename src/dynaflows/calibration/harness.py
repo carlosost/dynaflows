@@ -107,3 +107,51 @@ def score(
         discarded=discarded,
         reported=reported,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class Aggregate:
+    """Several runs of the same model on the same fixture.
+
+    One run is a sample, not a measurement. The same model scored 4/5 and then
+    3/5 on this fixture with nothing changed between them, and a tier decision
+    had already been made on the first number. A defect found in every run and
+    one found in a third of them are different facts about a model, and a mean
+    alone hides which is which.
+    """
+
+    cards: tuple[Scorecard, ...]
+    hits: dict[str, int]
+    planted: int
+
+    @property
+    def runs(self) -> int:
+        return len(self.cards)
+
+    @property
+    def mean_recall(self) -> float:
+        return sum(c.recall for c in self.cards) / self.runs if self.runs else 0.0
+
+    @property
+    def always(self) -> list[str]:
+        return sorted(k for k, v in self.hits.items() if v == self.runs)
+
+    @property
+    def sometimes(self) -> list[str]:
+        return sorted(k for k, v in self.hits.items() if 0 < v < self.runs)
+
+    @property
+    def never(self) -> list[str]:
+        return sorted(k for k, v in self.hits.items() if v == 0)
+
+    def summary(self) -> str:
+        scores = ", ".join(f"{len(c.found)}/{c.planted}" for c in self.cards)
+        return f"{scores} (mean {self.mean_recall:.0%} over {self.runs} run(s))"
+
+
+def aggregate(cards: list[Scorecard], defects: list[Defect]) -> Aggregate:
+    hits = {d.id: 0 for d in defects}
+    for card in cards:
+        for found in card.found:
+            hits[found] = hits.get(found, 0) + 1
+    return Aggregate(cards=tuple(cards), hits=hits, planted=len(defects))

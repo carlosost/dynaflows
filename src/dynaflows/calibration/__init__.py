@@ -10,11 +10,21 @@ pipeline finds bugs". It is a floor.
 """
 
 from dynaflows.calibration.harness import (
+    Aggregate,
     Defect,
     Scorecard,
+    aggregate,
     fixture_paths,
     load_manifest,
     score,
 )
 
-__all__ = ["Defect", "Scorecard", "fixture_paths", "load_manifest", "score"]
+__all__ = [
+    "Aggregate",
+    "Defect",
+    "Scorecard",
+    "aggregate",
+    "fixture_paths",
+    "load_manifest",
+    "score",
+]

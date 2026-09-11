@@ -122,3 +122,59 @@ def test_the_discard_rate_counts_claims_not_survivors(defects: list) -> None:
 
     assert card.discard_rate == pytest.approx(0.75)
     assert card.recall > 0
+
+
+# --- one run is a sample, not a measurement ------------------------------
+
+
+def test_the_spread_across_runs_is_reported_not_averaged_away(defects: list) -> None:
+    """The same model scored 4/5 and then 3/5 on this fixture with nothing
+    changed between them -- and a tier decision had already been made on the
+    first number. A defect found every time and one found a third of the time
+    are different facts about a model."""
+    from dynaflows.calibration import aggregate
+
+    always = a_finding("28-33")
+    sometimes = a_finding("48-49", evidence="log.info")
+
+    rollup = aggregate(
+        [
+            score([always, sometimes], defects, reported=2, discarded=0),
+            score([always], defects, reported=1, discarded=0),
+            score([always], defects, reported=1, discarded=0),
+        ],
+        defects,
+    )
+
+    assert rollup.runs == 3
+    assert rollup.always == ["swallowed-fetch"]
+    assert rollup.sometimes == ["logged-credential"]
+    assert "retry-on-fatal" in rollup.never
+    assert 0.2 < rollup.mean_recall < 0.35
+
+
+def test_a_single_run_aggregates_to_itself(defects: list) -> None:
+    from dynaflows.calibration import aggregate
+
+    card = score([a_finding("28-33")], defects, reported=1, discarded=0)
+    rollup = aggregate([card], defects)
+
+    assert rollup.runs == 1
+    assert rollup.mean_recall == card.recall
+    # With one run there is no "sometimes" -- everything is always or never.
+    assert not rollup.sometimes
+
+
+def test_the_summary_shows_every_run_not_just_the_mean(defects: list) -> None:
+    from dynaflows.calibration import aggregate
+
+    rollup = aggregate(
+        [
+            score([a_finding("28-33")], defects, reported=1, discarded=0),
+            score([], defects, reported=0, discarded=0),
+        ],
+        defects,
+    )
+
+    assert "1/5" in rollup.summary()
+    assert "0/5" in rollup.summary()

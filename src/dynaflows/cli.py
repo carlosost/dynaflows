@@ -852,6 +852,9 @@ def calibrate(
             help="Comma-separated models to score side by side. 'tiers' uses each chain's head."
         ),
     ] = None,
+    runs: Annotated[
+        int, typer.Option(help="Repeat and report the spread. One run is a sample.")
+    ] = 1,
     show: Annotated[bool, typer.Option("--show/--quiet", help="Print every finding.")] = False,
 ) -> None:
     """Run a worker against a fixture whose defects are known. ADR-022.
@@ -904,25 +907,38 @@ def calibrate(
         )
         return
 
-    card, result = _calibrate_once(settings, source, defects, model)
-    if card is None:
-        console.print(f"[red]calibration failed[/] {result}")
-        raise typer.Exit(code=2)
+    from dynaflows.calibration import aggregate
+
+    cards = []
+    for _ in range(max(runs, 1)):
+        card, result = _calibrate_once(settings, source, defects, model)
+        if card is None:
+            console.print(f"[red]calibration failed[/] {result}")
+            raise typer.Exit(code=2)
+        cards.append(card)
+    card = cards[-1]
+    rollup = aggregate(cards, defects)
 
     console.print(f"[dim]model[/] {result.model_id}   [dim]status[/] {result.status}")
-    console.print(
-        f"[bold]recall[/] {len(card.found)}/{card.planted} planted defect(s) found "
-        f"({card.recall:.0%})"
-    )
+    console.print(f"[bold]recall[/] {rollup.summary()}")
+    if rollup.runs > 1:
+        # The spread IS the finding. A defect caught every time and one caught
+        # a third of the time say different things about a model, and a mean
+        # alone hides which is which. A tier decision was already made on one
+        # sample before this existed.
+        console.print(f"[green]  always found[/] {', '.join(rollup.always) or '—'}")
+        console.print(f"[yellow]  sometimes[/]    {', '.join(rollup.sometimes) or '—'}")
+        console.print(f"[red]  never[/]        {', '.join(rollup.never) or '—'}")
     console.print(
         f"[bold]citations[/] {card.reported} claimed, {card.discarded} discarded as "
         f"ungrounded ({card.discard_rate:.0%})"
     )
-    for defect in card.missed:
-        console.print(
-            f"[yellow]  missed[/] {defect.id} (lines {defect.start}-{defect.end}): ", end=""
-        )
-        console.print(Text(defect.kind), markup=False)
+    if rollup.runs == 1:
+        for defect in card.missed:
+            console.print(
+                f"[yellow]  missed[/] {defect.id} (lines {defect.start}-{defect.end}): ", end=""
+            )
+            console.print(Text(defect.kind), markup=False)
     if card.unplanted:
         console.print(
             f"[dim]  {len(card.unplanted)} finding(s) outside any planted range -- "
@@ -934,7 +950,13 @@ def calibrate(
                 Text(f"  [{finding.severity}] {finding.file}:{finding.lines} {finding.claim}"),
                 markup=False,
             )
-    if not card.found:
+            console.print(Text(f"      evidence: {finding.evidence[:160]!r}"), markup=False)
+        if card.discarded:
+            console.print(
+                f"[dim]  {card.discarded} claim(s) were discarded before scoring; the "
+                "worker's report in .dynaflows/runs/ quotes each one.[/]"
+            )
+    if not any(c.found for c in cards):
         console.print(
             "\n[red]Zero recall.[/] This worker cannot find a bare `except: pass`, so "
             "'no findings' from a real run means nothing. The prompt or the tier is the "

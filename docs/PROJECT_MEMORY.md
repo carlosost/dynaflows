@@ -1941,6 +1941,22 @@ one that names its holes.
   Two hypotheses died here and both were mine: the worker prompt was not the constraint (two models
   scored 4/5 on the identical prompt), and ADR-019's evidence match is not too strict (ten claims,
   zero discarded). The second had been carried as an open §4.5 number since ADR-019 was written.
+- **CORRECTED 2026-09-11: the ADR-006 measurement was taken on one sample per model.** Re-running
+  `llama-4-scout` on the identical fixture gave **3/5** where the sweep gave 4/5, with nothing
+  changed between them — and a tier decision had already been made on the first number. The
+  direction of that decision is unaffected (0/5 versus 3-4/5 is not a variance story), but the
+  precision claimed for it was not earned. `calibrate --runs N` now reports every run's score plus
+  which defects are found **always**, **sometimes** and **never**, because a defect caught every
+  time and one caught a third of the time are different facts and a mean hides which is which.
+- **OPEN, and the most interesting result yet: run `s3` claimed 7 findings and ALL 7 were discarded
+  as `EVIDENCE_NOT_FOUND`.** On the calibration fixture the same model discarded none. So the
+  citation check is not uniformly too strict — it rejects everything in one setting and nothing in
+  another, which is a far more specific signal than "too strict" and points at something systematic.
+  Candidate: the planner writes "provide the exact file and line, evidence, impact, severity" into
+  every objective, and a model told what "evidence" means by the objective may be filling the field
+  with prose rather than a quote. **Untested.** The worker report now quotes each rejected string,
+  because the previous version recorded that the quote did not match without recording the quote —
+  the same defect as an error message that names no cause.
 - **STILL OPEN: three of the four tiers are still unbenchmarked.** The enhancer, planner and
   synthesizer have no fixture. "It produced plausible output" is what `mistral-nemo` produced for
   four steps of this project, and it is not a measurement.
