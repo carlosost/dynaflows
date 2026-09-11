@@ -950,7 +950,7 @@ def calibrate(
                 Text(f"  [{finding.severity}] {finding.file}:{finding.lines} {finding.claim}"),
                 markup=False,
             )
-            console.print(Text(f"      evidence: {finding.evidence[:160]!r}"), markup=False)
+            console.print(Text(f"      evidence: {finding.quoted_lines[:160]!r}"), markup=False)
         if card.discarded:
             console.print(
                 f"[dim]  {card.discarded} claim(s) were discarded before scoring; the "

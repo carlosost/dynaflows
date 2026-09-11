@@ -166,7 +166,7 @@ def verify(findings: list[Finding], chunks: list[Chunk]) -> Grounding:
         # off-by-a-few line reference with a real quote is a citation error,
         # not a fabrication, and discarding it would lose a true finding to a
         # formatting mistake.
-        if not _evidence_present(finding.evidence, chunk.body):
+        if not _evidence_present(finding.quoted_lines, chunk.body):
             dropped.append(Dropped(finding, Ungrounded.EVIDENCE_NOT_FOUND))
             continue
 

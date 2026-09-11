@@ -1786,6 +1786,41 @@ Two things went wrong building it, both caught by tests written beside the code:
 The fixtures are excluded from ruff, mypy and the architecture lint, and the exclusion is documented
 in each: a linter that "fixes" a planted defect destroys the only falsifiable signal in the project.
 
+### Calibration log — what each change actually moved (2026-09-11)
+
+`meta-llama/llama-4-scout`, five planted defects, three runs each.
+
+| Schema | Recall | Always found | Never found | Claims/run |
+|---|---|---|---|---|
+| before `failure` | 3/5 | swallowed-fetch, swallowed-close, **logged-credential** | lost-cause, **retry-on-fatal** | 3 |
+| after `failure` | 3/5 | swallowed-fetch, swallowed-close, **retry-on-fatal** | lost-cause, **logged-credential** | 3 |
+
+The score did not move and the composition did, which is the more interesting result. Requiring a
+named failure scenario **gained `retry-on-fatal`** — a defect that needs the control flow and the
+semantics of a 401 held together, and the one this document had recorded as evidence that the model
+"recognises shapes but does not reason about consequences". That claim is now too strong: asking for
+the consequence produced the consequence-shaped finding.
+
+It **lost `logged-credential`**, the most obvious defect on the page, and the claims-per-run stayed
+at exactly three across every configuration. The likeliest reading is that the model emits a roughly
+fixed number of findings and the schema reorders which three, rather than changing how many it can
+find. If that is right, **recall is bounded by output budget rather than by analysis**, and the
+lever is asking for more findings rather than better ones. Untested.
+
+**Live runs, same prompt each time, as the checks tightened:**
+
+| Run | Claimed | Survived | Dominant cause of loss |
+|---|---|---|---|
+| s4 | 8 | 3 | multi-line docstring closed by the model |
+| s5 | 15 | 0 | elision joining real fragments; descriptions |
+| s6 | 3 | 0 | **prose written into the evidence field** |
+
+s6's three claims were real defect claims — the `failure` requirement did its job, and claims fell
+from fifteen to three. Every one then put an *explanation* where the quote belongs. In an audit
+report "evidence" conventionally means the reasoning that supports a claim, so the field name was
+working against the field description. It is `quoted_lines` now, with a worked right/wrong example
+in the system prompt.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than

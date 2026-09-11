@@ -24,7 +24,7 @@ def a_finding(**kwargs: Any) -> Finding:
         claim=kwargs.pop("claim", "no password check"),
         file=kwargs.pop("file", "src/auth.py"),
         lines=kwargs.pop("lines", "2-3"),
-        evidence=kwargs.pop("evidence", "if not user:"),
+        quoted_lines=kwargs.pop("quoted_lines", "if not user:"),
         severity=kwargs.pop("severity", "high"),
         failure=kwargs.pop("failure", "An empty password authenticates any caller."),
         remediation=kwargs.pop("remediation", "Validate it."),
@@ -93,8 +93,11 @@ def test_the_claim_is_not_part_of_the_identity() -> None:
 
 def test_evidence_differing_only_in_whitespace_is_the_same_finding() -> None:
     findings, _ = synth.collect(
-        [a_result("t1", [a_finding()]), a_result("t2", [a_finding(evidence="2|  if not user:")])],
-        loader({"t1": [a_finding()], "t2": [a_finding(evidence="2|  if not user:")]}),
+        [
+            a_result("t1", [a_finding()]),
+            a_result("t2", [a_finding(quoted_lines="2|  if not user:")]),
+        ],
+        loader({"t1": [a_finding()], "t2": [a_finding(quoted_lines="2|  if not user:")]}),
     )
 
     assert len(findings) == 1

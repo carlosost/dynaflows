@@ -45,7 +45,7 @@ def a_finding(**kwargs: object) -> Finding:
         claim=kwargs.pop("claim", "no password check"),  # type: ignore[arg-type]
         file=kwargs.pop("file", "src/auth.py"),  # type: ignore[arg-type]
         lines=kwargs.pop("lines", "2-3"),  # type: ignore[arg-type]
-        evidence=kwargs.pop("evidence", "if not user:"),  # type: ignore[arg-type]
+        quoted_lines=kwargs.pop("quoted_lines", "if not user:"),  # type: ignore[arg-type]
         severity=kwargs.pop("severity", "high"),  # type: ignore[arg-type]
         failure=kwargs.pop(  # type: ignore[arg-type]
             "failure", "A request with no user returns None and the caller cannot tell why."
@@ -73,7 +73,7 @@ def test_a_line_past_the_end_of_the_file_is_rejected() -> None:
 
 
 def test_evidence_that_is_not_in_the_file_is_rejected() -> None:
-    grounding = verify([a_finding(evidence="log.info(user.password)")], [a_chunk()])
+    grounding = verify([a_finding(quoted_lines="log.info(user.password)")], [a_chunk()])
 
     assert grounding.dropped[0].reason is Ungrounded.EVIDENCE_NOT_FOUND
 
@@ -116,7 +116,7 @@ def test_a_correct_citation_survives() -> None:
 def test_quoting_with_the_line_number_prefix_survives() -> None:
     """The worker sees `2|     if not user:`. Copying it verbatim -- which is
     what it was told to do -- must not be a grounding failure."""
-    grounding = verify([a_finding(evidence="2|     if not user:")], [a_chunk()])
+    grounding = verify([a_finding(quoted_lines="2|     if not user:")], [a_chunk()])
 
     assert len(grounding.kept) == 1
 
@@ -125,7 +125,7 @@ def test_reindented_evidence_survives() -> None:
     """Whitespace is collapsed on both sides. A model that re-indents a quote
     has not invented it, and treating that as fabrication is how a check gets
     switched off (playbook 5.2, Pattern 5)."""
-    grounding = verify([a_finding(evidence="if   not  user:")], [a_chunk()])
+    grounding = verify([a_finding(quoted_lines="if   not  user:")], [a_chunk()])
 
     assert len(grounding.kept) == 1
 
@@ -141,7 +141,7 @@ def test_a_slightly_wrong_line_number_with_real_evidence_survives() -> None:
     span: an off-by-two line reference with a real quote is a citation error,
     and discarding a true finding over it trades a visible problem for an
     invisible one."""
-    grounding = verify([a_finding(lines="1", evidence="if not user:")], [a_chunk()])
+    grounding = verify([a_finding(lines="1", quoted_lines="if not user:")], [a_chunk()])
 
     assert len(grounding.kept) == 1
 
@@ -151,7 +151,7 @@ def test_counts_are_kept_apart() -> None:
     mean a careful worker and a large gap means one that is inventing, and one
     number cannot say which."""
     grounding = verify(
-        [a_finding(), a_finding(file="ghost.py"), a_finding(evidence="nope")], [a_chunk()]
+        [a_finding(), a_finding(file="ghost.py"), a_finding(quoted_lines="nope")], [a_chunk()]
     )
 
     assert grounding.reported == 3
@@ -192,13 +192,15 @@ def test_a_real_quote_with_an_added_delimiter_survives() -> None:
     quote with a syntactic completion attached, not a fabrication."""
     chunk = a_chunk(text='"""One line of a docstring.\n\nMore prose.\n"""\nx = 1\n')
 
-    grounding = verify([a_finding(lines="1", evidence='"""One line of a docstring."""')], [chunk])
+    grounding = verify(
+        [a_finding(lines="1", quoted_lines='"""One line of a docstring."""')], [chunk]
+    )
 
     assert len(grounding.kept) == 1
 
 
 def test_a_quote_with_a_trailing_ellipsis_survives() -> None:
-    grounding = verify([a_finding(evidence="if not user:  ...")], [a_chunk()])
+    grounding = verify([a_finding(quoted_lines="if not user:  ...")], [a_chunk()])
 
     assert len(grounding.kept) == 1
 
@@ -207,7 +209,7 @@ def test_an_invented_line_still_fails() -> None:
     """The loosening must not become an opening. `w1` is the reason this file
     exists."""
     grounding = verify(
-        [a_finding(evidence='log.audit("this line was never written")')], [a_chunk()]
+        [a_finding(quoted_lines='log.audit("this line was never written")')], [a_chunk()]
     )
 
     assert grounding.dropped[0].reason is Ungrounded.EVIDENCE_NOT_FOUND
@@ -217,7 +219,7 @@ def test_a_quote_too_thin_to_prove_anything_fails() -> None:
     """`)` is in every Python file. Accepting it would make the check a
     formality."""
     for thin in (")", "...", "else:", "   "):
-        grounding = verify([a_finding(evidence=thin)], [a_chunk()])
+        grounding = verify([a_finding(quoted_lines=thin)], [a_chunk()])
         assert grounding.dropped, thin
         assert grounding.dropped[0].reason is Ungrounded.EVIDENCE_NOT_FOUND, thin
 
@@ -226,7 +228,7 @@ def test_one_real_line_and_one_invented_line_fails() -> None:
     """Every substantial line must be present, not one of them -- otherwise a
     true quote becomes cover for a false one."""
     grounding = verify(
-        [a_finding(evidence="if not user:\n    self.audit_log.write(password)")], [a_chunk()]
+        [a_finding(quoted_lines="if not user:\n    self.audit_log.write(password)")], [a_chunk()]
     )
 
     assert grounding.dropped[0].reason is Ungrounded.EVIDENCE_NOT_FOUND
@@ -287,7 +289,7 @@ def test_an_elided_quote_survives() -> None:
     elision is the model saying "these two real fragments, with something
     between", which is a true statement about the file."""
     grounding = verify(
-        [a_finding(evidence="def login(user, password): ... return check(user, password)")],
+        [a_finding(quoted_lines="def login(user, password): ... return check(user, password)")],
         [a_chunk()],
     )
 
@@ -298,7 +300,28 @@ def test_an_elision_cannot_smuggle_an_invented_fragment() -> None:
     """Splitting on the ellipsis must not weaken the check: every fragment is
     still required to be present."""
     grounding = verify(
-        [a_finding(evidence="def login(user, password): ... audit.write(password)")], [a_chunk()]
+        [a_finding(quoted_lines="def login(user, password): ... audit.write(password)")],
+        [a_chunk()],
     )
+
+    assert grounding.dropped[0].reason is Ungrounded.EVIDENCE_NOT_FOUND
+
+
+def test_prose_in_the_quote_field_is_rejected() -> None:
+    """Run `s6`: all three claims were real defect claims and all three put an
+    EXPLANATION where the quote belongs -- "The function configure_tracing
+    checks if LANGSMITH_TRACING and LANGSMITH_API_KEY are set. However, it does
+    not provide a default value." True, and not a quotation.
+
+    In an audit report "evidence" conventionally means the reasoning that
+    supports a claim, so the field name was doing the opposite of its job. It
+    is `quoted_lines` now, and this asserts the check still catches the prose
+    that name is meant to prevent."""
+    prose = (
+        "The function configure_tracing checks if LANGSMITH_TRACING is set. "
+        "However, it does not provide a default value for the unset case."
+    )
+
+    grounding = verify([a_finding(quoted_lines=prose)], [a_chunk()])
 
     assert grounding.dropped[0].reason is Ungrounded.EVIDENCE_NOT_FOUND

@@ -472,7 +472,7 @@ def _render_findings(report: WorkerReport, grounding: Grounding) -> str:
         lines.append(f"`{finding.file}:{finding.lines}`")
         lines.append("")
         lines.append("```")
-        lines.append(finding.evidence)
+        lines.append(finding.quoted_lines)
         lines.append("```")
         lines.append(f"**Remediation.** {finding.remediation}")
         lines.append("")
@@ -487,7 +487,7 @@ def _render_findings(report: WorkerReport, grounding: Grounding) -> str:
             # that names no cause.
             lines.append("")
             lines.append("  ```")
-            lines.extend(f"  {line}" for line in dropped.finding.evidence.splitlines()[:12])
+            lines.extend(f"  {line}" for line in dropped.finding.quoted_lines.splitlines()[:12])
             lines.append("  ```")
         lines.append("")
     if report.missing:

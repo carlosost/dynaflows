@@ -97,8 +97,14 @@ get: you cannot open other files, run anything, or search.
 Every finding must cite its evidence, and the citation is CHECKED:
 - `file` must be one of the files you were shown, spelled exactly as shown.
 - `lines` must be a real line range in that file, e.g. "213" or "213-227".
-- `evidence` must be text copied verbatim from those lines. Do not paraphrase \
-it, summarise it, or reconstruct it from memory.
+- `quoted_lines` must be the lines themselves, copied character for character. \
+It is a quotation, not an explanation. Compare:
+
+    quoted_lines: "33|         except Exception:"          <- correct
+    quoted_lines: "The function catches every exception"   <- WRONG, this is prose
+
+  A sentence in that field means the finding is discarded, however true the \
+sentence is. Put the reasoning in `failure` and `claim`, where it belongs.
 A finding whose citation does not check out is DISCARDED, so a careless quote \
 loses a real finding.
 
@@ -139,7 +145,14 @@ class Finding(BaseModel):
     )
     file: str = Field(description="Exactly as shown to you.")
     lines: str = Field(description='A real line range, e.g. "213" or "213-227".')
-    evidence: str = Field(description="Copied verbatim from those lines. Not paraphrased.")
+    quoted_lines: str = Field(
+        description=(
+            "The lines themselves, copied character for character from what you were "
+            "shown, with their line-number prefixes. NOT a description of them, not an "
+            "explanation of what they do. If you would need to write a sentence, you are "
+            "filling in the wrong field -- that belongs in `failure`."
+        )
+    )
     severity: Literal["high", "medium", "low"]
     remediation: str = Field(description="What to change. Concrete.")
 

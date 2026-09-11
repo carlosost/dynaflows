@@ -20,7 +20,7 @@ def a_finding(lines: str, **kwargs: object) -> Finding:
         claim=kwargs.pop("claim", "swallowed"),  # type: ignore[arg-type]
         file=kwargs.pop("file", "broken_client.py"),  # type: ignore[arg-type]
         lines=lines,
-        evidence=kwargs.pop("evidence", "except Exception:"),  # type: ignore[arg-type]
+        quoted_lines=kwargs.pop("quoted_lines", "except Exception:"),  # type: ignore[arg-type]
         severity=kwargs.pop("severity", "high"),  # type: ignore[arg-type]
         failure=kwargs.pop(  # type: ignore[arg-type]
             "failure", "A network error becomes None and the caller retries forever."
@@ -138,7 +138,7 @@ def test_the_spread_across_runs_is_reported_not_averaged_away(defects: list) -> 
     from dynaflows.calibration import aggregate
 
     always = a_finding("28-33")
-    sometimes = a_finding("48-49", evidence="log.info")
+    sometimes = a_finding("48-49", quoted_lines="log.info")
 
     rollup = aggregate(
         [

@@ -210,7 +210,7 @@ def a_finding(**kwargs: Any) -> Any:
         claim=kwargs.pop("claim", "login always returns True"),
         file=kwargs.pop("file", "src/auth.py"),
         lines=kwargs.pop("lines", "4-5"),
-        evidence=kwargs.pop("evidence", "def login():"),
+        quoted_lines=kwargs.pop("quoted_lines", "def login():"),
         severity=kwargs.pop("severity", "medium"),
         failure=kwargs.pop("failure", "Any caller passing an empty password is authenticated."),
         remediation=kwargs.pop("remediation", "Check the password."),

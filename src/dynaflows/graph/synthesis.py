@@ -25,7 +25,7 @@ def _key(finding: Finding) -> tuple[str, str]:
     same line in different words have found one problem, and the wording is
     the least reliable part of either report.
     """
-    evidence = _WHITESPACE.sub(" ", _LINE_PREFIX.sub("", finding.evidence)).strip().lower()
+    evidence = _WHITESPACE.sub(" ", _LINE_PREFIX.sub("", finding.quoted_lines)).strip().lower()
     return finding.file.strip(), evidence
 
 
@@ -184,7 +184,7 @@ def render_findings(findings: list[Corroborated]) -> str:
         blocks.append(
             f"[{item.id}] ({item.finding.severity}){corroboration} {item.finding.claim}\n"
             f"  {item.finding.file}:{item.finding.lines}\n"
-            f"  evidence: {item.finding.evidence.strip()[:300]}\n"
+            f"  evidence: {item.finding.quoted_lines.strip()[:300]}\n"
             f"  proposed: {item.finding.remediation}"
         )
     return "\n\n".join(blocks)
