@@ -1852,6 +1852,35 @@ discarded finding is written into the worker's artifact — so the cheap version
 telling the worker that an unverifiable candidate is filed rather than held against it. If claims
 per run do not rise, the model is not withholding and the limit is analysis after all.
 
+**MEASURED 2026-09-12: fan-out raises recall, and the cap is per-worker.**
+
+| | Recall | Claims | Approx cost |
+|---|---|---|---|
+| one worker | 3/5 (60%) | 3 | $0.0004 |
+| three lenses over the SAME file | **4/5 (80%)** | 9 claims → 4 unique | $0.0012 |
+
+Three non-overlapping objectives — exception flow, caller contract, disclosure — over one 57-line
+file. Each lens independently claimed **exactly three** and scored 3/5, confirming the per-worker
+cap three more times. The union beat every individual worker.
+
+**This is the first measurement of the project's central architectural bet**, and it holds: splitting
+one body of code across several differently-aimed workers finds more than one worker does, and the
+limit is per-worker rather than per-file. ADR-001's dynamic fan-out earns its place on evidence
+rather than on reasoning.
+
+Three qualifications, all of which matter:
+- **The redundancy is heavy.** Nine claims collapsed to four unique defects. ADR-020's
+  deduplication and corroboration counting is load-bearing, not decorative — without it the report
+  would have listed the same problem three times and called it three problems.
+- **The trade is 3× the cost for +33% recall** (3/5 → 4/5). Real, and not obviously worth it at
+  every fan-out width. Whether a fourth lens buys a fifth defect is unmeasured, and the shape of the
+  curve past three workers is the number that should decide default fan-out width, not `MAX_FANOUT`.
+- **`lost-cause` was missed by all three lenses, including the one aimed directly at it.** The
+  `caller-contract` objective says "the cause of a failure is discarded, replaced, or flattened" and
+  the defect is `raise RuntimeError("charge failed")` discarding the provider's status. A lens
+  pointed straight at a defect still missed it. That is a capability limit, and no amount of
+  fan-out, prompting or schema design addresses it.
+
 **Live runs, same prompt each time, as the checks tightened:**
 
 | Run | Claimed | Survived | Dominant cause of loss |
