@@ -1975,11 +1975,32 @@ what it made up.
 
 This is the first step of the ADR-023 plan and it is shared by all three target use cases.
 
-**Not done, and it will matter first on a real repository:** the catalogue is a flat list of paths
-with docstring summaries, budgeted at 4,000 tokens. On a large codebase it truncates, and "fix the
-login bug" then needs to *search* for login rather than recognise it in a list. The FTS5 machinery
-that indexes the playbook would serve a second corpus; that is the next thing this step needs, and
-it is deliberately not built before a repository demands it (AP-11).
+**The first live run of step A found the catalogue insufficient, on THIS repository, immediately.**
+Asked to "fix the bug where resume analyses the wrong tree", the enhancer named five files and got
+**zero** right — the bug is in `cli.py` and `contracts/state.py`, and it picked `checkpoint.py`,
+`nodes.py`, `builder.py`, `run_store.py` and a test module.
+
+The model was not at fault. The only two catalogue lines mentioning "resume" were test files, and it
+picked one of them. `cli.py` — 53,417 bytes, containing `def resume(` — was summarised as
+`Terminal entry point.` **A docstring says what a file is FOR; it does not say what is IN it**, and
+for a 53KB module that difference decides the answer.
+
+The gate worked exactly as designed: the assumption "the 'tree' likely refers to the execution tree
+or plan tree stored in state" was declared, was wrong, and cost one cent to reject.
+
+Fixed by listing each module's top-level definitions, which is free — the AST was already parsed for
+the docstring. Three consequences worth recording:
+- **Test modules get no symbol list.** Fourteen `test_*` names were the longest lines in the
+  catalogue and the least useful: a test module defines tests, not the thing under test. Skipping
+  them took this repository from 82 of 90 files listed to all 90, at **3,207 tokens** — cheaper than
+  the 1,914-token version's budget was.
+- **The display budget was silently acting as a validation set.** `unknown_paths` checked against the
+  rendered list, so a real file truncated out of it would have been rejected as invented. `paths` is
+  now complete regardless of what the text can show. Adding symbols was enough to trip this; it was
+  latent before.
+- **Symbol lists locate a definition, not a caller.** "Which code calls `resume`" is still
+  unanswerable from the catalogue. That is the case that needs FTS5 over source, and it is still
+  deliberately unbuilt (AP-11).
 
 ## 7. Known Gaps in This Document
 

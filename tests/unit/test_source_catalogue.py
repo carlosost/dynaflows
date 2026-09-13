@@ -134,3 +134,82 @@ def test_an_invented_path_is_reported(repo: Path) -> None:
 
 def test_an_empty_string_is_not_a_path(repo: Path) -> None:
     assert unknown_paths(["", "   "], build_catalogue(repo)) == ["", "   "]
+
+
+# --- a docstring says what a file is FOR, not what is IN it --------------
+
+
+def test_a_module_lists_what_it_defines(repo: Path) -> None:
+    """Live run `a1`: asked to locate a bug in `resume`, the enhancer was shown
+    `cli.py (53417 bytes) -- Terminal entry point.` and picked a test file.
+    Correctly — the only catalogue lines mentioning resume WERE tests. The file
+    containing `def resume(` had no way to say so."""
+    (repo / "src" / "cli.py").write_text(
+        '"""Terminal entry point."""\n\ndef run(): ...\n\ndef resume(): ...\n\nclass Runner: ...\n',
+        encoding="utf-8",
+    )
+
+    line = next(ln for ln in build_catalogue(repo).text.splitlines() if "cli.py" in ln)
+
+    assert "Terminal entry point." in line
+    assert "defines:" in line
+    assert "resume" in line
+    assert "Runner" in line
+
+
+def test_public_names_come_before_private_ones(repo: Path) -> None:
+    (repo / "src" / "m.py").write_text(
+        "def _helper(): ...\n\ndef public(): ...\n", encoding="utf-8"
+    )
+
+    line = next(ln for ln in build_catalogue(repo).text.splitlines() if "m.py" in ln)
+
+    assert line.index("public") < line.index("_helper")
+
+
+def test_a_test_module_lists_no_symbols(repo: Path) -> None:
+    """A test module defines tests, not the thing under test. Fourteen `test_*`
+    names were the longest lines in the catalogue and the least useful; its
+    docstring already says what it covers."""
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_auth.py").write_text(
+        '"""Login behaviour."""\n\ndef test_one(): ...\n\ndef test_two(): ...\n',
+        encoding="utf-8",
+    )
+
+    line = next(ln for ln in build_catalogue(repo).text.splitlines() if "test_auth" in ln)
+
+    assert "Login behaviour." in line
+    assert "defines:" not in line
+
+
+def test_a_file_with_no_docstring_still_lists_its_symbols(repo: Path) -> None:
+    (repo / "src" / "bare.py").write_text("def handler(): ...\n", encoding="utf-8")
+
+    line = next(ln for ln in build_catalogue(repo).text.splitlines() if "bare.py" in ln)
+
+    assert "defines: handler" in line
+
+
+# --- the display budget is not a validation set --------------------------
+
+
+def test_a_file_truncated_out_of_the_listing_is_still_a_known_path(repo: Path) -> None:
+    """Conflating the two made a budget into a correctness rule: a plan naming
+    a real file would be rejected because the rendered list ran out of room.
+    Adding symbols to the summary was enough to trip it."""
+    for i in range(40):
+        (repo / "src" / f"mod{i:02d}.py").write_text(
+            f'"""Module {i} does a thing worth describing at length."""\n\ndef f{i}(): ...\n',
+            encoding="utf-8",
+        )
+
+    catalogue = build_catalogue(repo, budget_tokens=200)
+
+    assert catalogue.truncated
+    assert catalogue.listed < catalogue.total
+    assert len(catalogue.paths) == catalogue.total
+    # Every real file validates, listed or not.
+    assert unknown_paths(["src/mod39.py"], catalogue) == []
+    # And invention is still caught.
+    assert unknown_paths(["src/nope.py"], catalogue) == ["src/nope.py"]
