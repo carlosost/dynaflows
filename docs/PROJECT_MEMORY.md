@@ -2002,6 +2002,34 @@ the docstring. Three consequences worth recording:
   unanswerable from the catalogue. That is the case that needs FTS5 over source, and it is still
   deliberately unbuilt (AP-11).
 
+### `dynaflows brief` — the smallest useful version of the whole tool (2026-09-13)
+
+The stated objective is a tool that enhances a request, shows it for approval, and hands it to
+something that executes it. `audit` cannot do that: it runs the full fan-out and prints a report.
+`brief` is the same enhancer, stopped at G1, with one property that makes it usable in a real loop:
+
+**The brief goes to stdout. Everything else goes to stderr.** The gate, the grounded paths, the
+assumptions, the cost and the prompt all go to `stderr`, so `dynaflows brief "..." | pbcopy` copies
+the brief and nothing else. Implemented as `interrupt_before=("plan",)` on the audit graph — no new
+graph, no new nodes, no flag on an existing command deciding how much of the pipeline runs (AP-10).
+
+Three things this forced, all of them defects that existed before `brief` and were invisible:
+
+- **`_fail()` wrote to stdout.** Found by piping a failing run to the clipboard: it copied
+  `MODEL_UNAVAILABLE ... Connection error`. An error is never a command's output. Everything a
+  human reads while a command works now goes through a module-level `_err = Console(stderr=True)`.
+  Guarded by `test_a_failure_does_not_reach_the_pipe`.
+- **The gate prompt read from stdin and echoed to stdout.** `typer.prompt(..., err=True)` when a
+  console was passed. The gate's rendering functions (`_render_gate`, `_render_plan_gate`,
+  `_ask_gate`) all take the console to write to rather than reaching for the module-level one.
+- **`_drive`'s new `out` parameter shadowed the loop's `out = await graph.ainvoke(...)`**, so the
+  console became a dict two iterations later: `'dict' object has no attribute 'print'`. Renamed to
+  `ui`. A four-character parameter name in a function whose body already binds that name is the
+  cheapest bug in this document and it still cost a run.
+
+The pipe discipline is what makes `brief` composable, and it was worth a command of its own to
+discover that three parts of the CLI did not have it.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than

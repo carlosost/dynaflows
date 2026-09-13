@@ -78,9 +78,25 @@ FILESYSTEM_MODULES = frozenset({"settings.py", "cli.py", "doctor.py", "checkpoin
 # discovered.
 FILESYSTEM_CALLS = frozenset(
     {
-        "write_text", "write_bytes", "mkdir", "touch", "unlink", "rmdir", "rename",
-        "chmod", "symlink_to", "rmtree", "remove", "makedirs",
-        "copytree", "read_text", "read_bytes", "iterdir", "rglob", "glob", "walk",
+        "write_text",
+        "write_bytes",
+        "mkdir",
+        "touch",
+        "unlink",
+        "rmdir",
+        "rename",
+        "chmod",
+        "symlink_to",
+        "rmtree",
+        "remove",
+        "makedirs",
+        "copytree",
+        "read_text",
+        "read_bytes",
+        "iterdir",
+        "rglob",
+        "glob",
+        "walk",
     }
 )
 

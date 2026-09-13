@@ -30,6 +30,9 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+# Everything a human reads while a command works, when stdout is
+# reserved for the command's actual output (see `brief`).
+_err = Console(stderr=True)
 
 _GLYPH = {Status.OK: "[green]OK  [/]", Status.WARN: "[yellow]WARN[/]", Status.FAIL: "[red]FAIL[/]"}
 
@@ -157,15 +160,17 @@ def context(
     )
 
 
-def _render_plan_gate(payload: dict[str, Any]) -> None:
+def _render_plan_gate(payload: dict[str, Any], out: Console | None = None) -> None:
     """The task list, in full. ADR-005: this gate exists because approving a
     well-worded brief tells you nothing about the twelve workers about to run
     on the wrong twelve files -- so it shows the tasks, not a count of them."""
     from rich.table import Table
 
+    c = out or console
+
     tasks = payload.get("tasks") or []
-    console.print()
-    console.print(f"[dim]{payload.get('rationale', '')}[/]")
+    c.print()
+    c.print(f"[dim]{payload.get('rationale', '')}[/]")
     table = Table(show_header=True, header_style="dim", box=None, pad_edge=False)
     table.add_column("#", width=3)
     table.add_column("task", no_wrap=True)
@@ -189,33 +194,39 @@ def _render_plan_gate(payload: dict[str, Any]) -> None:
             Text(" ".join(task.get("anchors") or []) or "—"),
             Text(size),
         )
-    console.print(table)
-    console.print(
+    c.print(table)
+    c.print(
         f"[yellow]{len(tasks)} parallel worker(s)[/], "
         f"[dim]{payload.get('estimated_tokens', 0):,} context tokens measured · "
         f"plan {payload.get('plan_hash', '?')}[/]"
     )
     if over:
-        console.print(
+        c.print(
             f"[yellow]⚠ {len(over)} task(s) name more than the {budget:,}-token worker "
             f"budget:[/] {', '.join(sorted(over))}"
         )
-        console.print(
+        c.print(
             "[dim]  Those workers will be shown what fits and told what they did not get. "
             "Edit the plan to split them or name fewer files.[/]"
         )
 
 
-def _render_gate(payload: dict[str, Any]) -> None:
-    """Show the human what they are approving, and what it cost them nothing to see."""
+def _render_gate(payload: dict[str, Any], out: Console | None = None) -> None:
+    """Show the human what they are approving, and what it cost them nothing to see.
+
+    Writes to `out` rather than to the module console: `brief` reserves stdout
+    for the brief itself, so the gate has to be able to go elsewhere.
+    """
     from rich.panel import Panel
 
+    c = out or console
+
     if payload.get("gate") == "plan":
-        _render_plan_gate(payload)
+        _render_plan_gate(payload, out=c)
         return
 
-    console.print()
-    console.print(
+    c.print()
+    c.print(
         Panel(
             Text(payload.get("original", "")),
             title="[dim]you asked[/]",
@@ -223,7 +234,7 @@ def _render_gate(payload: dict[str, Any]) -> None:
             padding=(0, 1),
         )
     )
-    console.print(
+    c.print(
         Panel(
             Text(payload.get("enhanced", "")),
             title="[yellow]the workflow will run this[/]",
@@ -236,22 +247,20 @@ def _render_gate(payload: dict[str, Any]) -> None:
         # What it thinks the request is ABOUT, checked against the catalogue.
         # This is the cheapest possible way to catch a rewrite that has
         # understood the words and missed the subject.
-        console.print("[dim]it reads this as being about:[/]")
+        c.print("[dim]it reads this as being about:[/]")
         for item in paths:
-            console.print(Text(f"  · {item}"), markup=False)
+            c.print(Text(f"  · {item}"), markup=False)
     invented = payload.get("invented_paths") or []
     if invented:
-        console.print(
-            f"[yellow]  {len(invented)} path(s) it named do not exist and were dropped:[/]"
-        )
-        console.print(Text("  " + ", ".join(invented)), markup=False)
+        c.print(f"[yellow]  {len(invented)} path(s) it named do not exist and were dropped:[/]")
+        c.print(Text("  " + ", ".join(invented)), markup=False)
     assumptions = payload.get("assumptions") or []
     if assumptions:
-        console.print("[dim]assumed on your behalf:[/]")
+        c.print("[dim]assumed on your behalf:[/]")
         for item in assumptions:
-            console.print(Text(f"  · {item}"))
+            c.print(Text(f"  · {item}"))
     else:
-        console.print("[dim]no assumptions declared[/]")
+        c.print("[dim]no assumptions declared[/]")
 
 
 def _find_editor() -> list[str] | None:
@@ -331,7 +340,7 @@ def _edit_text(initial: str) -> str:
     return edited.strip() or initial
 
 
-def _ask_gate(payload: dict[str, Any]) -> dict[str, Any]:
+def _ask_gate(payload: dict[str, Any], out: Console | None = None) -> dict[str, Any]:
     """approve / edit / reject.
 
     `edit` opens the text in $EDITOR pre-filled, because a rewritten brief is
@@ -339,20 +348,30 @@ def _ask_gate(payload: dict[str, Any]) -> dict[str, Any]:
     rejecting. If no editor is available it falls back to a prompt rather than
     failing.
     """
-    choice = typer.prompt("\n[a]pprove  [e]dit  [r]eject", default="a").strip().lower()[:1]
+    c = out or console
+    # err=True keeps the question off stdout. `brief` pipes stdout to the
+    # clipboard, and a prompt string in the middle of the brief is the kind of
+    # defect nobody notices until it is pasted somewhere that matters.
+    choice = (
+        typer.prompt("\n[a]pprove  [e]dit  [r]eject", default="a", err=out is not None)
+        .strip()
+        .lower()[:1]
+    )
     if choice == "r":
         return {"decision": "reject"}
     if choice == "e":
         original = payload.get("enhanced", "")
         edited = _edit_text(original)
         if edited == original:
-            console.print("[dim]unchanged — treating as approve[/]")
+            c.print("[dim]unchanged — treating as approve[/]")
             return {"decision": "approve"}
         return {"decision": "edit", "replacement": edited}
     return {"decision": "approve"}
 
 
-async def _drive(graph: Any, cfg: dict[str, Any], first_input: Any) -> dict[str, Any]:
+async def _drive(
+    graph: Any, cfg: dict[str, Any], first_input: Any, ui: Console | None = None
+) -> dict[str, Any]:
     """Run until the graph finishes, answering each gate as it appears.
 
     A loop, not a single round trip: 1.5 adds gate G2, and a workflow that
@@ -365,8 +384,10 @@ async def _drive(graph: Any, cfg: dict[str, Any], first_input: Any) -> dict[str,
         if not interrupts:
             return dict(out) if isinstance(out, dict) else {}
         gate_payload = interrupts[0].value
-        _render_gate(gate_payload)
-        payload_in = Command(resume=_ask_gate(gate_payload))
+        # `ui`, not `out`: the loop already binds `out` to the graph's result,
+        # and naming the console the same thing made it a dict one line later.
+        _render_gate(gate_payload, out=ui)
+        payload_in = Command(resume=_ask_gate(gate_payload, out=ui))
 
 
 def _fail(exc: DynaflowsError) -> None:
@@ -377,12 +398,17 @@ def _fail(exc: DynaflowsError) -> None:
     and makes the user rediscover what the response already said.
     """
     envelope = exc.envelope
-    console.print(f"\n[red]{envelope.code}[/] {envelope.message}")
+    # stderr, always. This wrote to stdout, so `dynaflows brief "..." | pbcopy`
+    # on a failed call copied "MODEL_UNAVAILABLE ... Connection error" into the
+    # clipboard -- the exact defect the brief command's stdout/stderr split
+    # exists to prevent, in the code that reports failures. An error is never
+    # a command's output.
+    _err.print(f"\n[red]{envelope.code}[/] {envelope.message}")
     remedy = getattr(exc, "remedy", None)
     if remedy:
-        console.print(f"[yellow]→ {remedy}[/]")
+        _err.print(f"[yellow]→ {remedy}[/]")
     if envelope.attempts > 1:
-        console.print(f"[dim]after {envelope.attempts} attempt(s)[/]")
+        _err.print(f"[dim]after {envelope.attempts} attempt(s)[/]")
     raise typer.Exit(code=3)
 
 
@@ -1151,6 +1177,81 @@ def _calibrate_once(
         discarded=result.findings_reported - result.findings_grounded,
     )
     return card, result
+
+
+@app.command()
+def brief(
+    prompt: Annotated[str, typer.Argument(help="What you want done, in your own words.")],
+    root: Annotated[
+        Path | None,
+        typer.Option(help="Repository the brief is about. Defaults to the project root."),
+    ] = None,
+    thread: Annotated[str, typer.Option(help="Thread id. Reuse it to revisit.")] = "",
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the gate. For scripting.")] = False,
+) -> None:
+    """Sharpen a request against this codebase and print the brief, nothing else.
+
+    The smallest useful version of the whole tool: enhance, show you what it
+    understood, and hand you plain text to paste into whatever executes it.
+
+    The brief goes to STDOUT and everything else -- the gate, the paths, the
+    assumptions -- goes to stderr, so `dynaflows brief "..." | pbcopy` copies
+    the brief and not the furniture. That split is the entire reason this
+    command exists rather than being a flag on `run`.
+    """
+    import asyncio
+    import uuid
+
+    from dynaflows.contracts.state import initial_state
+    from dynaflows.gateway.telemetry import configure_tracing
+    from dynaflows.graph import build_graph, open_checkpointer
+
+    settings = get_settings()
+    configure_tracing(settings)  # ADR-011; see the note in `run`.
+    thread_id = thread or f"brief-{uuid.uuid4().hex[:8]}"
+
+    async def _go() -> dict[str, Any]:
+        async with open_checkpointer(settings.state_db) as saver:
+            # Halt before planning: this command's whole job ends at G1.
+            graph = build_graph(saver, interrupt_before=("plan",))
+            cfg = _graph_config(
+                settings, thread_id, auto_approve=["prompt"] if yes else [], root=root
+            )
+            state = initial_state(
+                uuid.uuid4().hex[:8],
+                thread_id,
+                prompt,
+                source_root=str(cfg["configurable"]["source_root"]),
+            )
+            await _drive(graph, cfg, state, ui=_err)
+            snapshot = await graph.aget_state(cfg)
+            return dict(snapshot.values)
+
+    try:
+        values = asyncio.run(_go())
+    except DynaflowsError as exc:
+        _fail(exc)
+
+    from dynaflows.contracts.state import GateDecision  # noqa: PLC0415
+
+    gate = values.get("prompt_gate")
+    if gate is not None and gate.decision is GateDecision.REJECT:
+        _err.print("[red]Rejected.[/] Nothing written to stdout.")
+        raise typer.Exit(code=1)
+
+    enhanced = values.get("enhanced_prompt") or ""
+    if not enhanced.strip():
+        _err.print("[red]The enhancer returned nothing.[/]")
+        raise typer.Exit(code=2)
+
+    for item in values.get("relevant_paths") or []:
+        _err.print(f"[dim]  · {item}[/]")
+    ledger = values.get("cost")
+    if ledger is not None:
+        _err.print(f"[dim]{_money(ledger)}  ·  thread {thread_id}[/]")
+
+    # stdout, plain, no markup, no panel. This is the deliverable.
+    print(enhanced)
 
 
 @app.command()

@@ -18,6 +18,7 @@ import pytest
 from typer.testing import CliRunner
 
 from dynaflows.cli import app
+from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 from tests.conftest import FakeGateway, make_playbook, make_workspace
 
 _DEFAULT_PLAN_TASKS = range(3)  # what conftest's default draft plans
@@ -340,3 +341,68 @@ def test_the_gate_names_a_path_the_enhancer_invented(isolated: FakeGateway) -> N
 
     assert "do not exist and were dropped" in result.output
     assert "src/ghost.py" in result.output
+
+
+# --- `brief`: stdout is the deliverable, everything else is furniture ----
+
+
+def test_brief_prints_only_the_brief_on_stdout(isolated: FakeGateway) -> None:
+    """`dynaflows brief "..." | pbcopy` must copy the brief and nothing else.
+    That split is the entire reason this command exists rather than being a
+    flag on `run`."""
+    runner = CliRunner()
+    result = runner.invoke(app, ["brief", "fix the login bug", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.strip() == "a precise brief"
+
+
+def test_brief_puts_the_gate_where_a_pipe_will_not_see_it(isolated: FakeGateway) -> None:
+    isolated.relevant_paths = ["src/auth.py"]
+    runner = CliRunner()
+
+    result = runner.invoke(app, ["brief", "fix the login bug"], input="a\n")
+
+    assert result.exit_code == 0
+    # The brief on stdout; the panels, paths and cost on stderr. CliRunner
+    # echoes the typed answer into its captured stdout -- a real terminal does
+    # not, verified against an actual pipe -- so this asserts on what is
+    # PRESENT and ABSENT rather than on exact equality.
+    assert "a precise brief" in result.stdout
+    assert "you asked" not in result.stdout
+    assert "src/auth.py" not in result.stdout
+
+
+def test_rejecting_a_brief_writes_nothing_to_stdout(isolated: FakeGateway) -> None:
+    """A rejected brief piped to the clipboard would be worse than no brief."""
+    result = CliRunner().invoke(app, ["brief", "fix the login bug"], input="r\n")
+
+    assert result.exit_code == 1
+    assert "a precise brief" not in result.stdout
+
+
+def test_brief_stops_before_planning(isolated: FakeGateway) -> None:
+    """This command's job ends at G1. Planning would spend a frontier call for
+    output nobody asked for."""
+    CliRunner().invoke(app, ["brief", "fix the login bug", "--yes"])
+
+    assert isolated.enhancer_calls == 1
+    assert isolated.planner_calls == 0
+
+
+def test_a_failure_does_not_reach_the_pipe(
+    isolated: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_fail` wrote to stdout, so a failed `brief` piped to the clipboard
+    copied "MODEL_UNAVAILABLE ... Connection error". An error is never a
+    command's output."""
+
+    async def boom(request: object, **_: object) -> object:
+        raise DynaflowsError.of(ErrorCode.MODEL_UNAVAILABLE, "everything is down")
+
+    monkeypatch.setattr(isolated, "call", boom)
+
+    result = CliRunner().invoke(app, ["brief", "fix the login bug", "--yes"])
+
+    assert result.exit_code == 3
+    assert "everything is down" not in result.stdout
