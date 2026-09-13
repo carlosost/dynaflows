@@ -22,3 +22,6 @@ wheels/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+
+# A/B test scratch (prompt comparison runs)
+.ab/

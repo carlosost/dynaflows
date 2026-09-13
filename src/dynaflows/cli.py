@@ -1244,8 +1244,10 @@ def brief(
         _err.print("[red]The enhancer returned nothing.[/]")
         raise typer.Exit(code=2)
 
-    for item in values.get("relevant_paths") or []:
-        _err.print(f"[dim]  · {item}[/]")
+    # The paths were printed at the gate, with the header that says what they
+    # mean. Printing them again here -- bare, after the prompt -- was left over
+    # from before `_render_gate` learned to show them, and read as a second,
+    # different list.
     ledger = values.get("cost")
     if ledger is not None:
         _err.print(f"[dim]{_money(ledger)}  ·  thread {thread_id}[/]")
