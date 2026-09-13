@@ -222,3 +222,63 @@ async def test_a_gateway_in_config_does_not_break_strict_checkpointing(
         )
     assert final["prompt_gate"].decision is GateDecision.APPROVE
     assert gateway.enhancer_calls == 1
+
+
+# --- ADR-023 step A: the enhancer can see the codebase --------------------
+
+
+async def test_the_enhancer_is_shown_the_repository(tmp_path: Path, cfg: Any) -> None:
+    """The planner got the source catalogue in ADR-018 and the enhancer never
+    did, so "fix the login bug" was sharpened into generic precision instead of
+    naming where login lives here -- the one thing a rewrite adds that the
+    developer could not have typed faster themselves."""
+    gateway = FakeGateway()
+
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        await run_to_gate(saver, "e1", gateway, cfg)
+
+    system = gateway.requests[0].system
+    assert "Repository" in system
+    assert "src/auth.py" in system
+    assert "Login and session handling." in system
+
+
+async def test_the_paths_it_names_reach_the_gate(tmp_path: Path, cfg: Any) -> None:
+    """A human approving a brief should see what the model thinks the request
+    is about. It is the cheapest way to catch a rewrite that understood the
+    words and missed the subject."""
+    gateway = FakeGateway()
+    gateway.relevant_paths = ["src/auth.py"]
+
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        _, out = await run_to_gate(saver, "e2", gateway, cfg)
+
+    payload = out["__interrupt__"][0].value
+    assert payload["relevant_paths"] == ["src/auth.py"]
+    assert payload["invented_paths"] == []
+
+
+async def test_a_path_it_invented_is_dropped_and_named(tmp_path: Path, cfg: Any) -> None:
+    """Checked against the catalogue exactly as a plan's inputs are, but NOT
+    fatal: a wrong path in a brief is a bad suggestion, not a plan that cannot
+    run. Dropping it silently would let the human approve an invention."""
+    gateway = FakeGateway()
+    gateway.relevant_paths = ["src/auth.py", "src/nonexistent.py"]
+
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        _, out = await run_to_gate(saver, "e3", gateway, cfg)
+
+    payload = out["__interrupt__"][0].value
+    assert payload["relevant_paths"] == ["src/auth.py"]
+    assert payload["invented_paths"] == ["src/nonexistent.py"]
+
+
+async def test_an_invented_path_does_not_stop_the_run(tmp_path: Path, cfg: Any) -> None:
+    gateway = FakeGateway()
+    gateway.relevant_paths = ["ghost.py"]
+
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        _, out = await run_to_gate(saver, "e4", gateway, cfg)
+
+    # Still halts at G1 for approval rather than failing the run.
+    assert "__interrupt__" in out

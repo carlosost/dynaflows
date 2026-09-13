@@ -46,6 +46,9 @@ class FakeGateway:
         self.enhanced = enhanced
         self.echo = echo
         self.assumptions = assumptions or []
+        # ADR-023: what the enhancer says the request is about. Empty by
+        # default so tests that are not about grounding stay unaffected.
+        self.relevant_paths: list[str] = []
         self.requests: list[Any] = []
         self.plan_draft: Any = _default_draft
         # Overridden by tests that need a worker to fail, come back short, or
@@ -77,6 +80,7 @@ class FakeGateway:
         else:
             payload = EnhancedPrompt(
                 enhanced=request.prompt if self.echo else self.enhanced,
+                relevant_paths=list(self.relevant_paths),
                 assumptions=self.assumptions,
             )
         return CallResult(

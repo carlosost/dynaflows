@@ -66,7 +66,7 @@ from dynaflows.graph.prompts import (
     WorkerReport,
 )
 from dynaflows.playbook.pack import pack_sections
-from dynaflows.store.catalogue import build_catalogue
+from dynaflows.store.catalogue import build_catalogue, unknown_paths
 from dynaflows.store.sources import SourceRefusal, read_sources
 
 
@@ -82,10 +82,16 @@ async def enhance_prompt(
     approving.
     """
     gateway = gateway_from(config)
+    # ADR-023 step A: the enhancer was blind to the codebase. The PLANNER got
+    # the source catalogue in ADR-018 and the enhancer never did, so "fix the
+    # login bug" was sharpened into generic precision instead of naming where
+    # login lives in this repository -- which is the one thing a rewrite can
+    # add that the developer could not have typed faster themselves.
+    catalogue = build_catalogue(Path(source_root_from(config)))
     result = await gateway.call(
         CallRequest(
             tier=Tier.SMALL,
-            system=ENHANCER_SYSTEM,
+            system=ENHANCER_SYSTEM.format(sources=catalogue.render()),
             prompt=state["raw_prompt"],
             schema=EnhancedPrompt,
             # A rewritten brief plus a few assumptions. Reserving more is not
@@ -96,8 +102,16 @@ async def enhance_prompt(
         )
     )
     payload: EnhancedPrompt = result.payload
+    # Checked against the catalogue, exactly as a plan's inputs are (ADR-018),
+    # but NOT fatal: a wrong path in a brief is a bad suggestion, not a plan
+    # that cannot run. The unknown ones are dropped and named at G1, so the
+    # human sees what it invented rather than approving it silently.
+    invented = unknown_paths(list(payload.relevant_paths), catalogue)
+    grounded = [p for p in payload.relevant_paths if p not in invented]
     return {
         "enhanced_prompt": payload.enhanced,
+        "relevant_paths": grounded,
+        "invented_paths": invented,
         "enhancer_assumptions": list(payload.assumptions),
         "cost": cost_delta(
             usd_spent=0.0 if result.cache_hit else result.cost_usd,
@@ -129,6 +143,8 @@ async def approve_prompt(
             "original": state.get("raw_prompt", ""),
             "enhanced": state.get("enhanced_prompt", ""),
             "assumptions": list(state.get("enhancer_assumptions") or []),
+            "relevant_paths": list(state.get("relevant_paths") or []),
+            "invented_paths": list(state.get("invented_paths") or []),
         }
     )
     outcome = _gate_outcome(answer)

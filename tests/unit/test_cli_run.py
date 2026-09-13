@@ -321,3 +321,22 @@ def test_a_finished_run_says_where_the_report_is(isolated: FakeGateway) -> None:
     assert result.exit_code == 0, result.output
     assert "report" in result.output
     assert "synthesis" in result.output
+
+
+def test_the_gate_shows_what_the_request_is_about(isolated: FakeGateway) -> None:
+    isolated.relevant_paths = ["src/auth.py"]
+
+    result = CliRunner().invoke(app, ["run", "fix the login bug", "--thread", "rp2"], input="r\n")
+
+    assert "reads this as being about" in result.output
+    assert "src/auth.py" in result.output
+
+
+def test_the_gate_names_a_path_the_enhancer_invented(isolated: FakeGateway) -> None:
+    """Silently dropping it would let the human approve an invention."""
+    isolated.relevant_paths = ["src/auth.py", "src/ghost.py"]
+
+    result = CliRunner().invoke(app, ["run", "fix the login bug", "--thread", "rp3"], input="r\n")
+
+    assert "do not exist and were dropped" in result.output
+    assert "src/ghost.py" in result.output

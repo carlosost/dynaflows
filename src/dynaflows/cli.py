@@ -231,6 +231,20 @@ def _render_gate(payload: dict[str, Any]) -> None:
             padding=(0, 1),
         )
     )
+    paths = payload.get("relevant_paths") or []
+    if paths:
+        # What it thinks the request is ABOUT, checked against the catalogue.
+        # This is the cheapest possible way to catch a rewrite that has
+        # understood the words and missed the subject.
+        console.print("[dim]it reads this as being about:[/]")
+        for item in paths:
+            console.print(Text(f"  · {item}"), markup=False)
+    invented = payload.get("invented_paths") or []
+    if invented:
+        console.print(
+            f"[yellow]  {len(invented)} path(s) it named do not exist and were dropped:[/]"
+        )
+        console.print(Text("  " + ", ".join(invented)), markup=False)
     assumptions = payload.get("assumptions") or []
     if assumptions:
         console.print("[dim]assumed on your behalf:[/]")

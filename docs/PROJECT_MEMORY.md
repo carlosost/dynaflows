@@ -1266,6 +1266,71 @@ lives beside the fixture and names each defect by line range and kind.
 
 ---
 
+### ADR-023: Two graph shapes, divided by whether workers write; capabilities divide the work inside each
+
+**Date:** 2026-09-13
+**Status:** Accepted — supersedes the informal "keep `audit`, add `implement`" split
+
+**Context.**
+The project was built as a code auditor because that was the stress test. The stated objective is a
+development tool with three uses: fix a bug, build a feature, answer a question about the codebase.
+**None of the three is an audit.**
+
+The first attempt at structuring this proposed two commands, `audit` and `implement`. That named the
+wrong axis. Answering "how does session refresh work here, and would this idea break it?" is
+read-only like the auditor and is a *different capability* from finding defects — different prompt,
+different output schema, different synthesis. Meanwhile a bug fix and a feature differ from both by
+writing to the repository, which changes the topology rather than the wording.
+
+A boolean flag selecting between them was also considered and rejected: it would select a
+**topology**, not a behaviour, which is AP-10 with the blast radius of a repository write.
+
+**Decision.**
+Two graph shapes, distinguished by exactly one thing — whether workers write — and a capability
+catalogue distinguishing work within each.
+
+```
+shared front half   enhance (codebase-aware) → G1 → plan → G2
+
+READ shape          → N parallel readers → evaluate → synthesize
+                      capabilities: answer   (question about the codebase)
+                                    analyse  (find defects — the existing auditor)
+
+CHANGE shape        → sequenced executors → verify (the test suite) → report
+                      capabilities: implement (bug fix, feature)
+                      may end by running the READ shape over the resulting diff
+```
+
+Everything before G2 is one implementation, shared as code and not as a conditional path. Each shape
+is a separate graph and a separate command, so the command names what is about to happen — which
+matters when one of them writes.
+
+**Consequences.**
+- **`analyse` stops being a workflow and becomes a capability.** The auditor's graph *is* the read
+  graph; `answer` reuses fan-out, per-task playbook routing, dispatch-time context resolution, the
+  run store and the synthesizer unchanged, swapping `Finding` for an answer schema and keeping the
+  citation checker, because "cite the code you are describing" is worth as much in an answer as in a
+  defect claim. Nothing is preserved out of sentiment; it is load-bearing for the next thing built.
+- **The measured weakness of `analyse` does not transfer to `answer`.** Every number in the
+  calibration log concerns finding defects without being told what is wrong. Retrieval and synthesis
+  against real citations is a different task with a different failure mode, and is unmeasured.
+  It needs its own fixture before any claim is made about it.
+- **The change shape needs what the read shape never did:** ordered tasks (OQ-02, open since Phase 0
+  precisely for want of a task a flat parallel map cannot express — this is that task), a verify step
+  whose oracle is the project's own test suite, and a failure story where a half-applied change is
+  the risk rather than a missing paragraph.
+- **ADR-016 is not reversed by this.** The executor shells out to a coding agent in its own process
+  with its own permissions, on a brief a human approved at G2. dynaflows still writes only inside
+  `.dynaflows/`. That needs its own short ADR when the executor is built; it is a paragraph, not a
+  sandbox.
+- **The router that picks a shape from the request is explicitly NOT part of this** (Phase 3). Three
+  commands, chosen by the user, until there is evidence that automatic selection is wanted.
+- **Reversal condition:** a capability that both reads and writes within one task, where splitting it
+  across the two shapes loses something. A refactor that must measure before and after is the
+  candidate.
+
+---
+
 ## 2. Data Contracts
 
 Written before implementation (§1.4, contract-first). These are the canonical shapes; changes are
@@ -1894,6 +1959,27 @@ from fifteen to three. Every one then put an *explanation* where the quote belon
 report "evidence" conventionally means the reasoning that supports a claim, so the field name was
 working against the field description. It is `quoted_lines` now, with a worked right/wrong example
 in the system prompt.
+
+### Step A — the enhancer can see the codebase (2026-09-13)
+
+ADR-018 gave the PLANNER a source catalogue and the enhancer never got one, so "fix the login bug"
+was rewritten into generic precision rather than naming where login lives in this repository. That
+is the one thing a rewrite adds which the developer could not have typed faster themselves.
+
+`enhance_prompt` now builds the same catalogue the planner reads and formats it into
+`ENHANCER_SYSTEM`. `EnhancedPrompt` gains `relevant_paths`, checked against the catalogue with the
+same `unknown_paths()` the planner uses — but **not fatally**: a wrong path in a brief is a bad
+suggestion, not a plan that cannot run. Unknown paths are dropped and reported at G1 alongside the
+grounded ones, so a human approving a brief sees both what the model thinks the request is about and
+what it made up.
+
+This is the first step of the ADR-023 plan and it is shared by all three target use cases.
+
+**Not done, and it will matter first on a real repository:** the catalogue is a flat list of paths
+with docstring summaries, budgeted at 4,000 tokens. On a large codebase it truncates, and "fix the
+login bug" then needs to *search* for login rather than recognise it in a list. The FTS5 machinery
+that indexes the playbook would serve a second corpus; that is the next thing this step needs, and
+it is deliberately not built before a repository demands it (AP-11).
 
 ## 7. Known Gaps in This Document
 

@@ -269,6 +269,12 @@ class WorkflowState(TypedDict, total=False):
     # Surfaced at gate G1: a human approving a rewrite needs to see what was
     # assumed on their behalf, not just the result.
     enhancer_assumptions: list[str]
+    # ADR-023: the files the enhancer believes the request concerns, checked
+    # against the source catalogue. `invented_paths` are the ones it named that
+    # do not exist -- kept rather than discarded, because a human approving a
+    # brief should see what the model made up.
+    relevant_paths: list[str]
+    invented_paths: list[str]
     prompt_gate: GateOutcome | None
 
     plan: Plan | None
@@ -315,6 +321,8 @@ def initial_state(
         source_root=source_root,
         enhanced_prompt=None,
         enhancer_assumptions=[],
+        relevant_paths=[],
+        invented_paths=[],
         prompt_gate=None,
         plan=None,
         plan_hash=None,

@@ -11,15 +11,27 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 ENHANCER_SYSTEM = """\
-You rewrite a developer's request into a precise, self-contained brief for an \
-analysis workflow. You do not answer the request.
+You rewrite a developer's request into a precise, self-contained brief. You do \
+not answer the request or start the work.
+
+You are shown the repository's file list. Use it: "fix the login bug" should \
+become a brief that names where login actually lives in THIS codebase.
 
 Rules:
 - Preserve the user's intent exactly. Never widen or narrow the scope.
-- Make implicit constraints explicit.
-- Name what you had to assume, rather than silently choosing.
+- Ground the brief in the real repository. Refer to paths as they appear in \
+the catalogue below, spelled exactly.
+- Never name a path that is not in the catalogue. An invented path is dropped \
+and the human is told you invented it.
+- `relevant_paths` lists the files you believe this request concerns. Two to \
+six is usually right. Leave it empty if the request is not about code.
+- Make implicit constraints explicit, and name what you had to ASSUME rather \
+than silently choosing.
 - If the request is already precise, return it close to unchanged and say so.
-- No preamble, no meta-commentary about the rewrite itself.\
+- No preamble, no meta-commentary about the rewrite itself.
+
+Repository (path | size | what it is):
+{sources}
 """
 
 
@@ -28,6 +40,10 @@ class EnhancedPrompt(BaseModel):
     readable at a glance, not a wall of text."""
 
     enhanced: str = Field(description="The rewritten brief. Self-contained.")
+    relevant_paths: list[str] = Field(
+        default_factory=list,
+        description="Files from the catalogue this request concerns. Copy paths exactly.",
+    )
     assumptions: list[str] = Field(
         default_factory=list,
         description="Anything you had to assume. One short line each. Empty if none.",
