@@ -296,7 +296,8 @@ def _edit_in_editor(initial: str) -> str | None:
         handle.write(initial)
         path = handle.name
     try:
-        console.print(f"[dim]opening {editor[0]}…[/]")
+        # stderr: the brief owns stdout (see `_err`).
+        _err.print(f"[dim]opening {editor[0]}…[/]")
         result = subprocess.run([*editor, path], check=False)  # noqa: S603
         if result.returncode != 0:
             return None
@@ -340,6 +341,32 @@ def _edit_text(initial: str) -> str:
     return edited.strip() or initial
 
 
+def _ask(c: Console, question: str, default: str) -> str:
+    """Ask on `c`, read from stdin, and put NOTHING on stdout.
+
+    `typer.prompt(..., err=True)` cannot do this. Click writes all but the
+    last character of the prompt to the stream `err` selects and then passes
+    that last character to `input()`, which always writes to stdout -- a
+    deliberate readline workaround (`typer/_click/termui.py`, `prompt_func`):
+
+        echo(text[:-1], nl=False, err=err)
+        return f(text[-1:])
+
+    So every interactive gate leaked exactly one byte, and
+    `dynaflows brief "..." | pbcopy` pasted a leading space. One byte is not
+    the point; a command that reserves stdout for its output and then writes
+    something else there is wrong at any size, and the size is why it went
+    unnoticed. `input()` with no argument prompts nowhere.
+    """
+    c.print(f"\n{question} [dim]\\[{default}][/]: ", end="")
+    try:
+        answer = input().strip().lower()
+    except (EOFError, KeyboardInterrupt) as exc:
+        # No answer is not approval. The gate exists to make a human say yes.
+        raise typer.Abort from exc
+    return answer or default
+
+
 def _ask_gate(payload: dict[str, Any], out: Console | None = None) -> dict[str, Any]:
     """approve / edit / reject.
 
@@ -349,14 +376,7 @@ def _ask_gate(payload: dict[str, Any], out: Console | None = None) -> dict[str, 
     failing.
     """
     c = out or console
-    # err=True keeps the question off stdout. `brief` pipes stdout to the
-    # clipboard, and a prompt string in the middle of the brief is the kind of
-    # defect nobody notices until it is pasted somewhere that matters.
-    choice = (
-        typer.prompt("\n[a]pprove  [e]dit  [r]eject", default="a", err=out is not None)
-        .strip()
-        .lower()[:1]
-    )
+    choice = _ask(c, "[a]pprove  [e]dit  [r]eject", default="a")[:1]
     if choice == "r":
         return {"decision": "reject"}
     if choice == "e":
@@ -1179,6 +1199,48 @@ def _calibrate_once(
     return card, result
 
 
+def _save_brief(
+    settings: Any,
+    values: dict[str, Any],
+    thread_id: str,
+    enhanced: str,
+    ledger: Any,
+    *,
+    rejected: bool,
+) -> None:
+    """Keep the run, and say where it went.
+
+    Under the PROJECT root, never under `--root`. A brief can be about
+    another repository; writing this project's bookkeeping into someone
+    else's tree is exactly what ADR-016 forbids, and `--root` is the option
+    that makes it possible to do by accident.
+
+    Failing to save is reported and does not fail the command: the brief is
+    already on stdout, and losing a record is not worth losing the output the
+    user actually asked for.
+    """
+    from dynaflows.store.briefs import BRIEF_DIR_NAME, BriefRecord, save_brief
+
+    record = BriefRecord(
+        thread_id=thread_id,
+        run_id=str(values.get("run_id") or ""),
+        raw_prompt=str(values.get("raw_prompt") or ""),
+        brief=enhanced,
+        decision="reject" if rejected else "approve",
+        source_root=str(values.get("source_root") or ""),
+        cost=_money(ledger) if ledger is not None else "not recorded",
+        relevant_paths=list(values.get("relevant_paths") or []),
+        invented_paths=list(values.get("invented_paths") or []),
+        assumptions=list(values.get("enhancer_assumptions") or []),
+    )
+    try:
+        _, record_path = save_brief(settings.project_root / BRIEF_DIR_NAME, record)
+    except OSError as exc:
+        _err.print(f"[yellow]Could not save the brief:[/] {exc}")
+        return
+    _err.print(f"[dim]saved {record_path.parent.name}/{record_path.stem}.{{brief.txt,md}}[/]")
+
+
 @app.command()
 def brief(
     prompt: Annotated[str, typer.Argument(help="What you want done, in your own words.")],
@@ -1188,6 +1250,13 @@ def brief(
     ] = None,
     thread: Annotated[str, typer.Option(help="Thread id. Reuse it to revisit.")] = "",
     yes: Annotated[bool, typer.Option("--yes", help="Skip the gate. For scripting.")] = False,
+    save: Annotated[
+        bool,
+        typer.Option(
+            "--save/--no-save",
+            help="Keep the brief and its gate in .ai/. On by default.",
+        ),
+    ] = True,
 ) -> None:
     """Sharpen a request against this codebase and print the brief, nothing else.
 
@@ -1235,20 +1304,28 @@ def brief(
     from dynaflows.contracts.state import GateDecision  # noqa: PLC0415
 
     gate = values.get("prompt_gate")
-    if gate is not None and gate.decision is GateDecision.REJECT:
-        _err.print("[red]Rejected.[/] Nothing written to stdout.")
-        raise typer.Exit(code=1)
+    rejected = gate is not None and gate.decision is GateDecision.REJECT
 
     enhanced = values.get("enhanced_prompt") or ""
     if not enhanced.strip():
         _err.print("[red]The enhancer returned nothing.[/]")
         raise typer.Exit(code=2)
 
+    ledger = values.get("cost")
+    if save:
+        # A rejection is saved too. It is the most informative run there is --
+        # the model being wrong with a human's verdict attached -- and keeping
+        # only the approvals keeps the wrong half.
+        _save_brief(settings, values, thread_id, enhanced, ledger, rejected=rejected)
+
+    if rejected:
+        _err.print("[red]Rejected.[/] Nothing written to stdout.")
+        raise typer.Exit(code=1)
+
     # The paths were printed at the gate, with the header that says what they
     # mean. Printing them again here -- bare, after the prompt -- was left over
     # from before `_render_gate` learned to show them, and read as a second,
     # different list.
-    ledger = values.get("cost")
     if ledger is not None:
         _err.print(f"[dim]{_money(ledger)}  ·  thread {thread_id}[/]")
 

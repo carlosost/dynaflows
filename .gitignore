@@ -23,5 +23,5 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 
-# A/B test scratch (prompt comparison runs)
-.ab/
+# Saved briefs and their gate records (`dynaflows brief`)
+.ai/

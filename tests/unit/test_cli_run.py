@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from dynaflows.cli import app
@@ -406,3 +407,105 @@ def test_a_failure_does_not_reach_the_pipe(
 
     assert result.exit_code == 3
     assert "everything is down" not in result.stdout
+
+
+def _ai_dir(tmp_path: Path) -> Path:
+    return tmp_path / "workspace" / ".ai"
+
+
+def test_brief_saves_both_the_brief_and_the_record(
+    isolated: FakeGateway, tmp_path: Path
+) -> None:
+    """The first A/B run was lost to a shell redirect: brief in one file, gate
+    in another, both in /tmp. The command keeps them itself now."""
+    result = CliRunner().invoke(app, ["brief", "fix the login bug", "--thread", "t9", "--yes"])
+
+    assert result.exit_code == 0
+    assert (_ai_dir(tmp_path) / "t9.brief.txt").exists()
+    assert (_ai_dir(tmp_path) / "t9.md").exists()
+
+
+def test_the_saved_brief_is_byte_identical_to_stdout(
+    isolated: FakeGateway, tmp_path: Path
+) -> None:
+    """The invariant that makes the file usable. If the copy on disk could
+    drift from what was piped, an A/B test would compare the wrong text and
+    nothing in the run would say so."""
+    result = CliRunner().invoke(app, ["brief", "fix the login bug", "--thread", "t10", "--yes"])
+
+    saved = (_ai_dir(tmp_path) / "t10.brief.txt").read_text()
+    assert saved.strip() == result.stdout.strip()
+
+
+def test_no_save_writes_nothing(isolated: FakeGateway, tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app, ["brief", "fix the login bug", "--thread", "t11", "--yes", "--no-save"]
+    )
+
+    assert result.exit_code == 0
+    assert not _ai_dir(tmp_path).exists()
+
+
+def test_a_rejected_brief_is_saved_even_though_stdout_is_empty(
+    isolated: FakeGateway, tmp_path: Path
+) -> None:
+    """A rejection is the model being wrong with a human's verdict attached.
+    Keeping only approvals keeps the half that teaches nothing."""
+    result = CliRunner().invoke(app, ["brief", "fix the login bug", "--thread", "t12"], input="r\n")
+
+    assert result.exit_code == 1
+    assert result.stdout.strip() == ""
+    assert "**decision** reject" in (_ai_dir(tmp_path) / "t12.md").read_text()
+
+
+def test_saving_never_touches_the_repository_under_root(
+    isolated: FakeGateway, tmp_path: Path
+) -> None:
+    """ADR-016. `--root` can name someone else's tree; the bookkeeping belongs
+    to this project, and `--root` is the option that makes writing into the
+    wrong one possible by accident."""
+    other = tmp_path / "someone-elses-repo"
+    other.mkdir()
+
+    result = CliRunner().invoke(
+        app, ["brief", "fix the login bug", "--thread", "t13", "--yes", "--root", str(other)]
+    )
+
+    assert result.exit_code == 0
+    assert not (other / ".ai").exists()
+    assert (_ai_dir(tmp_path) / "t13.md").exists()
+
+
+def test_asking_a_question_puts_nothing_on_stdout(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one-byte leak, pinned.
+
+    `typer.prompt(..., err=True)` passes the prompt's LAST character to
+    `input()`, which always writes to stdout -- a readline workaround in
+    click. Every interactive gate therefore prepended a space to the pipe.
+    Written against `typer.prompt` this test fails; that is what it is for.
+    """
+    from dynaflows.cli import _ask, _err
+
+    monkeypatch.setattr("builtins.input", lambda: "r")
+
+    answer = _ask(_err, "[a]pprove  [e]dit  [r]eject", default="a")
+
+    assert answer == "r"
+    assert capsys.readouterr().out == ""
+
+
+def test_an_unanswered_gate_is_not_an_approval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EOF on stdin means nobody answered. The gate exists to make a human
+    say yes, so silence must not be read as one."""
+
+    def no_answer() -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", no_answer)
+
+    from dynaflows.cli import _ask, _err
+
+    with pytest.raises(typer.Abort):
+        _ask(_err, "[a]pprove", default="a")

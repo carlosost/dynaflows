@@ -2030,6 +2030,48 @@ Three things this forced, all of them defects that existed before `brief` and we
 The pipe discipline is what makes `brief` composable, and it was worth a command of its own to
 discover that three parts of the CLI did not have it.
 
+**Saving the run, and the one byte `err=True` could not keep off stdout (2026-09-13).**
+
+The first real A/B run was lost to a shell redirect — brief in one file, gate in another, both
+in `/tmp`. `brief` now writes both itself, under `.ai/`, named by thread id:
+`<thread>.brief.txt` (verbatim, pasteable, nothing added) and `<thread>.md` (the record: original
+request, brief, grounded and invented paths, assumptions, decision, cost).
+
+Three decisions in that, each of which had an obvious wrong answer:
+- **The record stores the gate's CONTENT, not its appearance.** Capturing the rendered Rich panels
+  would put `COLUMNS` in the file, so the same run recorded at 200 and at 80 columns diffs line for
+  line while saying the same thing. A record whose bytes depend on the terminal cannot be compared
+  across runs, and comparing runs is the only reason to keep one.
+- **Under the PROJECT root, never under `--root`.** A brief can be about another repository, and
+  writing this project's bookkeeping into someone else's tree is what ADR-016 forbids. `--root` is
+  the option that makes it happen by accident, so a test asserts it does not.
+- **A rejected brief is saved too.** It is the model being wrong with a human's verdict attached.
+  Keeping only approvals keeps the half that teaches nothing.
+
+**The finding: `typer.prompt(..., err=True)` cannot keep the prompt off stdout, and never could.**
+AP-05's exact shape — the parameter exists, is documented, and does not do what its name says.
+`typer/_click/termui.py`:
+
+```python
+echo(text[:-1], nl=False, err=err)   # all but the last character honours err
+return f(text[-1:])                  # the last character goes to input(), i.e. stdout
+```
+
+A deliberate readline workaround, unconditional. So every interactive gate wrote exactly one byte
+to stdout and `dynaflows brief "..." | pbcopy` pasted a leading space. Confirmed with a real
+subprocess and a real pipe: `STDOUT: ' THE-BRIEF\n'`.
+
+One byte is not the point. A command that reserves stdout for its output and then writes something
+else there is wrong at any size, and the size is the whole reason it survived the commit that was
+specifically about this split — plus a test suite, because `CliRunner` echoes typed input to stdout
+itself, so the harness produced the same symptom for a different reason and made the real one
+unreadable. **A test double that reproduces the bug for the wrong reason is worse than one that
+misses it**, because it converts a signal into noise.
+
+Replaced with `_ask()`: write the question to the console we were handed, read with bare `input()`,
+which prompts nowhere. EOF raises `Abort` rather than returning the default — nobody answering is
+not a human saying yes.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
