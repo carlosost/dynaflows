@@ -413,9 +413,7 @@ def _ai_dir(tmp_path: Path) -> Path:
     return tmp_path / "workspace" / ".ai"
 
 
-def test_brief_saves_both_the_brief_and_the_record(
-    isolated: FakeGateway, tmp_path: Path
-) -> None:
+def test_brief_saves_both_the_brief_and_the_record(isolated: FakeGateway, tmp_path: Path) -> None:
     """The first A/B run was lost to a shell redirect: brief in one file, gate
     in another, both in /tmp. The command keeps them itself now."""
     result = CliRunner().invoke(app, ["brief", "fix the login bug", "--thread", "t9", "--yes"])
@@ -425,9 +423,7 @@ def test_brief_saves_both_the_brief_and_the_record(
     assert (_ai_dir(tmp_path) / "t9.md").exists()
 
 
-def test_the_saved_brief_is_byte_identical_to_stdout(
-    isolated: FakeGateway, tmp_path: Path
-) -> None:
+def test_the_saved_brief_is_byte_identical_to_stdout(isolated: FakeGateway, tmp_path: Path) -> None:
     """The invariant that makes the file usable. If the copy on disk could
     drift from what was piped, an A/B test would compare the wrong text and
     nothing in the run would say so."""

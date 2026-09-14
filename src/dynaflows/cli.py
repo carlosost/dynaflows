@@ -83,6 +83,10 @@ def index(
         bool,
         typer.Option("--check", help="Report drift and exit non-zero. Builds nothing."),
     ] = False,
+    rebuild: Annotated[
+        bool,
+        typer.Option("--rebuild", help="Reconstruct the FTS index. Repairs orphan postings."),
+    ] = False,
 ) -> None:
     """Build the retrieval index over docs/, or verify it still matches.
 
@@ -99,13 +103,27 @@ def index(
         repository = SqlitePlaybookRepository(connection, settings.playbook_root)
         if check:
             report = repository.drift()
-            if report.clean:
+            consistent = store.fts_is_consistent(connection)
+            if report.clean and consistent:
                 console.print(f"[green]OK[/] {repository.count()} chunks, {report.summary()}")
                 return
-            console.print(f"[red]DRIFT[/] {report.summary()}")
+            if not consistent:
+                # A separate failure from drift, with a separate remedy: these
+                # postings have no chunk row left to subtract them, so
+                # reindexing does not heal them (AP-20 -- two faults, two
+                # messages, never one summary line).
+                console.print(
+                    "[red]CORRUPT[/] the search index disagrees with the chunk table"
+                    " — run `dynaflows index --rebuild`"
+                )
+            if not report.clean:
+                console.print(f"[red]DRIFT[/] {report.summary()}")
             raise typer.Exit(code=1)
 
         total = index_corpus(connection, settings.playbook_root)
+        if rebuild:
+            store.rebuild_fts(connection)
+            console.print("[dim]search index reconstructed from the chunk table[/]")
     except DynaflowsError as exc:
         console.print(f"[red]{exc}[/]")
         raise typer.Exit(code=1) from exc

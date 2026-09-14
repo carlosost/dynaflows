@@ -229,3 +229,123 @@ def test_the_in_memory_repository_matches_the_sqlite_one_on_anchors(repo) -> Non
     assert [c.heading_path for c in memory.by_anchor(["AP-11"])] == [
         c.heading_path for c in repo.by_anchor(["AP-11"])
     ]
+
+
+def _orphan_postings(connection, term: str) -> list[int]:  # noqa: ANN001
+    """FTS rowids matching `term` that no live chunk owns.
+
+    The fault is asserted here rather than through `search()` because
+    `search()` JOINs orphans away: with the current whole-corpus reindex the
+    rowids climb, the JOIN finds nothing, and a test written against the
+    symptom passes over a broken index. Assert the index, not the query.
+    """
+    live = {r[0] for r in connection.execute("SELECT rowid FROM chunks")}
+    matched = connection.execute(
+        "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?", (term,)
+    ).fetchall()
+    return [r[0] for r in matched if r[0] not in live]
+
+
+def test_reindexing_leaves_no_orphan_postings(corpus: Path, tmp_path: Path) -> None:
+    """External-content FTS5 subtracts the column values handed to 'delete'.
+    Empty strings subtract nothing, so every posting survived the reindex and
+    the index grew without bound -- silently, and `integrity-check` passes.
+
+    Today the damage is a search that returns FEWER results than it should,
+    because `search`'s JOIN drops the orphans. It is worse than that latent:
+    see `test_an_incremental_reindex_does_not_resurrect_a_deleted_term`.
+    """
+    connection = store.connect(tmp_path / "playbook.db")
+    index_corpus(connection, corpus)
+    assert not _orphan_postings(connection, "idempotency")
+
+    (corpus / "playbook.md").write_text(
+        "# Playbook\n\n## 3.3 Service Integration Patterns\n\nLighting conduits only.\n",
+        encoding="utf-8",
+    )
+    index_corpus(connection, corpus)
+
+    assert _orphan_postings(connection, "idempotency") == []
+
+
+def test_forgetting_a_source_leaves_no_orphan_postings(corpus: Path, tmp_path: Path) -> None:
+    """`forget_sources` carried the same empty-string delete. Two call sites,
+    one fault -- fixing the one the repro used would leave the other to be
+    found again later, by someone with less context."""
+    connection = store.connect(tmp_path / "playbook.db")
+    index_corpus(connection, corpus)
+
+    (corpus / "playbook.md").unlink()
+    index_corpus(connection, corpus)
+
+    assert _orphan_postings(connection, "idempotency") == []
+
+
+def test_an_incremental_reindex_does_not_resurrect_a_deleted_term(
+    corpus: Path, tmp_path: Path
+) -> None:
+    """The consequence that is latent today and armed by the obvious optimisation.
+
+    `index_corpus` currently rebuilds every file, so rowids climb and orphans
+    are merely dropped by the JOIN. Reindex ONE file -- the change everybody
+    proposes when they notice the waste -- and SQLite reuses the freed rowids.
+    The surviving postings then point at whatever now occupies them, and a
+    search for a term that exists nowhere in the corpus returns a confident
+    hit on unrelated text.
+
+    So the performance fix must not land before this one. This test is what
+    says so, in the place where somebody would make that mistake.
+    """
+    connection = store.connect(tmp_path / "playbook.db")
+    index_corpus(connection, corpus)
+    repository = SqlitePlaybookRepository(connection, corpus)
+    assert repository.search("idempotency"), "precondition: the term is indexed"
+
+    source = corpus / "playbook.md"
+    source.write_text(
+        "# Playbook\n\n## 3.3 Service Integration Patterns\n\nLighting conduits only.\n",
+        encoding="utf-8",
+    )
+    store.replace_source(
+        connection, source, "playbook.md", chunk_markdown(source.read_text(), "playbook.md")
+    )
+
+    for chunk in repository.search("idempotency"):
+        raise AssertionError(
+            f"a term that exists nowhere in the corpus matched {chunk.source_path}: {chunk.body!r}"
+        )
+
+
+def test_an_index_that_disagrees_with_its_chunks_is_detected(corpus: Path, tmp_path: Path) -> None:
+    """A database indexed before the fix cannot heal by reindexing -- the
+    surviving postings have no chunk row left to subtract them -- so the
+    condition needs its own check. Drift asks "is the index stale"; this asks
+    "is the index a lie" (AP-20).
+
+    Note which check: FTS5's `integrity-check` at its DEFAULT rank passes on
+    this fault, and an anti-join against `chunks_fts` also passes, because an
+    external-content table reports the content table's rowids. Both were
+    tried. Only rank 1 cross-checks the two.
+    """
+    connection = store.connect(tmp_path / "playbook.db")
+    index_corpus(connection, corpus)
+    assert store.fts_is_consistent(connection)
+
+    # Exactly what the old delete did: remove the chunk, leave the posting.
+    connection.execute("DELETE FROM chunks WHERE source_path = 'playbook.md'")
+    connection.commit()
+
+    assert not store.fts_is_consistent(connection)
+
+
+def test_rebuild_repairs_an_index_corrupted_before_the_fix(corpus: Path, tmp_path: Path) -> None:
+    """The remedy for the databases already on disk."""
+    connection = store.connect(tmp_path / "playbook.db")
+    index_corpus(connection, corpus)
+    connection.execute("DELETE FROM chunks WHERE source_path = 'playbook.md'")
+    connection.commit()
+    assert not store.fts_is_consistent(connection)
+
+    store.rebuild_fts(connection)
+
+    assert store.fts_is_consistent(connection)
