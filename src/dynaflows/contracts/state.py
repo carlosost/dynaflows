@@ -281,6 +281,12 @@ class WorkflowState(TypedDict, total=False):
     # brief should see what the model made up.
     relevant_paths: list[str]
     invented_paths: list[str]
+    # WHICH model wrote the brief. Recorded because brief quality tracked the
+    # model almost perfectly -- every usable brief in the A/B run came from one
+    # model in the chain and every unusable one from another -- and nothing
+    # anywhere said which had answered. A whole comparison of prompt wordings
+    # was run with the author changing underneath it, unlogged.
+    enhancer_model: str
     prompt_gate: GateOutcome | None
 
     plan: Plan | None
@@ -329,6 +335,7 @@ def initial_state(
         enhancer_assumptions=[],
         relevant_paths=[],
         invented_paths=[],
+        enhancer_model="",
         prompt_gate=None,
         plan=None,
         plan_hash=None,

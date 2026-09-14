@@ -205,6 +205,12 @@ class GatewayClient:
             except DynaflowsError as exc:
                 if exc.envelope.code in _FATAL:
                     raise
+                # Counted here, where the failure is. This branch used to
+                # `continue` without touching the ledger, so three failed
+                # provider requests followed by one success reported "1
+                # call(s)" -- real requests, real latency, real rate-limit
+                # budget, invisible.
+                self.ledger = _bump(self.ledger, "calls_attempted")
                 last = exc
                 if exc.envelope.code in _RETRYABLE:
                     self.breaker.record_failure(model_id)
@@ -224,9 +230,24 @@ class GatewayClient:
                 self.ledger = _bump(self.ledger, "schema_failures")
                 if not _allow_repair:
                     raise
-                repaired = await self.call(
-                    self._repair_request(request, exc.envelope.message), _allow_repair=False
-                )
+                try:
+                    repaired = await self.call(
+                        self._repair_request(request, exc.envelope.message), _allow_repair=False
+                    )
+                except DynaflowsError as repair_exc:
+                    self.ledger = _bump(self.ledger, "calls_attempted")
+                    # Repaired and still wrong: this model cannot satisfy this
+                    # contract, which is a fact about the MODEL, so the next
+                    # one gets a turn. Previously this raised and ended the
+                    # run with a chain still half unused.
+                    #
+                    # Measured: brief quality tracked model identity almost
+                    # perfectly -- every usable brief came from one model in
+                    # the chain and every unusable one from a different one --
+                    # so "try the next model" is the response with evidence
+                    # behind it, and "ask this model again" is not.
+                    last = repair_exc
+                    continue
                 return _with(repaired, repaired_flag=True, fallback_depth=depth)
 
             self.breaker.record_success(model_id)

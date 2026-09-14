@@ -18,7 +18,7 @@ from langgraph.types import Command
 from dynaflows.contracts.state import GateDecision, initial_state
 from dynaflows.contracts.tiers import Tier
 from dynaflows.graph import build_graph, open_checkpointer
-from dynaflows.graph.prompts import EnhancedPrompt
+from dynaflows.graph.prompts import EnhancedPrompt, compose_brief
 from tests.conftest import FakeGateway, cfg_factory
 
 pytestmark = [pytest.mark.deterministic, pytest.mark.anyio]
@@ -65,7 +65,7 @@ async def test_the_gate_payload_shows_the_human_what_was_assumed(tmp_path: Path,
     payload = out["__interrupt__"][0].value
     assert payload["gate"] == "prompt"
     assert payload["original"] == "audit auth"
-    assert payload["enhanced"] == "rewritten"
+    assert payload["enhanced"] == compose_brief("rewritten")
     assert payload["assumptions"] == ["assumed the HTTP layer, not the DB"]
 
 
@@ -107,9 +107,9 @@ async def test_the_text_that_proceeds_is_the_text_that_was_shown(tmp_path: Path,
     gateway = FakeGateway("EXACT TEXT SHOWN")
     async with open_checkpointer(tmp_path / "s.db") as saver:
         graph, out = await run_to_gate(saver, "t5", gateway, cfg)
-        assert out["__interrupt__"][0].value["enhanced"] == "EXACT TEXT SHOWN"
+        assert out["__interrupt__"][0].value["enhanced"] == compose_brief("EXACT TEXT SHOWN")
         final = await graph.ainvoke(Command(resume={"decision": "approve"}), cfg("t5", gateway))
-    assert final["enhanced_prompt"] == "EXACT TEXT SHOWN"
+    assert final["enhanced_prompt"] == compose_brief("EXACT TEXT SHOWN")
 
 
 # --- the three answers ---------------------------------------------------

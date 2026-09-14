@@ -272,6 +272,11 @@ def _render_gate(payload: dict[str, Any], out: Console | None = None) -> None:
     if invented:
         c.print(f"[yellow]  {len(invented)} path(s) it named do not exist and were dropped:[/]")
         c.print(Text("  " + ", ".join(invented)), markup=False)
+    model = payload.get("model")
+    if model:
+        # At the gate, because it is the single best predictor of whether this
+        # brief is any good, and the human is about to judge it.
+        c.print(f"[dim]written by {model}[/]")
     assumptions = payload.get("assumptions") or []
     if assumptions:
         c.print("[dim]assumed on your behalf:[/]")
@@ -505,6 +510,11 @@ def _money(ledger: Any) -> str:
         # was to reproduce the whole thing. A cache hit is a fact about the
         # run, not an absence.
         line += f" + {ledger.calls_cached} from cache"
+    if ledger.calls_attempted:
+        # The chain positions walked past before one answered. Silent before,
+        # and it mattered: brief quality tracked WHICH model answered, and
+        # nothing said that three had already failed.
+        line += f" after {ledger.calls_attempted} that returned nothing usable"
     if ledger.calls_unpriced:
         line += (
             f" -- {ledger.calls_unpriced} unpriced, so the total is a LOWER BOUND."
@@ -1280,6 +1290,7 @@ def _save_brief(
         decision="reject" if rejected else "approve",
         source_root=str(values.get("source_root") or ""),
         cost=_money(ledger) if ledger is not None else "not recorded",
+        model=str(values.get("enhancer_model") or ""),
         relevant_paths=list(values.get("relevant_paths") or []),
         invented_paths=list(values.get("invented_paths") or []),
         assumptions=list(values.get("enhancer_assumptions") or []),

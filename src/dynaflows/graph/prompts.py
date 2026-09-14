@@ -6,9 +6,10 @@ decision, and splitting them is how they drift.
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 ENHANCER_SYSTEM = """\
 You rewrite a developer's request into a precise, self-contained brief. You do \
@@ -32,18 +33,17 @@ than silently choosing.
 - If the request is already precise, return it close to unchanged and say so.
 - No preamble, no meta-commentary about the rewrite itself.
 
-Write the brief as an INSTRUCTION addressed to whoever will do the work. \
-Start with a verb. Never describe the user in the third person: "The user \
-wants to understand how X works" is a description of a request, not a \
-request, and whoever receives it has to translate it back before starting.
+The brief is written in the IMPERATIVE MOOD, as a task someone is handed.
 
-End the brief with this requirement, in your own words: every factual claim \
-about the code must be verified by running it -- reading it is not verifying \
-it -- and the answer must state the interpreter version and whether the \
-working tree was clean when it was checked. A confident claim that a file \
-does not parse, delivered with a line number and a verbatim quote, is \
-indistinguishable from a real finding until someone re-runs it; this \
-requirement is what makes it distinguishable.
+- "Explain how X works and whether it scales to N documents." -- correct.
+- "The user wants to understand how X works." -- WRONG. That describes a \
+request instead of making one, and the reader has to translate it back.
+- "I'll examine X. Let me start by reading Y." -- WRONG, and worse. You are \
+not the one doing this work. Announcing what you would do produces no brief \
+at all.
+
+Never write "I", "I'll", "I need to", "Let me", or "we". There is no first \
+person in a brief.
 
 An assumption is something you CHOSE that the request did not say. Restating \
 the request is not an assumption. If you assumed nothing, return an empty \
@@ -54,11 +54,82 @@ Repository (path | size | what it is):
 """
 
 
+# Appended to every brief by `compose_brief`, never generated.
+#
+# This was a paragraph in ENHANCER_SYSTEM telling the model to write the
+# requirement "in your own words", and it was ignored by both models that saw
+# it -- neither brief contained a trace of it. That is the predictable outcome:
+# it is the SAME SENTENCE every time, so asking a model to reproduce it pays
+# tokens for a constant and then depends on a weak model's instruction
+# following for whether a standing policy appears at all.
+#
+# The rule this is an instance of: if you can enforce it, do not ask for it.
+# `relevant_paths` is trimmed in code for exactly this reason; putting the
+# executor's policy in the generated half was the same mistake in the other
+# direction, in the same commit.
+STANDING_REQUIREMENTS = """\
+Verify every factual claim about the code by RUNNING it -- reading it is not \
+verifying it. State the interpreter version you verified against and whether \
+the working tree was clean. A confident claim that a file does not parse, \
+delivered with a line number and a verbatim quote, is indistinguishable from \
+a real finding until somebody re-runs it."""
+
+
+def compose_brief(enhanced: str) -> str:
+    """The brief as it is handed over: the sharpened request, then the policy.
+
+    Two halves with different authors. The first is what the model was asked
+    for -- this request, made precisely. The second is constant, and a
+    constant belongs in the program.
+    """
+    return f"{enhanced.strip()}\n\n{STANDING_REQUIREMENTS}"
+
+
+# How a model announces it is about to do the work instead of writing the
+# brief. A fixed shape, so it is detected rather than asked against: two live
+# runs produced "I'll examine the playbook search implementation... Let me
+# start by looking at" and "I need to read the playbook indexing files... Let
+# me start by reading the key files". Both are role-play, neither is a brief,
+# and both passed every structural check there was.
+_NARRATION = re.compile(
+    r"^\s*(?:i['’]?(?:ll|m|\s+will|\s+need|\s+should|\s+am|\s+can)"
+    r"|let(?:'|’)?s?\s+(?:me|us)?|we(?:['’]ll|\s+will|\s+need|\s+should)"
+    r"|first,?\s+i|to\s+answer\s+this,?\s+i)\b",
+    re.IGNORECASE,
+)
+
+
 class EnhancedPrompt(BaseModel):
     """What the enhancer returns. The human approves this, so it has to be
     readable at a glance, not a wall of text."""
 
     enhanced: str = Field(description="The rewritten brief. Self-contained.")
+
+    @field_validator("enhanced")
+    @classmethod
+    def _must_be_a_brief_not_a_plan_to_write_one(cls, value: str) -> str:
+        """Reject agent narration at the contract, not in a review.
+
+        The prompt already forbids the first person. It was ignored by both
+        models that saw it, which is the ordinary outcome for a weak model and
+        a long instruction -- and a rule that only exists in a prompt is a
+        request. This one is enforceable by inspection, so it is enforced:
+        `SCHEMA_INVALID` here buys a repair call that names the actual problem,
+        and a model that narrates twice loses its turn to the next in the
+        chain.
+
+        Same rule as trimming `relevant_paths` in code rather than asking
+        nicely. If you can enforce it, do not ask for it.
+        """
+        if _NARRATION.match(value):
+            opening = " ".join(value.split()[:8])
+            raise ValueError(
+                "a brief is a task, not an announcement that you are about to do it. "
+                f"This began {opening!r}. Rewrite it in the imperative mood, addressed "
+                "to the person who will do the work, with no first person."
+            )
+        return value
+
     relevant_paths: list[str] = Field(
         default_factory=list,
         description="Files from the catalogue this request concerns. Copy paths exactly.",

@@ -71,6 +71,7 @@ from dynaflows.graph.prompts import (
     PlanDraft,
     SynthesisDraft,
     WorkerReport,
+    compose_brief,
 )
 from dynaflows.playbook.pack import pack_sections
 from dynaflows.store.catalogue import build_catalogue, is_test_path, unknown_paths
@@ -138,7 +139,13 @@ async def enhance_prompt(
     invented = unknown_paths(list(payload.relevant_paths), catalogue)
     grounded = _useful_paths([p for p in payload.relevant_paths if p not in invented])
     return {
-        "enhanced_prompt": payload.enhanced,
+        # The brief handed over is two halves with two authors: the sharpened
+        # request, which the model wrote, and the standing requirements, which
+        # are constant and therefore belong in the program. Asking a model to
+        # reproduce a constant paid tokens for it and then got neither -- both
+        # live runs dropped it entirely.
+        "enhanced_prompt": compose_brief(payload.enhanced),
+        "enhancer_model": result.model_id,
         "relevant_paths": grounded,
         "invented_paths": invented,
         "enhancer_assumptions": list(payload.assumptions),
@@ -174,6 +181,7 @@ async def approve_prompt(
             "assumptions": list(state.get("enhancer_assumptions") or []),
             "relevant_paths": list(state.get("relevant_paths") or []),
             "invented_paths": list(state.get("invented_paths") or []),
+            "model": state.get("enhancer_model", ""),
         }
     )
     outcome = _gate_outcome(answer)

@@ -24,6 +24,7 @@ from dynaflows.contracts.state import (
 )
 from dynaflows.graph import build_graph, open_checkpointer
 from dynaflows.graph.builder import dispatch_workers
+from dynaflows.graph.prompts import compose_brief
 from tests.conftest import FakeGateway, draft_with, graph_config, make_workspace
 
 pytestmark = [pytest.mark.deterministic, pytest.mark.anyio]
@@ -68,7 +69,7 @@ async def test_the_skeleton_runs_end_to_end(tmp_path: Path) -> None:
     async with open_checkpointer(tmp_path / "state.db") as saver:
         graph = build_graph(saver)
         final = await graph.ainvoke(initial_state("r1", "th-1", "audit auth"), config())
-    assert final["enhanced_prompt"] == "audit auth"
+    assert final["enhanced_prompt"] == compose_brief("audit auth")
     assert final["evaluation"] is not None
     assert final["prompt_gate"].proceeds
 
@@ -157,7 +158,7 @@ async def test_a_run_stops_at_a_breakpoint_and_keeps_its_state(tmp_path: Path) -
         await graph.ainvoke(initial_state("r1", "th-2", "audit auth"), config("th-2"))
         snapshot = await graph.aget_state(config("th-2"))
     assert snapshot.next == ("plan",)
-    assert snapshot.values["enhanced_prompt"] == "audit auth"
+    assert snapshot.values["enhanced_prompt"] == compose_brief("audit auth")
 
 
 async def test_resuming_by_thread_id_continues_rather_than_restarting(tmp_path: Path) -> None:
@@ -170,7 +171,7 @@ async def test_resuming_by_thread_id_continues_rather_than_restarting(tmp_path: 
     async with open_checkpointer(db) as saver:
         graph = build_graph(saver)
         final = await graph.ainvoke(None, config("th-3"))
-    assert final["enhanced_prompt"] == "audit auth"
+    assert final["enhanced_prompt"] == compose_brief("audit auth")
     assert final["evaluation"] is not None
 
 
@@ -196,7 +197,7 @@ async def test_state_survives_a_crash_mid_graph(tmp_path: Path) -> None:
     async with open_checkpointer(db) as saver:
         graph = build_graph(saver)
         snapshot = await graph.aget_state(config("th-4"))
-        assert snapshot.values["enhanced_prompt"] == "audit auth"
+        assert snapshot.values["enhanced_prompt"] == compose_brief("audit auth")
         final = await graph.ainvoke(None, config("th-4"))
     assert final["evaluation"] is not None
 
@@ -206,8 +207,8 @@ async def test_two_threads_do_not_share_state(tmp_path: Path) -> None:
         graph = build_graph(saver)
         a = await graph.ainvoke(initial_state("r1", "A", "first"), config("A"))
         b = await graph.ainvoke(initial_state("r2", "B", "second"), config("B"))
-    assert a["enhanced_prompt"] == "first"
-    assert b["enhanced_prompt"] == "second"
+    assert a["enhanced_prompt"] == compose_brief("first")
+    assert b["enhanced_prompt"] == compose_brief("second")
 
 
 async def test_the_checkpoint_database_uses_wal(tmp_path: Path) -> None:
@@ -267,7 +268,7 @@ async def test_a_later_node_does_not_erase_an_earlier_one_s_state(tmp_path: Path
         state = initial_state("r1", "th-stub", "audit the auth layer")
         final = await graph.ainvoke(state, config("th-stub"))
     # Set by enhance_prompt, six supersteps before the end.
-    assert final["enhanced_prompt"] == "audit the auth layer"
+    assert final["enhanced_prompt"] == compose_brief("audit the auth layer")
     assert final["prompt_gate"] is not None
     # Set by plan, and still intact after evaluate and synthesize ran.
     assert final["plan"] is not None

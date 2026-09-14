@@ -116,7 +116,17 @@ class CostLedger:
     usd_avoided: float = 0.0
     tokens_in: int = 0
     tokens_out: int = 0
+    # Calls that SUCCEEDED. A model earlier in the chain that failed never
+    # reaches `record`, so this alone read as "one call" for a request that
+    # made four -- four real HTTP requests, four lots of latency, four bites
+    # of a rate limit, and on a paid tier four charges.
     calls_made: int = 0
+    # Provider requests that returned nothing usable: the chain positions
+    # walked past before one answered. Its own counter rather than folded into
+    # calls_made, because "it took four tries" and "it cost four calls" are
+    # different facts and only the pair says which model actually answered
+    # (AP-20).
+    calls_attempted: int = 0
     calls_cached: int = 0
     # AP-20 again: a call that failed and a call that was never attempted are
     # different facts and do not share a counter.

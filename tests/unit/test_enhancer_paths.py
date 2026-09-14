@@ -8,9 +8,15 @@ paths, three of them test modules and one of them `docs/PROJECT_MEMORY.md`.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from dynaflows.graph.nodes import _MAX_RELEVANT_PATHS, _useful_paths
-from dynaflows.graph.prompts import ENHANCER_SYSTEM
+from dynaflows.graph.prompts import (
+    ENHANCER_SYSTEM,
+    STANDING_REQUIREMENTS,
+    EnhancedPrompt,
+    compose_brief,
+)
 from dynaflows.store import is_test_path
 
 pytestmark = pytest.mark.deterministic
@@ -69,18 +75,69 @@ def test_ordinary_paths_are_not_mistaken_for_tests(path: str) -> None:
     assert not is_test_path(path)
 
 
-def test_the_prompt_forbids_third_person_narration() -> None:
-    """The p2 brief opened "The user wants to understand how the playbook
-    search works" -- a description of a request, which whoever receives it has
-    to translate back into a request before starting."""
-    assert "third person" in ENHANCER_SYSTEM
-    assert "Start with a verb." in ENHANCER_SYSTEM
+@pytest.mark.parametrize(
+    "narration",
+    [
+        "I'll examine the playbook search implementation to understand how it works.",
+        "I need to read the playbook indexing files to understand what would change.",
+        "Let me start by reading the key files.",
+        "We'll trace the Markdown assumptions through the pipeline.",
+        "First, I will look at the repository module.",
+    ],
+)
+def test_agent_narration_is_rejected_at_the_contract(narration: str) -> None:
+    """Both retest briefs came back as role-play -- the model announcing what
+    it was about to do instead of writing a brief. The prompt already forbade
+    the first person and both models ignored it, which is the ordinary outcome
+    for a weak model and a long instruction.
+
+    A rule that lives only in a prompt is a request. This one is checkable by
+    inspection, so it is checked: the schema rejects it, which buys a repair
+    call naming the actual problem and then the next model in the chain.
+    """
+    with pytest.raises(ValidationError):
+        EnhancedPrompt(enhanced=narration)
 
 
-def test_the_prompt_demands_executed_verification() -> None:
-    """The finding that decided the A/B test: what separated a good answer
-    from a bad one was whether the thread RAN the code. One answer claimed a
-    file did not parse, with a line number and a verbatim quote, and it parsed
-    fine -- on the interpreter the project actually uses."""
-    assert "interpreter version" in ENHANCER_SYSTEM
-    assert "reading it is not verifying it" in ENHANCER_SYSTEM
+@pytest.mark.parametrize(
+    "brief",
+    [
+        "Explain how the playbook search works and whether it scales to a few thousand documents.",
+        "Identify what would have to change to index something other than Markdown.",
+        "Investigate the login bug and name the failing path.",
+        "Trace the retrieval pipeline from chunker to repository.",
+    ],
+)
+def test_a_real_brief_is_accepted(brief: str) -> None:
+    """The other half, and the more important one. A check that fires on
+    ordinary work is a check people disable (playbook 5.2, Pattern 5), and
+    "Investigate..." begins with a verb that a sloppier pattern would catch."""
+    assert EnhancedPrompt(enhanced=brief).enhanced == brief
+
+
+def test_the_standing_requirements_are_appended_not_generated() -> None:
+    """The drift this fixes.
+
+    The verification requirement was a paragraph in ENHANCER_SYSTEM telling
+    the model to write it "in your own words". It is the SAME SENTENCE every
+    time, so that paid tokens for a constant and then depended on a weak
+    model's instruction-following for whether a standing policy appeared at
+    all -- and in both live runs it appeared nowhere.
+
+    The enhancer's job is to sharpen THIS request. Executor policy is a
+    constant and belongs in the program.
+    """
+    assert "interpreter version" not in ENHANCER_SYSTEM
+    assert "interpreter version" in STANDING_REQUIREMENTS
+
+    composed = compose_brief("Explain how retrieval works.")
+
+    assert composed.startswith("Explain how retrieval works.")
+    assert STANDING_REQUIREMENTS in composed
+
+
+def test_the_prompt_forbids_the_first_person_mechanically() -> None:
+    """Belt and braces: the schema is the enforcement, but a model told
+    plainly gets it right more often, and the two must not disagree."""
+    assert "IMPERATIVE MOOD" in ENHANCER_SYSTEM
+    assert "There is no first person in a brief." in ENHANCER_SYSTEM

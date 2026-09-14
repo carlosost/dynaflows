@@ -30,7 +30,7 @@ from dynaflows.graph.planner import (
     plan_hash,
     violation_of,
 )
-from dynaflows.graph.prompts import PlanDraft, PlannedTask
+from dynaflows.graph.prompts import PlanDraft, PlannedTask, compose_brief
 from dynaflows.store.catalogue import build_catalogue
 from tests.conftest import FakeGateway, cfg_factory, draft_with
 
@@ -145,7 +145,9 @@ async def test_the_planner_is_shown_the_brief_the_human_approved(tmp_path: Path,
     async with open_checkpointer(tmp_path / "s.db") as saver:
         graph = build_graph(saver)
         await graph.ainvoke(initial_state("r", "p3", "raw"), cfg("p3", gateway))
-    assert next(r for r in gateway.requests if r.schema is PlanDraft).prompt == "APPROVED BRIEF"
+    assert next(r for r in gateway.requests if r.schema is PlanDraft).prompt == compose_brief(
+        "APPROVED BRIEF"
+    )
 
 
 async def test_an_oversized_plan_is_re_planned_not_trimmed(tmp_path: Path, cfg: Any) -> None:

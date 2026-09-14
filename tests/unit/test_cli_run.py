@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from dynaflows.cli import app
 from dynaflows.contracts.errors import DynaflowsError, ErrorCode
+from dynaflows.graph.prompts import compose_brief
 from tests.conftest import FakeGateway, make_playbook, make_workspace
 
 _DEFAULT_PLAN_TASKS = range(3)  # what conftest's default draft plans
@@ -355,7 +356,9 @@ def test_brief_prints_only_the_brief_on_stdout(isolated: FakeGateway) -> None:
     result = runner.invoke(app, ["brief", "fix the login bug", "--yes"])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout.strip() == "a precise brief"
+    # The sharpened request, then the standing requirements -- two halves with
+    # two authors, and both are the deliverable.
+    assert result.stdout.strip() == compose_brief("a precise brief")
 
 
 def test_brief_puts_the_gate_where_a_pipe_will_not_see_it(isolated: FakeGateway) -> None:

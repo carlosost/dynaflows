@@ -2217,6 +2217,59 @@ beat a hand-written prompt" was drawn from these figures. It holds for p3 and wa
 p1 and p2. **A wrong number does not stay in the cost report; it propagates into the conclusions
 drawn from the run**, and this one had already reached a written evaluation before it was caught.
 
+**The retest that measured the wrong variable, and the drift it exposed (2026-09-14).**
+
+The reworded enhancer produced two briefs that were not briefs:
+
+> "I'll examine the playbook search implementation… Let me start by looking at…"
+> "I need to read the playbook indexing files… Let me start by reading the key files."
+
+Agent role-play. Worse than either brief the previous wording produced, and Carlos spotted it from
+the output alone before any of this was diagnosed.
+
+**The prompt was not the variable.** Every brief, against the model that wrote it:
+
+| brief | model | chain index | usable |
+|---|---|---|---|
+| p3 | `nex-agi/nex-n2.5-pro:free` | 1 | yes |
+| p2 | `dots-studio/dots-3-note-preview:free` | 2 | no |
+| p3b | `dots-studio/dots-3-note-preview:free` | 2 | no |
+| p2b | `liquid/lfm-2.5-2.6b:free` | 3 | no |
+
+**Every usable brief came from one model; every unusable one from a different one.** Two rounds of
+prompt engineering were graded while the author changed underneath them, and nothing anywhere
+recorded which model had answered. `enhancer_model` is in state now and on the gate, where the human
+is deciding.
+
+**Sixth wrong number: `calls_made` counted only the call that worked.** A failed chain position hit
+`continue` without touching the ledger, so a request that made four provider calls reported
+`1 call(s)`. Four real requests, four lots of latency, four bites of a rate limit, and on a paid tier
+four charges. `calls_attempted` counts them; the cost line says "after N that returned nothing
+usable". Same family as the other five, and the third one in this project whose entire symptom was a
+number that looked like good news.
+
+**The drift, which is the part worth keeping.** The reworded prompt told the model to *"end the brief
+with this requirement, in your own words: every factual claim must be verified by running it…"*. That
+is the same sentence every time. Making a model generate a constant pays tokens for it, lengthens an
+already 4,000-token system prompt on a weak model, and then depends on that model's
+instruction-following for whether a standing policy appears at all — **it appeared in neither run**.
+
+The enhancer's job is to sharpen *this* request. Executor policy is a constant and belongs in the
+program. `compose_brief()` appends it; `STANDING_REQUIREMENTS` holds it. The brief is now two halves
+with two authors, and only one of them is generated.
+
+The same commit had already applied the opposite rule correctly: `relevant_paths` is trimmed in code
+rather than asked for nicely, and **that half held perfectly** — 4 and 6 paths, no test modules, no
+`PROJECT_MEMORY.md`, across two different weak models, while everything prompt-only failed. One
+commit, the rule applied in one direction and violated in the other.
+
+**The rule, stated once: if you can enforce it, do not ask for it.** Agent narration is now a
+`field_validator` on `EnhancedPrompt` — a fixed shape, checkable by inspection, so it is checked.
+A narrated brief is `SCHEMA_INVALID`, which buys a repair call naming the actual fault, and a model
+that narrates twice loses its turn: **a schema failure that survives repair now falls through to the
+next model** rather than ending the run with the chain half unused. That change has evidence behind
+it and "ask the same model again" does not.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than

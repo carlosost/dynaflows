@@ -379,13 +379,34 @@ async def test_the_repair_call_runs_at_small_tier_not_the_original_tier(registry
     assert recorder.calls[1][1].tier is Tier.SMALL
 
 
-async def test_only_one_repair_is_attempted(registry) -> None:  # noqa: ANN001
-    recorder = Recorder(RawResponse(text="junk"), RawResponse(text="still junk"))
+async def test_only_one_repair_is_attempted_per_model(registry) -> None:
+    """One repair, then the NEXT MODEL -- not one repair and then the run.
+
+    A model that fails the contract, is told exactly how, and fails it again
+    has said something about itself. Ending the run there leaves the rest of
+    the chain unused, and the chain is the thing most likely to help:
+    measured on the enhancer, output quality tracked model identity almost
+    perfectly.
+
+    `mid` is three models, each getting one repair: six calls, then the
+    failure -- with the LAST model's error, not the first one's.
+    """
+    recorder = Recorder(*[RawResponse(text="junk")] * 6)
     gateway = client(registry, recorder)
+
     with pytest.raises(DynaflowsError) as excinfo:
         await gateway.call(REQUEST)
+
     assert excinfo.value.envelope.code is ErrorCode.SCHEMA_INVALID
-    assert len(recorder.calls) == 2
+    assert len(recorder.calls) == 6
+    assert [name for name, _ in recorder.calls] == [
+        "acme/one",
+        "acme/small",
+        "bolt/two",
+        "acme/small",
+        "cobalt/three",
+        "acme/small",
+    ], "each model gets one repair at small tier before the next model is tried"
 
 
 async def test_a_schema_failure_is_counted_separately_from_a_skip(registry) -> None:  # noqa: ANN001
@@ -484,3 +505,30 @@ async def test_insufficient_credit_is_tried_once_per_model_not_three_times(
     # One attempt per model in the three-model chain, not three each.
     assert len(recorder.calls) == 3
     assert recorder.models_tried == ["acme/one", "bolt/two", "cobalt/three"]
+
+
+async def test_a_failed_chain_position_is_counted(registry) -> None:  # noqa: ANN001
+    """Sixth wrong number.
+
+    `record` only runs for the call that succeeds, so a model failing earlier
+    in the chain never touched the ledger. A request that made four provider
+    calls reported "1 call(s)" -- and the one it reported was the only one
+    that had been useful, which is exactly the reading a human will not do.
+
+    Four real requests, four lots of latency, four bites of a rate limit, and
+    on a paid tier four charges.
+    """
+    from dynaflows.contracts.errors import DynaflowsError, ErrorCode
+
+    async def two_down_then_fine(model_id: str, request: object) -> RawResponse:
+        if model_id in {"acme/one", "bolt/two"}:
+            raise DynaflowsError.of(ErrorCode.MODEL_UNAVAILABLE, f"{model_id} is down")
+        return RawResponse(text='{"value":"ok"}')
+
+    gateway = client(registry, two_down_then_fine)
+
+    result = await gateway.call(REQUEST)
+
+    assert result.model_id == "cobalt/three"
+    assert gateway.ledger.calls_made == 1, "one call produced an answer"
+    assert gateway.ledger.calls_attempted == 2, "and two produced nothing"
