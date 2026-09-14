@@ -554,8 +554,8 @@ every ADR to route a task. That is a decision to make with data, not now.
 
 There is no Obsidian vault to index yet. The wikilink adjacency table and frontmatter-tag filtering
 are therefore **not built**: they would have no caller, which is the AP-11 shape this project has
-already been bitten by once. The chunker still *extracts* wikilinks — that is parsing, and it is
-free — but nothing persists or queries an adjacency structure.
+already been bitten by once. Nothing extracts, persists or queries wikilinks (see the 2026-09-13
+amendment below — this paragraph used to claim the chunker extracted them, and it never did).
 
 Scope is recorded inside this ADR rather than as a separate record, per §1.3: which corpus is indexed
 and how it is indexed would be read together every time, so they are one decision.
@@ -575,6 +575,63 @@ better.
   no vector store. Revisit when either the corpus exceeds **~2,000 chunks**, or trace data shows the
   **anchor-hit rate below 60%** of retrievals — meaning the planner cannot name what it needs and
   genuine semantic recall is the gap.
+
+**Amendment, 2026-09-13 — the false claim about wikilinks, and what it cost.**
+
+The paragraph above said *"The chunker still extracts wikilinks — that is parsing, and it is free."*
+**It does not, and never did.** There is no wikilink regex in `chunker.py`. The sentence was written
+alongside the decision not to persist an adjacency table and described an intention as a fact. It
+appears twice in this document, in this ADR and in §2.4.
+
+AP-19 exists in the playbook because a design document that quietly asserts more than it has is worse
+than one that names its holes — and this document violated it, in the paragraph that was being
+careful about AP-11. **The rule is not the hard part; noticing you have broken it is.** The claim was
+found by an external reader given nothing but this repository and a question about its retrieval
+stack, which is the argument for that kind of reading and not for more discipline.
+
+The wikilink extraction stays unbuilt. This amendment corrects the record rather than the code.
+
+**Amendment, 2026-09-13 — the index could return a document the corpus no longer contains.**
+
+ADR-009's case rests on determinism: the same plan retrieves the same bytes, and two runs that differ
+can be diffed. That property did not hold, for a reason nothing in this document anticipated.
+
+`replace_source` and `forget_sources` removed a chunk from the external-content FTS5 index with
+`VALUES ('delete', ?, '', '', '')`. FTS5 *subtracts* the values handed to `'delete'`; empty strings
+subtract nothing, so every posting outlived its chunk. The index grew monotonically and never
+shrank. With the current whole-corpus reindex the orphans point at rowids no chunk owns, so
+`search`'s JOIN drops them — the visible damage is a query returning fewer rows than it should, and
+a document-frequency count that makes bm25's IDF wrong for every affected term. Reindex a single
+file, which is the obvious fix for `index_corpus` computing `report.changed` and then rebuilding
+everything anyway, and SQLite reuses the freed rowids: the surviving postings then name whatever
+occupies them, and a search for a term the corpus no longer contains returns a confident hit on
+unrelated text. **The performance fix would have armed the correctness bug**, which is the ordering
+lesson here and is now pinned by a test.
+
+Three reasons nothing caught it, each worth more than the bug:
+- **`search()` has one production caller** (`cli.py`, behind a flag). Every runtime retrieval goes
+  through `by_anchor`. The layer this ADR argues for hardest is the layer that has never run in
+  anger, so its corruption had no path to a user.
+- **The obvious detector reports the wrong thing.** An anti-join against `chunks_fts` finds nothing:
+  querying an external-content FTS5 table reads its rowids from the *content* table, so it reports
+  what the chunks say rather than what the index holds. It passes on a corrupt index.
+- **`integrity-check` takes a rank argument and the default is the wrong one.** Rank 0 checks the
+  index against itself and passes on this fault. Rank 1 cross-checks against the content table.
+
+And rank 1 could not have passed regardless, because `json.dumps` escapes `§` to `§`:
+`chunks.anchors` held `§3.3` while the index was fed `§3.3`. External-content FTS5 is *defined*
+by those agreeing, so `'rebuild'` produced a different index than incremental indexing did — a second
+latent fault, invisible because both spellings happen to retrieve identically under this tokenizer.
+`ensure_ascii=False` closes it.
+
+`dynaflows index --check` now reports staleness and inconsistency as two faults with two remedies
+(AP-20), and `--rebuild` reconstructs the index for databases written before the fix, which cannot
+heal by reindexing.
+
+**This does not change the decision.** FTS5 remains the right layer; the fault was in this project's
+use of it, not in the choice. It does change one thing in the reversal condition below: *anchor-hit
+rate* is proposed as the trigger for revisiting embeddings, and nothing records anchor-hit rate — so
+the condition has never been evaluable. That gap is now listed in §7.
 
 ---
 
@@ -1455,7 +1512,8 @@ CREATE VIRTUAL TABLE chunks_fts USING fts5(
 **AP-11 note.** The `links` table and 1-hop wikilink expansion have **no caller in Phase 1** — the
 Obsidian vault is not a Phase 1 input, and OQ-05 is unresolved. Building the table now would produce
 a structure exercised only by its own test. It is deferred until the feature that reads it exists.
-The chunker still *extracts* wikilinks (that is parsing, and it is free); it just does not persist an
+The chunker does **not** extract wikilinks — an earlier version of this line said it did, which was
+false (ADR-009 amendment, 2026-09-13). It also does not persist an
 adjacency structure nothing queries.
 
 ### 2.5 Response cache (SQLite, `.dynaflows/calls.db`) — ADR-013
@@ -2077,6 +2135,19 @@ not a human saying yes.
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
 one that names its holes.
 
+- **ADR-009's reversal condition cannot be evaluated.** It fires on corpus size **or** an anchor-hit
+  rate below 60%, and nothing anywhere records anchor-hit rate. The size half is checkable; the half
+  that would actually detect "the planner cannot name what it needs" has never been measurable. This
+  is the second condition in this document found to be unevaluable by its own terms.
+- **`search()` has exactly one production caller** — `cli.py`, behind a flag. Every retrieval on the
+  runtime graph path goes through `by_anchor`. The BM25 layer ADR-009 argues for hardest has never
+  run in a real graph execution, which is how it carried a corrupt index undetected. Until the graph
+  calls it, its behaviour under load, its ranking quality and its failure modes are all unmeasured.
+- **`catalog()` is O(corpus) and is paid on every planner call.** Measured on this repository:
+  4,840 tokens for 99 chunks, 48.9 tokens per chunk. Against `CATALOGUE_BUDGET_TOKENS = 6_000` that
+  is **10.2 documents at 12 chunks each, or 2.5 at this repository's own rate**. The catalogue is
+  bounded by the corpus and the corpus is not bounded. No decision is recorded for what happens past
+  that point.
 - Every numeric threshold in this document (`EVAL_MAX_FAILURE_RATE`, `HITL_PLAN_THRESHOLD_USD`,
   `MAX_FANOUT`, retry counts, context budgets) is a **placeholder**, not a measurement (§4.5).
 - ADR-006's tier assignments are reasoning, not benchmark results. OQ-01 is the measurement.
