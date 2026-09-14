@@ -49,7 +49,7 @@ from dynaflows.graph import grounding as grounding_check
 from dynaflows.graph import planner as planning
 from dynaflows.graph import synthesis as synth
 from dynaflows.graph.budgets import worker_context_budget
-from dynaflows.graph.capabilities import render_catalogue
+from dynaflows.graph.capabilities import render_capabilities
 from dynaflows.graph.deps import (
     auto_approved,
     gateway_from,
@@ -74,7 +74,7 @@ from dynaflows.graph.prompts import (
     compose_brief,
 )
 from dynaflows.playbook.pack import pack_sections
-from dynaflows.store.catalogue import build_catalogue, is_test_path, unknown_paths
+from dynaflows.store.source_map import build_source_map, is_test_path, unknown_paths
 from dynaflows.store.sources import SourceRefusal, read_sources
 
 _MAX_RELEVANT_PATHS = 6
@@ -117,7 +117,7 @@ async def enhance_prompt(
     # login bug" was sharpened into generic precision instead of naming where
     # login lives in this repository -- which is the one thing a rewrite can
     # add that the developer could not have typed faster themselves.
-    catalogue = build_catalogue(Path(source_root_from(config)))
+    catalogue = build_source_map(Path(source_root_from(config)))
     result = await gateway.call(
         CallRequest(
             tier=Tier.SMALL,
@@ -146,6 +146,7 @@ async def enhance_prompt(
         # live runs dropped it entirely.
         "enhanced_prompt": compose_brief(payload.enhanced),
         "enhancer_model": result.model_id,
+        "enhancer_intent": payload.intent,
         "relevant_paths": grounded,
         "invented_paths": invented,
         "enhancer_assumptions": list(payload.assumptions),
@@ -182,6 +183,7 @@ async def approve_prompt(
             "relevant_paths": list(state.get("relevant_paths") or []),
             "invented_paths": list(state.get("invented_paths") or []),
             "model": state.get("enhancer_model", ""),
+            "intent": state.get("enhancer_intent", ""),
         }
     )
     outcome = _gate_outcome(answer)
@@ -227,15 +229,21 @@ async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> di
     # ADR-018: the planner has to see the code it is planning against. Before
     # this it saw the playbook and nothing else, so `inputs` was guesswork --
     # right by luck on one run, abandoned entirely on the next.
-    catalogue = build_catalogue(Path(source_root_from(config)))
+    catalogue = build_source_map(Path(source_root_from(config)))
     system = PLANNER_SYSTEM.format(
         max_fanout=MAX_FANOUT,
-        capabilities=render_catalogue(),
-        catalogue=repository.catalog(),
+        capabilities=render_capabilities(),
+        section_map=repository.section_map(),
         sources=catalogue.render(),
     )
 
+    # ADR-024 divided the WORKERS by whether a claim reports a defect or
+    # describes the code. The planner picks that capability, and until now it
+    # inferred the user's intent from the brief's wording. Stating it is
+    # cheaper and far more reliable than hoping the wording carries it.
+    intent = state.get("enhancer_intent") or "question"
     brief = state.get("enhanced_prompt") or state.get("raw_prompt", "")
+    brief = f"THE USER ASKED A {intent.upper()}.\n\n{brief}"
     ledger = cost_delta()
     correction = ""
 

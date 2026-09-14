@@ -29,7 +29,7 @@ from dynaflows.store.sources import MAX_FILE_BYTES, is_listable
 # planner's whole system prompt was 6,309 tokens against a 32,000-token floor,
 # so this is affordable; a repository large enough to truncate at 6,000 is the
 # one that needs source SEARCH rather than a longer list.
-CATALOGUE_BUDGET_TOKENS = 6_000
+SOURCE_MAP_BUDGET_TOKENS = 6_000
 
 _SUMMARY_CHARS = 90
 
@@ -40,7 +40,7 @@ _MAX_SYMBOLS = 14
 
 
 @dataclass(frozen=True, slots=True)
-class SourceCatalogue:
+class SourceMap:
     """The map, and honestly how much of the territory it covers."""
 
     text: str
@@ -145,7 +145,7 @@ def _summary(path: Path) -> str:
     return line
 
 
-def build_catalogue(root: Path, *, budget_tokens: int = CATALOGUE_BUDGET_TOKENS) -> SourceCatalogue:
+def build_source_map(root: Path, *, budget_tokens: int = SOURCE_MAP_BUDGET_TOKENS) -> SourceMap:
     """Every listable file under `root`, until the budget runs out.
 
     Never raises: it runs inside the planner node, and an unreadable directory
@@ -154,7 +154,7 @@ def build_catalogue(root: Path, *, budget_tokens: int = CATALOGUE_BUDGET_TOKENS)
     try:
         candidates = sorted(p for p in root.rglob("*") if p.is_file() and is_listable(p, root))
     except OSError:
-        return SourceCatalogue("(the project root could not be read)", frozenset(), 0, 0)
+        return SourceMap("(the project root could not be read)", frozenset(), 0, 0)
 
     lines: list[str] = []
     paths: list[str] = []
@@ -185,7 +185,7 @@ def build_catalogue(root: Path, *, budget_tokens: int = CATALOGUE_BUDGET_TOKENS)
         used += cost
         lines.append(line)
 
-    return SourceCatalogue(
+    return SourceMap(
         text="\n".join(lines),
         paths=frozenset(paths),
         listed=len(lines),
@@ -193,7 +193,7 @@ def build_catalogue(root: Path, *, budget_tokens: int = CATALOGUE_BUDGET_TOKENS)
     )
 
 
-def unknown_paths(requested: list[str], catalogue: SourceCatalogue) -> list[str]:
+def unknown_paths(requested: list[str], catalogue: SourceMap) -> list[str]:
     """Which of these the planner invented. ADR-018's second half.
 
     A directory is accepted when the catalogue lists anything beneath it: the

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from dynaflows.store.catalogue import build_catalogue, unknown_paths
+from dynaflows.store.source_map import build_source_map, unknown_paths
 from dynaflows.store.sources import read_sources
 
 pytestmark = pytest.mark.deterministic
@@ -32,7 +32,7 @@ def repo(tmp_path: Path) -> Path:
 def test_a_file_is_listed_with_what_it_is(repo: Path) -> None:
     """A path alone says a file exists. The docstring says which file to send a
     worker to, which is the whole point of showing the planner anything."""
-    text = build_catalogue(repo).render()
+    text = build_source_map(repo).render()
 
     assert "src/auth.py" in text
     assert "Login and session handling." in text
@@ -48,7 +48,7 @@ def test_cache_directories_do_not_fill_the_catalogue(repo: Path) -> None:
         directory.mkdir(parents=True)
         (directory / "junk.json").write_text("{}", encoding="utf-8")
 
-    catalogue = build_catalogue(repo)
+    catalogue = build_source_map(repo)
 
     assert not any("cache" in path for path in catalogue.paths)
     assert not any("node_modules" in path for path in catalogue.paths)
@@ -60,14 +60,14 @@ def test_ci_configuration_survives_the_dot_directory_rule(repo: Path) -> None:
     (repo / ".github" / "workflows").mkdir(parents=True)
     (repo / ".github" / "workflows" / "ci.yml").write_text("on: push\n", encoding="utf-8")
 
-    assert ".github/workflows/ci.yml" in build_catalogue(repo).paths
+    assert ".github/workflows/ci.yml" in build_source_map(repo).paths
 
 
 def test_a_credential_file_is_never_advertised(repo: Path) -> None:
     """The catalogue must not name a file the resolver would refuse: the
     planner would name it, and the refusal would arrive at dispatch with
     nothing explaining it."""
-    assert ".env" not in build_catalogue(repo).paths
+    assert ".env" not in build_source_map(repo).paths
 
 
 def test_the_catalogue_and_the_resolver_agree(repo: Path) -> None:
@@ -76,7 +76,7 @@ def test_the_catalogue_and_the_resolver_agree(repo: Path) -> None:
     (repo / ".pytest_cache").mkdir()
     (repo / ".pytest_cache" / "j.json").write_text("{}", encoding="utf-8")
 
-    catalogue = build_catalogue(repo)
+    catalogue = build_source_map(repo)
     chunks, _ = read_sources(["."], repo)
 
     assert {c.source_path for c in chunks} == set(catalogue.paths)
@@ -89,7 +89,7 @@ def test_truncation_is_stated_rather_than_implied(repo: Path) -> None:
     for i in range(60):
         (repo / "src" / f"m{i:03d}.py").write_text('"""A module."""\n', encoding="utf-8")
 
-    catalogue = build_catalogue(repo, budget_tokens=120)
+    catalogue = build_source_map(repo, budget_tokens=120)
 
     assert catalogue.truncated
     assert "TRUNCATED" in catalogue.render()
@@ -98,27 +98,27 @@ def test_truncation_is_stated_rather_than_implied(repo: Path) -> None:
 
 def test_a_complete_catalogue_says_nothing_about_truncation(repo: Path) -> None:
     """The warning must not fire on the ordinary path or it becomes noise."""
-    catalogue = build_catalogue(repo)
+    catalogue = build_source_map(repo)
 
     assert not catalogue.truncated
     assert "TRUNCATED" not in catalogue.render()
 
 
 def test_an_empty_tree_says_so_instead_of_rendering_nothing(tmp_path: Path) -> None:
-    assert "no source files" in build_catalogue(tmp_path).render()
+    assert "no source files" in build_source_map(tmp_path).render()
 
 
 # --- the half that makes a bad plan impossible to run silently ------------
 
 
 def test_an_exact_path_is_known(repo: Path) -> None:
-    assert unknown_paths(["src/auth.py"], build_catalogue(repo)) == []
+    assert unknown_paths(["src/auth.py"], build_source_map(repo)) == []
 
 
 def test_a_directory_is_known_when_anything_lives_under_it(repo: Path) -> None:
     """The catalogue lists files; `src` is a legitimate input even though no
     line says exactly that."""
-    catalogue = build_catalogue(repo)
+    catalogue = build_source_map(repo)
 
     assert unknown_paths(["src"], catalogue) == []
     assert unknown_paths(["src/"], catalogue) == []
@@ -129,11 +129,11 @@ def test_an_invented_path_is_reported(repo: Path) -> None:
     and gateway/metrics.py, none of which existed."""
     invented = ["src/logger.py", "src/middleware.py"]
 
-    assert unknown_paths([*invented, "src/auth.py"], build_catalogue(repo)) == invented
+    assert unknown_paths([*invented, "src/auth.py"], build_source_map(repo)) == invented
 
 
 def test_an_empty_string_is_not_a_path(repo: Path) -> None:
-    assert unknown_paths(["", "   "], build_catalogue(repo)) == ["", "   "]
+    assert unknown_paths(["", "   "], build_source_map(repo)) == ["", "   "]
 
 
 # --- a docstring says what a file is FOR, not what is IN it --------------
@@ -149,7 +149,7 @@ def test_a_module_lists_what_it_defines(repo: Path) -> None:
         encoding="utf-8",
     )
 
-    line = next(ln for ln in build_catalogue(repo).text.splitlines() if "cli.py" in ln)
+    line = next(ln for ln in build_source_map(repo).text.splitlines() if "cli.py" in ln)
 
     assert "Terminal entry point." in line
     assert "defines:" in line
@@ -162,7 +162,7 @@ def test_public_names_come_before_private_ones(repo: Path) -> None:
         "def _helper(): ...\n\ndef public(): ...\n", encoding="utf-8"
     )
 
-    line = next(ln for ln in build_catalogue(repo).text.splitlines() if "m.py" in ln)
+    line = next(ln for ln in build_source_map(repo).text.splitlines() if "m.py" in ln)
 
     assert line.index("public") < line.index("_helper")
 
@@ -177,7 +177,7 @@ def test_a_test_module_lists_no_symbols(repo: Path) -> None:
         encoding="utf-8",
     )
 
-    line = next(ln for ln in build_catalogue(repo).text.splitlines() if "test_auth" in ln)
+    line = next(ln for ln in build_source_map(repo).text.splitlines() if "test_auth" in ln)
 
     assert "Login behaviour." in line
     assert "defines:" not in line
@@ -186,7 +186,7 @@ def test_a_test_module_lists_no_symbols(repo: Path) -> None:
 def test_a_file_with_no_docstring_still_lists_its_symbols(repo: Path) -> None:
     (repo / "src" / "bare.py").write_text("def handler(): ...\n", encoding="utf-8")
 
-    line = next(ln for ln in build_catalogue(repo).text.splitlines() if "bare.py" in ln)
+    line = next(ln for ln in build_source_map(repo).text.splitlines() if "bare.py" in ln)
 
     assert "defines: handler" in line
 
@@ -204,7 +204,7 @@ def test_a_file_truncated_out_of_the_listing_is_still_a_known_path(repo: Path) -
             encoding="utf-8",
         )
 
-    catalogue = build_catalogue(repo, budget_tokens=200)
+    catalogue = build_source_map(repo, budget_tokens=200)
 
     assert catalogue.truncated
     assert catalogue.listed < catalogue.total

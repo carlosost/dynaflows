@@ -287,6 +287,12 @@ class WorkflowState(TypedDict, total=False):
     # anywhere said which had answered. A whole comparison of prompt wordings
     # was run with the author changing underneath it, unlogged.
     enhancer_model: str
+    # Whether the user asked to be TOLD something or asked for the codebase to
+    # be different. The worker has had this distinction since ADR-024
+    # (`answer` vs `analyse`); the enhancer did not, so it guessed -- and
+    # turned "what would I have to change here" into "Modify the pipeline so
+    # that...", a work order for a question.
+    enhancer_intent: str
     prompt_gate: GateOutcome | None
 
     plan: Plan | None
@@ -336,6 +342,7 @@ def initial_state(
         relevant_paths=[],
         invented_paths=[],
         enhancer_model="",
+        enhancer_intent="question",
         prompt_gate=None,
         plan=None,
         plan_hash=None,

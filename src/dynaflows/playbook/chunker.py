@@ -84,16 +84,33 @@ def chunk_markdown(text: str, source_path: str) -> list[Chunk]:
     lines = text.splitlines()
     headings = _headings(text)
     chunks: list[Chunk] = []
+    # Heading paths already used in THIS file. Two siblings with the same
+    # title produce the same path, the same id, and -- because `chunks.id` is
+    # a PRIMARY KEY and `replace_source` does a plain INSERT -- an
+    # `IntegrityError` that aborts the whole file's transaction. Reachable in
+    # ordinary Markdown today: two `### Trade-offs` under one parent, or two
+    # `### Consequences` under different ADRs in one document.
+    seen: dict[str, int] = {}
 
     def emit(heading_path: str, title: str, body_lines: list[str]) -> None:
         body = "\n".join(body_lines).strip()
         if not body:
             return  # a heading whose children carry all the text
+        # Disambiguate the PATH, not the id, so `id == hash(source, path)`
+        # stays true -- that invariant is documented and is what makes an id
+        # reproducible from a chunk. And disambiguate on collision rather than
+        # folding the ordinal into every hash: an ordinal shifts every later
+        # id when a section is inserted, and the id is the only stable handle
+        # across rebuilds. This way a duplicated heading renumbers and every
+        # unique one is untouched.
+        count = seen.get(heading_path, 0) + 1
+        seen[heading_path] = count
+        unique_path = heading_path if count == 1 else f"{heading_path}#{count}"
         chunks.append(
             Chunk(
-                id=chunk_id(source_path, heading_path),
+                id=chunk_id(source_path, unique_path),
                 source_path=source_path,
-                heading_path=heading_path,
+                heading_path=unique_path,
                 anchors=anchors_for(title),
                 body=body,
                 tokens=estimate_tokens(body),

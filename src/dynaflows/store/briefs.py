@@ -54,6 +54,7 @@ class BriefRecord:
     source_root: str
     cost: str
     model: str = ""
+    intent: str = ""
     relevant_paths: list[str] = field(default_factory=list)
     invented_paths: list[str] = field(default_factory=list)
     assumptions: list[str] = field(default_factory=list)
@@ -81,6 +82,7 @@ def record_markdown(record: BriefRecord) -> str:
         f"- **run** `{record.run_id}`",
         f"- **decision** {record.decision}",
         f"- **written by** `{record.model or 'not recorded'}`",
+        f"- **read as a** {record.intent or 'not recorded'}",
         f"- **about** `{record.source_root}`",
         f"- **cost** {record.cost}",
         "",

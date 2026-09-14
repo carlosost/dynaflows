@@ -31,7 +31,7 @@ from dynaflows.graph.planner import (
     violation_of,
 )
 from dynaflows.graph.prompts import PlanDraft, PlannedTask, compose_brief
-from dynaflows.store.catalogue import build_catalogue
+from dynaflows.store.source_map import build_source_map
 from tests.conftest import FakeGateway, cfg_factory, draft_with
 
 pytestmark = [pytest.mark.deterministic, pytest.mark.anyio]
@@ -145,9 +145,13 @@ async def test_the_planner_is_shown_the_brief_the_human_approved(tmp_path: Path,
     async with open_checkpointer(tmp_path / "s.db") as saver:
         graph = build_graph(saver)
         await graph.ainvoke(initial_state("r", "p3", "raw"), cfg("p3", gateway))
-    assert next(r for r in gateway.requests if r.schema is PlanDraft).prompt == compose_brief(
-        "APPROVED BRIEF"
-    )
+    prompt = next(r for r in gateway.requests if r.schema is PlanDraft).prompt
+    # The approved text, verbatim, with the intent line prepended -- the
+    # planner picks `answer` vs `analyse` from it and used to infer it from
+    # the wording, which is how "what would I have to change" became a work
+    # order (ADR-024's division, one node upstream).
+    assert prompt.endswith(compose_brief("APPROVED BRIEF"))
+    assert prompt.startswith("THE USER ASKED A QUESTION.")
 
 
 async def test_an_oversized_plan_is_re_planned_not_trimmed(tmp_path: Path, cfg: Any) -> None:
@@ -401,7 +405,7 @@ async def test_every_status_has_a_counter() -> None:
 def _catalogue_of(tmp_path: Path) -> Any:
     from tests.conftest import make_workspace
 
-    return build_catalogue(make_workspace(tmp_path))
+    return build_source_map(make_workspace(tmp_path))
 
 
 def test_a_task_naming_no_inputs_is_a_violation(tmp_path: Path) -> None:

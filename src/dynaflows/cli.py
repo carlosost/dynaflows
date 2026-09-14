@@ -272,6 +272,11 @@ def _render_gate(payload: dict[str, Any], out: Console | None = None) -> None:
     if invented:
         c.print(f"[yellow]  {len(invented)} path(s) it named do not exist and were dropped:[/]")
         c.print(Text("  " + ", ".join(invented)), markup=False)
+    intent = payload.get("intent")
+    if intent:
+        # Shown because it decides which capability the whole run uses, and a
+        # question silently read as work produces a diff nobody asked for.
+        c.print(f"[dim]read as a {intent}[/]")
     model = payload.get("model")
     if model:
         # At the gate, because it is the single best predictor of whether this
@@ -781,7 +786,7 @@ def diagnose(
     from dynaflows.contracts.state import MAX_FANOUT
     from dynaflows.gateway.invoker import langchain_response_format, raw_completion
     from dynaflows.gateway.probe import call_through_gateway
-    from dynaflows.graph.capabilities import render_catalogue
+    from dynaflows.graph.capabilities import render_capabilities
     from dynaflows.graph.prompts import (
         ENHANCER_SYSTEM,
         PLANNER_SYSTEM,
@@ -800,8 +805,8 @@ def diagnose(
         repository = get_playbook_repository()
         system = PLANNER_SYSTEM.format(
             max_fanout=MAX_FANOUT,
-            capabilities=render_catalogue(),
-            catalogue=repository.catalog(),
+            capabilities=render_capabilities(),
+            section_map=repository.section_map(),
         )
         schema = PlanDraft
         tier = Tier.FRONTIER
@@ -906,11 +911,11 @@ def sources(
     why. `dynaflows context` does this for the playbook; this is its other half.
     """
     from dynaflows.playbook.tokens import estimate_tokens
-    from dynaflows.store.catalogue import build_catalogue
+    from dynaflows.store.source_map import build_source_map
 
     settings = get_settings()
     target = root or settings.project_root
-    catalogue = build_catalogue(target)
+    catalogue = build_source_map(target)
 
     console.print(f"[dim]root[/] {target}")
     console.print(
@@ -1291,6 +1296,7 @@ def _save_brief(
         source_root=str(values.get("source_root") or ""),
         cost=_money(ledger) if ledger is not None else "not recorded",
         model=str(values.get("enhancer_model") or ""),
+        intent=str(values.get("enhancer_intent") or ""),
         relevant_paths=list(values.get("relevant_paths") or []),
         invented_paths=list(values.get("invented_paths") or []),
         assumptions=list(values.get("enhancer_assumptions") or []),

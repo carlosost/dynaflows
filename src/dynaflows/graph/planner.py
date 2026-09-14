@@ -15,9 +15,9 @@ from typing import Any
 from pydantic import ValidationError
 
 from dynaflows.contracts.state import MAX_FANOUT, Plan, PlanTask
-from dynaflows.graph.capabilities import CATALOGUE_VERSION
+from dynaflows.graph.capabilities import CAPABILITIES_VERSION
 from dynaflows.graph.prompts import PlanDraft
-from dynaflows.store.catalogue import SourceCatalogue, unknown_paths
+from dynaflows.store.source_map import SourceMap, unknown_paths
 from dynaflows.store.sources import read_sources
 
 # Per-task token estimate, used for the G2 summary. PLACEHOLDER (playbook 4.5):
@@ -60,21 +60,21 @@ def draft_to_plan(draft: PlanDraft) -> Plan:
     )
 
 
-def violation_of(draft: PlanDraft, catalogue: SourceCatalogue | None = None) -> str | None:
+def violation_of(draft: PlanDraft, source_map: SourceMap | None = None) -> str | None:
     """Why this draft cannot become a plan, phrased for the model to act on.
 
     Returned to the planner verbatim on the re-plan. A message like
     "ValidationError" teaches it nothing; naming the bound and the offending
     value gives it something to change.
 
-    `catalogue` is optional so the planning rules stay testable without a
+    `source_map` is optional so the planning rules stay testable without a
     filesystem, and its absence disables only the rules that need it -- a
     check that silently passes when its input is missing is worse than one
     that is not there (ADR-018).
     """
     if not draft.tasks:
         return "The plan had no tasks. Emit at least one."
-    if catalogue is not None and catalogue.total:
+    if source_map is not None and source_map.total:
         # ADR-018, the half that matters: the catalogue makes good plans
         # likely, this makes a bad one impossible to execute silently.
         for task in draft.tasks:
@@ -84,7 +84,7 @@ def violation_of(draft: PlanDraft, catalogue: SourceCatalogue | None = None) -> 
                     "one file or directory from the source catalogue -- a worker cannot "
                     "search, and a task with nothing to examine produces guesswork."
                 )
-            missing = unknown_paths(list(task.inputs), catalogue)
+            missing = unknown_paths(list(task.inputs), source_map)
             if missing:
                 return (
                     f"Task '{task.task_id}' named {', '.join(repr(m) for m in missing)}, "
@@ -112,7 +112,7 @@ def plan_hash(plan: Plan, models_version: str) -> str:
     (ADR-001, ADR-006).
     """
     material = {
-        "catalogue_version": CATALOGUE_VERSION,
+        "capabilities_version": CAPABILITIES_VERSION,
         "models_version": models_version,
         "tasks": [
             {

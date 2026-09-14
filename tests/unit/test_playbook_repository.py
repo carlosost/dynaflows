@@ -18,8 +18,8 @@ from dynaflows.playbook.chunker import chunk_markdown
 from dynaflows.playbook.repository import (
     InMemoryPlaybookRepository,
     SqlitePlaybookRepository,
-    catalog_line,
     index_corpus,
+    section_line,
 )
 
 pytestmark = pytest.mark.deterministic
@@ -155,26 +155,26 @@ def test_search_with_no_usable_terms_returns_nothing(repo) -> None:  # noqa: ANN
 
 
 def test_the_catalogue_lists_every_chunk_once(repo) -> None:  # noqa: ANN001
-    assert len(repo.catalog().splitlines()) == repo.count()
+    assert len(repo.section_map().splitlines()) == repo.count()
 
 
 def test_a_catalogue_row_prefers_formal_anchors_over_the_slug(repo) -> None:  # noqa: ANN001
     """Every byte is paid for on every planner call; a slug restates the
     heading printed two columns over."""
-    row = next(r for r in repo.catalog().splitlines() if r.startswith("AP-11"))
+    row = next(r for r in repo.section_map().splitlines() if r.startswith("AP-11"))
     assert "parallel-abstraction" not in row
 
 
 def test_a_catalogue_row_falls_back_to_the_slug_when_there_is_no_formal_anchor(
     repo,  # noqa: ANN001
 ) -> None:
-    assert any(r.startswith("overview |") for r in repo.catalog().splitlines())
+    assert any(r.startswith("overview |") for r in repo.section_map().splitlines())
 
 
 def test_catalogue_rows_are_trimmed_to_the_last_two_heading_levels(repo) -> None:  # noqa: ANN001
     chunk = repo.by_anchor(["AP-11"])[0]
     assert chunk.heading_path.count(" > ") >= 2
-    assert catalog_line(chunk).split(" | ")[1].count(" > ") == 1
+    assert section_line(chunk).split(" | ")[1].count(" > ") == 1
 
 
 # --- drift ---------------------------------------------------------------

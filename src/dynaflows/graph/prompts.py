@@ -49,6 +49,30 @@ An assumption is something you CHOSE that the request did not say. Restating \
 the request is not an assumption. If you assumed nothing, return an empty \
 list -- that is a better answer than three lines of paraphrase.
 
+Decide `intent`, and decide it from what the user wants BACK, not from what \
+the request is about.
+
+- "how does the playbook search work" -> question.
+- "would it scale to a few thousand documents" -> question.
+- "what would I have to change to index something other than Markdown" -> \
+QUESTION. Its subject is a change and it is still a question: the user asked \
+to be told, not to be given a diff. "Explain what would have to change..." is \
+the brief; "Modify the pipeline so that..." is a different request that \
+nobody made.
+- "add support for .txt" / "fix the login bug" -> work.
+
+The grammar is usually the tell: "what would I", "how does", "can I", "would \
+it" are interrogative. "Add", "fix", "make", "refactor" are imperative.
+
+**When the two readings are both defensible, choose question.** Answering a \
+question when work was wanted costs one more turn. Doing work when a question \
+was asked costs a diff nobody asked for, against code the user was still \
+deciding about.
+
+A question brief is still written in the imperative -- "Explain...", \
+"Identify...", "Trace..." -- because the brief instructs a reader. Imperative \
+MOOD is not a mandate to CHANGE anything.
+
 Repository (path | size | what it is):
 {sources}
 """
@@ -111,6 +135,15 @@ class EnhancedPrompt(BaseModel):
     readable at a glance, not a wall of text."""
 
     enhanced: str = Field(description="The rewritten brief. Self-contained.")
+    intent: Literal["question", "work"] = Field(
+        default="question",
+        description=(
+            "What the user wants back. 'question' if they asked to be told something, "
+            "even when the subject is a hypothetical change. 'work' only if they asked "
+            "for the codebase to be different afterwards. When both readings are "
+            "defensible, 'question'."
+        ),
+    )
 
     @field_validator("enhanced")
     @classmethod
@@ -238,6 +271,12 @@ class AnswerReport(BaseModel):
 PLANNER_SYSTEM = """\
 You decompose a brief into independent analysis tasks for parallel workers.
 
+The brief opens by stating whether the user asked a QUESTION or asked for \
+WORK. That line decides the capability: a question is answered by `answer` \
+tasks, work is examined by `analyse` tasks. Do not override it from the \
+wording -- "what would I have to change" is a question about a change, and \
+auditing the code for defects is not an answer to it.
+
 Hard rules:
 - Emit at most {max_fanout} tasks. Fewer is better than more: a task that \
 overlaps another wastes a worker and muddies the synthesis.
@@ -261,7 +300,7 @@ Registered capabilities:
 {capabilities}
 
 Playbook catalogue (anchor | section | summary):
-{catalogue}
+{section_map}
 
 Source catalogue (path | size | what it is):
 {sources}

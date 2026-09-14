@@ -28,7 +28,7 @@ _SUMMARY_RE = re.compile(r"\s+")
 class PlaybookRepository(Protocol):
     def by_anchor(self, anchors: list[str]) -> list[Chunk]: ...
     def search(self, query: str, k: int = 5) -> list[Chunk]: ...
-    def catalog(self) -> str: ...
+    def section_map(self) -> str: ...
     def drift(self) -> DriftReport: ...
     def count(self) -> int: ...
 
@@ -46,7 +46,7 @@ def _summary(chunk: Chunk, limit: int = 90) -> str:
     return first if len(first) <= limit else first[: limit - 1].rstrip() + "…"
 
 
-def catalog_line(chunk: Chunk) -> str:
+def section_line(chunk: Chunk) -> str:
     """One catalogue row: how to name this section, where it sits, what it says.
 
     Every byte here is paid for on EVERY planner call, so two economies are
@@ -106,7 +106,7 @@ class SqlitePlaybookRepository:
         ).fetchall()
         return [store.row_to_chunk(row) for row in rows]
 
-    def catalog(self) -> str:
+    def section_map(self) -> str:
         """The compact map the planner reads instead of the corpus.
 
         MEASURED 2026-09-13: **48.9 tokens per section**, 4,840 for 99 chunks
@@ -118,8 +118,8 @@ class SqlitePlaybookRepository:
         At twice the assumed size the argument still holds today, and the
         headroom is half what the ADR implies.
 
-        **This is not budgeted.** `CATALOGUE_BUDGET_TOKENS` governs
-        `store/catalogue.py`'s SOURCE FILE catalogue, a different object; an
+        **This is not budgeted.** `SOURCE_MAP_BUDGET_TOKENS` governs
+        `store/source_map.py`'s SOURCE FILE catalogue, a different object; an
         earlier version of this docstring divided one by the other and
         reported a ceiling of "about 10 documents", which was two unrelated
         numbers multiplied together. There is no ceiling. No truncation, no
@@ -135,7 +135,7 @@ class SqlitePlaybookRepository:
         rows = self._connection.execute(
             "SELECT * FROM chunks ORDER BY source_path, ordinal"
         ).fetchall()
-        return "\n".join(catalog_line(store.row_to_chunk(row)) for row in rows)
+        return "\n".join(section_line(store.row_to_chunk(row)) for row in rows)
 
     def drift(self) -> DriftReport:
         return store.drift(self._connection, self._root)
@@ -173,8 +173,8 @@ class InMemoryPlaybookRepository:
         ]
         return [c for score, _, c in sorted(scored, key=lambda s: (-s[0], s[1])) if score][:k]
 
-    def catalog(self) -> str:
-        return "\n".join(catalog_line(c) for c in self._chunks)
+    def section_map(self) -> str:
+        return "\n".join(section_line(c) for c in self._chunks)
 
     def drift(self) -> DriftReport:
         return DriftReport()

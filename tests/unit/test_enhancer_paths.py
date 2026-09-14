@@ -161,3 +161,37 @@ def test_the_standing_requirements_scope_what_execution_may_touch() -> None:
         "Every number states how it was obtained",
     ):
         assert clause in STANDING_REQUIREMENTS, clause
+
+
+@pytest.mark.parametrize(
+    ("request_text", "expected"),
+    [
+        ("how does the playbook search work", "question"),
+        ("what would I have to change to index something other than markdown", "question"),
+        ("add support for .txt files", "work"),
+    ],
+)
+def test_intent_is_carried_rather_than_inferred(request_text: str, expected: str) -> None:
+    """The contract exists; whether a model fills it well is measured live.
+
+    What this pins is that the field EXISTS and reaches the planner, because
+    the failure it fixes was the planner inferring intent from wording:
+    "what would I have to change here" came back as "Modify the pipeline so
+    that...", a work order for a question. ADR-024 gave the worker the
+    answer/analyse division and left the enhancer guessing.
+    """
+    assert EnhancedPrompt(enhanced=f"Explain {request_text}.", intent=expected).intent == expected
+
+
+def test_the_default_intent_is_question() -> None:
+    """Asymmetric costs. Answering a question when work was wanted costs one
+    turn. Doing work when a question was asked costs a diff nobody asked for,
+    against code the user was still deciding about."""
+    assert EnhancedPrompt(enhanced="Explain how retrieval works.").intent == "question"
+
+
+def test_the_planner_is_told_which_it_is() -> None:
+    from dynaflows.graph.prompts import PLANNER_SYSTEM
+
+    assert "QUESTION or asked for" in PLANNER_SYSTEM
+    assert "is a question about a change" in PLANNER_SYSTEM

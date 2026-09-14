@@ -137,3 +137,50 @@ def test_the_estimate_leans_high_on_purpose() -> None:
 
 def test_the_estimate_is_never_zero_for_non_empty_text() -> None:
     assert estimate_tokens("a") >= 1
+
+
+def test_two_sibling_headings_with_the_same_title_get_distinct_ids() -> None:
+    """A live `IntegrityError`, not a hypothetical about future formats.
+
+    `chunk_id` is `sha256(source_path + heading_path)` with no ordinal, and
+    `chunks.id` is a PRIMARY KEY written by a plain INSERT, so two siblings
+    titled the same aborted the whole file's transaction. Reachable in
+    ordinary Markdown: two `### Trade-offs` under one parent, or two
+    `### Consequences` under different ADRs in one document.
+    """
+    chunks = chunk_markdown(
+        "# Doc\n\n## Section\n\n### Trade-offs\n\nA\n\n### Trade-offs\n\nB\n", "d.md"
+    )
+
+    assert [c.heading_path for c in chunks] == [
+        "Doc > Section > Trade-offs",
+        "Doc > Section > Trade-offs#2",
+    ]
+    assert len({c.id for c in chunks}) == len(chunks)
+
+
+def test_a_duplicate_heading_does_not_shift_the_ids_around_it() -> None:
+    """Why the fix disambiguates on collision instead of hashing the ordinal.
+
+    An ordinal in every id renumbers every later chunk the moment a section is
+    inserted, and the id is the only handle that survives a rebuild. Here only
+    the duplicate is renamed; its neighbours are byte-identical to the
+    single-occurrence document.
+    """
+    one = {c.heading_path: c.id for c in chunk_markdown("# D\n\n## A\n\nx\n\n## B\n\ny\n", "d.md")}
+    two = {
+        c.heading_path: c.id
+        for c in chunk_markdown("# D\n\n## A\n\nx\n\n## B\n\ny\n\n## B\n\nz\n", "d.md")
+    }
+
+    assert two["D > A"] == one["D > A"]
+    assert two["D > B"] == one["D > B"]
+    assert "D > B#2" in two
+
+
+def test_the_id_is_still_reproducible_from_the_chunk() -> None:
+    """`id == chunk_id(source_path, heading_path)` is documented and is what
+    makes an id derivable rather than merely stored. The fix disambiguates the
+    PATH so that stays true, instead of quietly making the id a third thing."""
+    for chunk in chunk_markdown("# D\n\n## A\n\nx\n\n## A\n\ny\n", "d.md"):
+        assert chunk.id == chunk_id(chunk.source_path, chunk.heading_path)

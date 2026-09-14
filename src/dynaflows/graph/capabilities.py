@@ -34,7 +34,7 @@ class Capability:
     produces: str
 
 
-CATALOGUE: tuple[Capability, ...] = (
+CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         id="analyse",
         tier=Tier.MID,
@@ -68,11 +68,11 @@ CATALOGUE: tuple[Capability, ...] = (
 # a remediation, all three meaningless for a question -- and a model made to
 # fill them either invents them or says less, which this project has already
 # measured.
-CATALOGUE_VERSION = "2"
+CAPABILITIES_VERSION = "2"
 
-CAPABILITY_IDS = frozenset(c.id for c in CATALOGUE)
+CAPABILITY_IDS = frozenset(c.id for c in CAPABILITIES)
 
 
-def render_catalogue() -> str:
+def render_capabilities() -> str:
     """What the planner is shown. Compact: it is paid for on every plan call."""
-    return "\n".join(f"- {c.id}: {c.summary} Produces: {c.produces}" for c in CATALOGUE)
+    return "\n".join(f"- {c.id}: {c.summary} Produces: {c.produces}" for c in CAPABILITIES)

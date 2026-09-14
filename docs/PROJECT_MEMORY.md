@@ -2270,6 +2270,58 @@ that narrates twice loses its turn: **a schema failure that survives repair now 
 next model** rather than ending the run with the chain half unused. That change has evidence behind
 it and "ask the same model again" does not.
 
+**Three lists, one word, two readers: a naming defect with a measured cost (2026-09-14).**
+
+Within one week, two independent readers of this codebase borrowed one list's constant for another
+list's argument. Neither was careless; the names were.
+
+| what it lists | was called | is called |
+|---|---|---|
+| capabilities (`analyse`, `answer`) — hashed into `plan_hash` | `CATALOGUE_VERSION` | `CAPABILITIES_VERSION` |
+| every file in a repository — budgeted at 6,000 tokens | `build_catalogue`, `CATALOGUE_BUDGET_TOKENS` | `build_source_map`, `SOURCE_MAP_BUDGET_TOKENS` |
+| every indexed playbook chunk — **not budgeted** | `repository.catalog()` | `repository.section_map()` |
+
+- I divided 48.9 tokens per chunk (the third) by the second's budget and wrote "about 10 documents"
+  into a docstring and into §7 as a measurement.
+- An outside review asserted, with a correct line citation and a `[verified]` tag, that editing the
+  second required bumping the first because it is hashed into `plan_hash`. It is not.
+
+Both were reading carefully. Both hit the same trap: a word general enough to name three things is a
+word that names none of them, and an identifier travels to other modules without the sentence that
+disambiguates it. `tests/architecture/test_the_three_catalogues_have_three_names.py` forbids the bare
+word as an identifier — prose may still use it where context settles the meaning.
+
+`gateway/probe.py` keeps `catalogue` for the PROVIDER's model list, deliberately: that is the
+industry's own word for it, it is not confusable with a list of files or of sections, and a rule that
+renamed it would be a rule firing on correct work (§5.2, Pattern 5).
+
+**A live `IntegrityError`, found by both arms of the same A/B run.** `chunk_id` is
+`sha256(source_path + heading_path)` with no ordinal and `chunks.id` is a PRIMARY KEY written by a
+plain `INSERT`, so two sibling headings with the same title aborted the whole file's transaction.
+Reachable in ordinary Markdown — two `### Trade-offs` under one parent, or two `### Consequences`
+under different ADRs in one document, which this very file is shaped to produce. Reproduced:
+`UNIQUE constraint failed: chunks.id`.
+
+Fixed by disambiguating the PATH (`… > Trade-offs#2`), not the id, for two reasons. The invariant
+`id == chunk_id(source_path, heading_path)` stays true, so an id remains derivable from a chunk
+rather than becoming a third stored thing. And disambiguating on collision leaves every unique
+heading's id untouched, where folding the ordinal into every hash would renumber every later chunk
+the moment a section is inserted — and the id is the only handle that survives a rebuild.
+
+**The enhancer had no question/work distinction, and guessed wrong.** ADR-024 divided the WORKERS by
+whether a claim reports a defect or describes the code. One node upstream, the enhancer turned
+*"what would I have to change here to index something other than markdown"* into *"Modify the
+playbook ingestion pipeline so that…"* — a work order for a question, committing to a design before
+anyone had looked.
+
+`EnhancedPrompt.intent` is now `question | work`, decided by **what the user wants back rather than
+what the request is about**: a question whose subject is a hypothetical change is still a question.
+It is shown at the gate, written into the brief record, and stated to the planner in the first line
+of the brief so the capability is carried rather than inferred from wording. The default is
+`question`, on an asymmetry: answering a question when work was wanted costs one turn, and doing work
+when a question was asked costs a diff nobody asked for against code the user was still deciding
+about.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
