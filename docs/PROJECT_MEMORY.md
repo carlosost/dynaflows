@@ -1388,6 +1388,56 @@ matters when one of them writes.
 
 ---
 
+### ADR-024: `answer` is a capability, not a mode of `analyse`
+
+**Context.** Use case 3 is asking a question about the codebase. The obvious
+implementation is to reuse the `analyse` worker with a differently worded objective, and it is
+wrong for a reason that is easy to miss until it is written down.
+
+**Decision.** `answer` is a registered capability with its own schema, its own system prompt and
+its own substance rule. It shares the citation machinery exactly.
+
+**The reason, which is one rule.** ADR-019's checker drops a grounded claim that merely describes
+the code — `Ungrounded.NOT_A_DEFECT`, added after run `s4` produced three findings with real files,
+real lines, verbatim quotes and remediation "No remediation needed". That rule is correct for an
+audit and **exactly inverted for a question**: "how does the playbook search work" is answered by a
+description of working code, and the audit path would discard every correct answer as worthless.
+
+A second reason reinforces it. `Finding` requires `failure`, `severity` and `remediation`. For a
+question all three are meaningless, and a model required to fill them either invents them or says
+less — which this project measured directly when strict output contracts cut claims per run from
+fifteen to three.
+
+**What is shared, and why that is the interesting half.** A fabricated file is fabricated whatever
+was asked. An impossible line range is impossible. An invented quote is invented. So `_verify`
+takes the substance rule as a parameter and everything else is one implementation: `Cited` is the
+Protocol both claim types satisfy, and `Grounding[T]` carries the type through. Run `w1` invented
+four filenames and reported a HIGH severity finding about them; the same first check catches that
+for an answer.
+
+**Consequences.**
+- `CATALOGUE_VERSION` is 2, which is hashed into `plan_hash` — no plan is compared across the
+  change.
+- The planner chooses between the two from the catalogue text, with no new node and no new graph
+  shape. ADR-023's division is by whether workers WRITE; both of these read.
+- A test asserts `CAPABILITY_IDS == set(CAPABILITY_HANDLERS)`, so a registration without an
+  implementation cannot ship (AP-11).
+- **`WorkerResult` now carries its `capability`.** It has to: the synthesizer reads stored claim
+  rows back and validates them against a model, and it validated everything as `Finding`. An
+  observation has no `failure`, so validation raised, a bare `except ... continue` swallowed it,
+  and the report said "no verified findings" for a run that verified several — no error, no
+  counter, nothing to distinguish it from a worker that found nothing. `Accounting.unreadable`
+  counts them now and the computed report calls it a bug in dynaflows rather than a result.
+- The synthesizer is told the list holds two kinds of claim and must not convert one into the
+  other. Writing an observation up as a problem invents a defect nobody reported.
+
+**Still open.** There is no calibration fixture for `answer`. ADR-022 exists because "no findings"
+is unfalsifiable; **"a plausible answer" is unfalsifiable in exactly the same way**, and until a
+fixture with known answers exists, this capability's quality is unmeasured. That is the next piece
+of work, and it is listed in §7 rather than assumed.
+
+---
+
 ## 2. Data Contracts
 
 Written before implementation (§1.4, contract-first). These are the canonical shapes; changes are
@@ -2172,6 +2222,10 @@ drawn from the run**, and this one had already reached a written evaluation befo
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
 one that names its holes.
 
+- **`answer` has no calibration fixture.** ADR-022 exists because "no findings" is unfalsifiable.
+  "A plausible answer" is unfalsifiable in exactly the same way, and `calibrate` measures only the
+  `analyse` path. Until a fixture with known answers exists, ADR-024's capability is unmeasured —
+  the same hole this project already closed once for findings.
 - **ADR-009's reversal condition cannot be evaluated.** It fires on corpus size **or** an anchor-hit
   rate below 60%, and nothing anywhere records anchor-hit rate. The size half is checkable; the half
   that would actually detect "the planner cannot name what it needs" has never been measurable. This

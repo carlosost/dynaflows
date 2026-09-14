@@ -16,11 +16,31 @@ or an event loop.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 from dynaflows.contracts.playbook import Chunk
-from dynaflows.graph.prompts import Finding
+from dynaflows.graph.prompts import Finding, Observation
+
+
+class Cited(Protocol):
+    """Anything that points at lines in a file it was shown.
+
+    `Finding` and `Observation` share their whole citation half and differ
+    only in substance -- a finding must name a failure, an observation must
+    not be required to. Splitting on this Protocol is what lets one checker
+    serve both without either capability inheriting the other's rules.
+    """
+
+    @property
+    def file(self) -> str: ...
+    @property
+    def lines(self) -> str: ...
+    @property
+    def quoted_lines(self) -> str: ...
+
 
 _LINE_PREFIX = re.compile(r"^\s*\d+\|\s?", re.MULTILINE)
 _RANGE = re.compile(r"^\s*(\d+)\s*(?:[-–:]\s*(\d+))?\s*$")
@@ -41,8 +61,8 @@ class Ungrounded(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class Dropped:
-    finding: Finding
+class Dropped[T: Cited]:
+    finding: T
     reason: Ungrounded
 
     def render(self) -> str:
@@ -50,9 +70,9 @@ class Dropped:
 
 
 @dataclass(frozen=True, slots=True)
-class Grounding:
-    kept: tuple[Finding, ...]
-    dropped: tuple[Dropped, ...]
+class Grounding[T: Cited]:
+    kept: tuple[T, ...]
+    dropped: tuple[Dropped[T], ...]
 
     @property
     def reported(self) -> int:
@@ -134,19 +154,48 @@ def parse_range(raw: str) -> tuple[int, int] | None:
     return start, end
 
 
-def verify(findings: list[Finding], chunks: list[Chunk]) -> Grounding:
-    """Keep the findings whose citations check out; say why the rest did not.
+def verify(findings: list[Finding], chunks: list[Chunk]) -> Grounding[Finding]:
+    """Keep the FINDINGS whose citations check out and which report a defect.
+
+    `analyse` only. A finding that describes working code is dropped as
+    NOT_A_DEFECT, which is correct for an audit and exactly wrong for a
+    question -- see `verify_observations`.
+    """
+    return _verify(findings, chunks, substance=_is_description)
+
+
+def verify_observations(
+    observations: list[Observation], chunks: list[Chunk]
+) -> Grounding[Observation]:
+    """Keep the OBSERVATIONS whose citations check out.
+
+    `answer` only, and the difference from `verify` is the whole reason the
+    two capabilities exist separately: NOT_A_DEFECT rejects a claim that
+    merely describes the code, and for "how does the playbook search work" a
+    description of the code is the answer. Every other check is identical and
+    is the same code -- a fabricated file, an impossible line range and an
+    invented quote are wrong whatever was asked.
+    """
+    return _verify(observations, chunks, substance=lambda _: False)
+
+
+def _verify[T: Cited](
+    claims: list[T], chunks: list[Chunk], *, substance: Callable[[T], bool]
+) -> Grounding[T]:
+    """Citation checking, shared. `substance` decides whether a claim that
+    IS grounded is also worth keeping, and it is the only thing that varies
+    between capabilities.
 
     Chunks are what the worker ACTUALLY saw, after packing and truncation --
-    not what it was meant to see. A finding citing a section that was dropped
+    not what it was meant to see. A claim citing a section that was dropped
     for budget is ungrounded from this worker's point of view, and that is the
     honest reading: it could not have read what it claims to quote.
     """
     by_path = {chunk.source_path: chunk for chunk in chunks}
-    kept: list[Finding] = []
-    dropped: list[Dropped] = []
+    kept: list[T] = []
+    dropped: list[Dropped[T]] = []
 
-    for finding in findings:
+    for finding in claims:
         chunk = by_path.get(finding.file.strip())
         if chunk is None:
             dropped.append(Dropped(finding, Ungrounded.UNKNOWN_FILE))
@@ -170,7 +219,7 @@ def verify(findings: list[Finding], chunks: list[Chunk]) -> Grounding:
             dropped.append(Dropped(finding, Ungrounded.EVIDENCE_NOT_FOUND))
             continue
 
-        if _is_description(finding):
+        if substance(finding):
             # Grounded and worthless. Run `s4` produced three of these: real
             # file, real lines, verbatim quote, severity "low", remediation
             # "No remediation needed". Every structural check passed and the

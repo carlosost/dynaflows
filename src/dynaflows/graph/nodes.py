@@ -22,15 +22,18 @@ Two rules, and the first cost a real bug in this very file:
 # it cannot resolve, so it warns on every node. A warning that fires on
 # ordinary work is a warning people learn to ignore (playbook §5.1), so the
 # annotations here stay real objects.
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
+from pydantic import BaseModel
 
 from dynaflows.contracts.calls import CallRequest
 from dynaflows.contracts.errors import DynaflowsError, ErrorCode
-from dynaflows.contracts.playbook import ContextPack
+from dynaflows.contracts.playbook import Chunk, ContextPack
 from dynaflows.contracts.state import (
     MAX_FANOUT,
     EvaluationReport,
@@ -56,11 +59,15 @@ from dynaflows.graph.deps import (
 )
 from dynaflows.graph.grounding import Grounding
 from dynaflows.graph.prompts import (
+    ANSWER_SYSTEM,
     ENHANCER_SYSTEM,
     PLANNER_SYSTEM,
     SYNTHESIZER_SYSTEM,
     WORKER_SYSTEM,
+    AnswerReport,
     EnhancedPrompt,
+    Finding,
+    Observation,
     PlanDraft,
     SynthesisDraft,
     WorkerReport,
@@ -337,6 +344,68 @@ async def approve_plan(
     return update
 
 
+@dataclass(frozen=True, slots=True)
+class _Analysed:
+    """One worker's output, with the capability-specific shape already gone.
+
+    The worker node does exactly one thing differently per capability: it asks
+    a different model a different question and checks the reply by a different
+    substance rule. Everything after that -- degraded-vs-ok, the artifact, the
+    counters, the cost -- is identical, and duplicating it per capability is
+    how the two drift until one of them silently stops counting something.
+    """
+
+    summary: str
+    examined: list[str]
+    context_was_sufficient: bool
+    reported: int
+    grounded: int
+    all_ungrounded: bool
+    document: str
+    data: list[dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityHandler:
+    system: str
+    schema: type[BaseModel]
+    normalise: Callable[[Any, list[Chunk]], _Analysed]
+
+
+def _analysed_findings(report: WorkerReport, seen: list[Chunk]) -> _Analysed:
+    result = grounding_check.verify(report.findings, seen)
+    return _Analysed(
+        summary=report.summary,
+        examined=list(report.examined),
+        context_was_sufficient=report.context_was_sufficient,
+        reported=result.reported,
+        grounded=len(result.kept),
+        all_ungrounded=result.all_ungrounded,
+        document=_render_findings(report, result),
+        data=[f.model_dump() for f in result.kept],
+    )
+
+
+def _analysed_answer(report: AnswerReport, seen: list[Chunk]) -> _Analysed:
+    result = grounding_check.verify_observations(report.observations, seen)
+    return _Analysed(
+        summary=report.answer,
+        examined=list(report.examined),
+        context_was_sufficient=report.context_was_sufficient,
+        reported=result.reported,
+        grounded=len(result.kept),
+        all_ungrounded=result.all_ungrounded,
+        document=_render_answer(report, result),
+        data=[o.model_dump() for o in result.kept],
+    )
+
+
+CAPABILITY_HANDLERS: dict[str, CapabilityHandler] = {
+    "analyse": CapabilityHandler(WORKER_SYSTEM, WorkerReport, _analysed_findings),
+    "answer": CapabilityHandler(ANSWER_SYSTEM, AnswerReport, _analysed_answer),
+}
+
+
 async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> dict[str, Any]:
     """One analysis task. Dispatched by Send; returns a DELTA on reduced keys.
 
@@ -375,14 +444,19 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
         playbook_chunks, source_chunks, worker_context_budget(getattr(gateway, "registry", None))
     )
 
+    # ADR-001: the capability is validated plan data, so this is a lookup and
+    # never a branch on free text. A task whose capability has no handler
+    # cannot exist -- PlanTask rejects it -- and the test that asserts the
+    # catalogue equals the handler table is what keeps that true.
+    handler = CAPABILITY_HANDLERS[task.capability]
     prompt = _worker_prompt(task, context, refusals, sources=len(source_chunks))
     try:
         result = await gateway.call(
             CallRequest(
                 tier=task.tier_override or Tier.MID,
-                system=WORKER_SYSTEM,
+                system=handler.system,
                 prompt=prompt,
-                schema=WorkerReport,
+                schema=handler.schema,
                 # 4,096, not 2,048. A model in the small chain spent 2,297
                 # tokens reasoning against a 2,048 cap and returned nothing
                 # parseable at all -- on a reasoning model the thinking counts
@@ -414,24 +488,21 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
         }
 
     ledger = _merge_delta(ledger, result)
-    report: WorkerReport = result.payload
 
     # ADR-019. Checked against what this worker ACTUALLY saw -- the packed
     # chunks, after truncation -- not what it was meant to see. A claim about a
     # section dropped for budget is ungrounded from this worker's point of
     # view, which is the honest reading: it could not have read what it quotes.
     seen = [c for c in (*playbook_chunks, *source_chunks) if c.id in context.included_ids]
-    grounding = grounding_check.verify(report.findings, seen)
+    analysed = handler.normalise(result.payload, seen)
 
     run_id = state.get("run_id", "unknown")
     try:
-        artifact = store.write(run_id, task.task_id, _render_findings(report, grounding))
+        artifact = store.write(run_id, task.task_id, analysed.document)
         # ADR-020: the synthesizer needs claims, not prose it has to parse back
         # out of markdown. Written here, beside the human report, because state
         # carries references and not payloads (ADR-008).
-        findings_ref = store.write_data(
-            run_id, task.task_id, [f.model_dump() for f in grounding.kept]
-        )
+        findings_ref = store.write_data(run_id, task.task_id, analysed.data)
     except OSError as exc:
         # The analysis succeeded and the disk did not. Degraded, not failed:
         # the summary is still in state and still worth synthesising, and
@@ -440,16 +511,17 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
             "results": [
                 WorkerResult(
                     task_id=task.task_id,
+                    capability=task.capability,
                     status="degraded",
-                    summary=f"{report.summary}\n\n(report not saved: {exc})",
+                    summary=f"{analysed.summary}\n\n(report not saved: {exc})",
                     model_id=result.model_id,
                     tier=result.tier,
                     fallback_depth=result.fallback_depth,
                     tokens_in=result.tokens_in,
                     tokens_out=result.tokens_out,
                     cost_usd=result.cost_usd,
-                    findings_reported=grounding.reported,
-                    findings_grounded=len(grounding.kept),
+                    findings_reported=analysed.reported,
+                    findings_grounded=analysed.grounded,
                 )
             ],
             "cost": ledger,
@@ -459,10 +531,10 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
     # collapsed into one flag (AP-20). `degraded` is what ADR-004 counts, and
     # hiding any of these as `ok` is how a run passes while telling the user
     # nothing -- which is exactly what runs w1 and w2 did.
-    looked_at_nothing = not report.examined
-    everything_invented = grounding.all_ungrounded
+    looked_at_nothing = not analysed.examined
+    everything_invented = analysed.all_ungrounded
     incomplete = (
-        not report.context_was_sufficient
+        not analysed.context_was_sufficient
         or bool(context.dropped_ids)
         or bool(refusals)
         or looked_at_nothing
@@ -472,8 +544,9 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
         "results": [
             WorkerResult(
                 task_id=task.task_id,
+                capability=task.capability,
                 status="degraded" if incomplete else "ok",
-                summary=report.summary,
+                summary=analysed.summary,
                 artifact=artifact,
                 model_id=result.model_id,
                 tier=result.tier,
@@ -481,8 +554,8 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
                 tokens_in=result.tokens_in,
                 tokens_out=result.tokens_out,
                 cost_usd=result.cost_usd,
-                findings_reported=grounding.reported,
-                findings_grounded=len(grounding.kept),
+                findings_reported=analysed.reported,
+                findings_grounded=analysed.grounded,
                 findings_ref=findings_ref,
             )
         ],
@@ -490,7 +563,7 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
     }
 
 
-def _render_findings(report: WorkerReport, grounding: Grounding) -> str:
+def _render_findings(report: WorkerReport, grounding: Grounding[Finding]) -> str:
     """The artifact. Verified findings, and what was discarded.
 
     The discarded ones are written down rather than dropped silently. A worker
@@ -534,11 +607,54 @@ def _render_findings(report: WorkerReport, grounding: Grounding) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _render_answer(report: AnswerReport, grounding: Grounding[Observation]) -> str:
+    """The artifact for an `answer` task.
+
+    The answer comes FIRST and the citations follow it. A findings report is a
+    list and reads as one; an answer is prose, and burying it under a table of
+    evidence makes a reader reconstruct it. The discarded citations are still
+    written down, for the same reason as in `_render_findings`: a worker whose
+    every citation failed is not a worker that cited nothing, and a reader who
+    cannot see the difference reads the second as diligence.
+    """
+    lines = [f"# {report.answer}", ""]
+    lines.append("## Examined")
+    lines.extend(f"- {item}" for item in report.examined or ["(nothing recorded)"])
+    lines.append("")
+    lines.append(f"## Evidence ({len(grounding.kept)} verified)")
+    if not grounding.kept:
+        # Prose with no surviving citation is the shape a fabricated answer
+        # takes, so it is labelled rather than left to look like brevity.
+        lines.append("_None verified. The answer above is unsupported._")
+    for observation in grounding.kept:
+        lines.append(f"### {observation.claim}")
+        lines.append(f"`{observation.file}:{observation.lines}`")
+        lines.append("")
+        lines.append("```")
+        lines.append(observation.quoted_lines)
+        lines.append("```")
+        lines.append("")
+    if grounding.dropped:
+        lines.append(f"## Discarded as ungrounded ({len(grounding.dropped)})")
+        for dropped in grounding.dropped:
+            lines.append(f"- {dropped.render()}: {dropped.finding.claim}")
+            lines.append("")
+            lines.append("  ```")
+            lines.extend(f"  {line}" for line in dropped.finding.quoted_lines.splitlines()[:12])
+            lines.append("  ```")
+        lines.append("")
+    if report.missing:
+        lines.append("## Not available to this worker")
+        lines.extend(f"- {item}" for item in report.missing)
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _failed(task: PlanTask, exc: DynaflowsError) -> WorkerResult:
     """One failure shape, so eleven siblings keep going and the twelfth is
     visible rather than merely absent."""
     return WorkerResult(
         task_id=task.task_id,
+        capability=task.capability,
         status="failed",
         summary="",
         error=exc.envelope,

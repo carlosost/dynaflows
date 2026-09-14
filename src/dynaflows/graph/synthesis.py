@@ -12,13 +12,26 @@ import re
 from dataclasses import dataclass, field
 
 from dynaflows.contracts.state import EvaluationReport, WorkerResult
-from dynaflows.graph.prompts import Finding
+from dynaflows.graph.prompts import Finding, Observation
+
+# A verified claim, of either kind. `Finding` says something is wrong;
+# `Observation` says what the code does. They share their citation half
+# exactly, which is why one deduplicator and one renderer serve both.
+type Claim = Finding | Observation
+
+# Which model a capability's stored rows validate against. Keyed rather than
+# guessed: trying `Finding` first and falling back would turn a malformed
+# finding into a silently accepted observation.
+_MODELS: dict[str, type[Finding] | type[Observation]] = {
+    "analyse": Finding,
+    "answer": Observation,
+}
 
 _WHITESPACE = re.compile(r"\s+")
 _LINE_PREFIX = re.compile(r"^\s*\d+\|\s?", re.MULTILINE)
 
 
-def _key(finding: Finding) -> tuple[str, str]:
+def _key(finding: Claim) -> tuple[str, str]:
     """What makes two findings the same finding.
 
     File plus normalised evidence, NOT the claim: two workers describing the
@@ -31,10 +44,10 @@ def _key(finding: Finding) -> tuple[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class Corroborated:
-    """One finding, and every worker that independently reached it."""
+    """One claim, and every worker that independently reached it."""
 
     id: str
-    finding: Finding
+    finding: Claim
     reported_by: tuple[str, ...]
 
     @property
@@ -57,6 +70,12 @@ class Accounting:
     findings_reported: int = 0
     findings_grounded: int = 0
     unique_findings: int = 0
+    # Rows written by a worker that the synthesizer could not read back. Its
+    # own counter, because it used to be a bare `continue`: an `answer`
+    # worker's observations failed `Finding` validation and vanished, and the
+    # report said "no verified findings" with nothing anywhere saying why
+    # (AP-20 -- a fact with no counter becomes silence).
+    unreadable: int = 0
     failures: list[str] = field(default_factory=list)
 
     @property
@@ -91,8 +110,15 @@ def collect(results: list[WorkerResult], load: object) -> tuple[list[Corroborate
             continue
         for index, item in enumerate(raw):
             try:
-                finding = Finding.model_validate(item)
-            except Exception:  # noqa: BLE001 -- a bad row is one finding, not the run
+                finding = _MODELS[result.capability].model_validate(item)
+            except KeyError:
+                # An unknown capability is a bug in dispatch, not a bad row,
+                # and skipping the whole result silently is how `answer`'s
+                # observations disappeared in the first place.
+                accounting.unreadable += len(raw)
+                break
+            except Exception:  # noqa: BLE001 -- a bad row is one claim, not the run
+                accounting.unreadable += 1
                 continue
             key = _key(finding)
             existing = merged.get(key)
@@ -142,6 +168,16 @@ def render_accounting(
             "file it was not shown, a line past the end of one, or a quote that is not there. "
             "Each worker's report lists its own."
         )
+    if accounting.unreadable:
+        # Loud, and phrased as a defect in this program rather than in the
+        # run. A worker verified these and they were lost between the store
+        # and the report, which is the one failure a reader cannot infer from
+        # anything else on this page.
+        lines.append(
+            f"- **{accounting.unreadable} verified claim(s) could not be read back** from the "
+            "run store. This is a bug in dynaflows, not a result: the work was done and paid "
+            "for, and the report below is missing it."
+        )
     if accounting.unique_findings != accounting.findings_grounded:
         collapsed = accounting.findings_grounded - accounting.unique_findings
         lines.append(f"- {collapsed} duplicate(s) collapsed; {accounting.unique_findings} distinct")
@@ -181,10 +217,16 @@ def render_findings(findings: list[Corroborated]) -> str:
         corroboration = (
             f" [corroborated by {item.corroboration} workers]" if item.corroboration > 1 else ""
         )
-        blocks.append(
-            f"[{item.id}] ({item.finding.severity}){corroboration} {item.finding.claim}\n"
-            f"  {item.finding.file}:{item.finding.lines}\n"
-            f"  evidence: {item.finding.quoted_lines.strip()[:300]}\n"
-            f"  proposed: {item.finding.remediation}"
-        )
+        # An Observation has no severity and no remediation, and inventing
+        # placeholders for them would tell the synthesizer something untrue
+        # about a claim that never made that kind of statement.
+        severity = f" ({item.finding.severity})" if isinstance(item.finding, Finding) else ""
+        lines = [
+            f"[{item.id}]{severity}{corroboration} {item.finding.claim}",
+            f"  {item.finding.file}:{item.finding.lines}",
+            f"  evidence: {item.finding.quoted_lines.strip()[:300]}",
+        ]
+        if isinstance(item.finding, Finding):
+            lines.append(f"  proposed: {item.finding.remediation}")
+        blocks.append("\n".join(lines))
     return "\n\n".join(blocks)

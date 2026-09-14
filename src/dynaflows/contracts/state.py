@@ -139,6 +139,12 @@ class Plan(BaseModel):
 
 class WorkerResult(BaseModel):
     task_id: str
+    # What KIND of claim this worker made. The synthesizer reads the rows back
+    # from the run store and has to validate them against a model; guessing
+    # which one meant an `answer` worker's observations failed `Finding`
+    # validation, were swallowed by a bare except, and vanished with no error
+    # and no counter -- the silent-drop shape this project keeps re-finding.
+    capability: str = "analyse"
     status: Literal["ok", "degraded", "failed"]
     summary: str = Field(default="", max_length=1200)
     artifact: ArtifactRef | None = None

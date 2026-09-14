@@ -54,6 +54,10 @@ class FakeGateway:
         # Overridden by tests that need a worker to fail, come back short, or
         # admit it lacked context. Default is a clean success.
         self.worker_report: Any = _default_report
+        # ADR-023: `answer` returns a different schema to the same node. Its
+        # own default, because a shared one would have to satisfy both
+        # contracts and would therefore test neither.
+        self.answer_report: Any = _default_answer
         self.synthesis: Any = _default_synthesis
 
     async def call(self, request: Any, **_: object) -> Any:
@@ -64,6 +68,7 @@ class FakeGateway:
         """
         from dynaflows.contracts.calls import CallResult
         from dynaflows.graph.prompts import (
+            AnswerReport,
             EnhancedPrompt,
             PlanDraft,
             SynthesisDraft,
@@ -75,6 +80,8 @@ class FakeGateway:
             payload: Any = self.plan_draft() if callable(self.plan_draft) else self.plan_draft
         elif request.schema is WorkerReport:
             payload = self.worker_report(request)
+        elif request.schema is AnswerReport:
+            payload = self.answer_report(request)
         elif request.schema is SynthesisDraft:
             payload = self.synthesis(request)
         else:
@@ -182,6 +189,25 @@ def _default_report(request: Any) -> Any:
         summary=f"findings for {task_id}",
         examined=["src/auth.py"],
         findings=[],
+        context_was_sufficient=True,
+    )
+
+
+def _default_answer(request: Any) -> Any:
+    """A clean `answer` reply, identifiable per task.
+
+    No observations by default, for the same reason `_default_report` has no
+    findings: every citation is checked against what the worker was shown, and
+    a default that cited something would make tests unrelated to grounding
+    depend on a workspace.
+    """
+    from dynaflows.graph.prompts import AnswerReport
+
+    task_id = dict(request.metadata).get("task_id", "?")
+    return AnswerReport(
+        answer=f"answer for {task_id}",
+        examined=["src/auth.py"],
+        observations=[],
         context_was_sufficient=True,
     )
 

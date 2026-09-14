@@ -319,8 +319,15 @@ def test_a_task_naming_an_unregistered_capability_is_rejected() -> None:
         PlanTask(task_id="t", capability="hallucinated", objective="o")
 
 
-def test_the_registered_capability_is_accepted() -> None:
+def test_only_implemented_capabilities_are_registered() -> None:
+    """AP-11: an entry here with no node behind it is surface the planner will
+    happily emit tasks against and nothing can run. The set is asserted
+    exactly, so ADDING one is a deliberate act with a test to update."""
     from dynaflows.graph.capabilities import CAPABILITY_IDS
+    from dynaflows.graph.nodes import CAPABILITY_HANDLERS
 
-    assert {"analyse"} == CAPABILITY_IDS, "Phase 1 registers exactly what 1.6 implements (AP-11)"
-    assert PlanTask(task_id="t", capability="analyse", objective="o").capability == "analyse"
+    assert {"analyse", "answer"} == CAPABILITY_IDS
+    assert set(CAPABILITY_HANDLERS) == CAPABILITY_IDS, (
+        "every registered capability needs a handler, and every handler a registration"
+    )
+    assert PlanTask(task_id="t", capability="answer", objective="o").capability == "answer"

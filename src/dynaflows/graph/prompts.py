@@ -72,6 +72,91 @@ class EnhancedPrompt(BaseModel):
     )
 
 
+ANSWER_SYSTEM = """\
+You are one of several analysts working in parallel on separate questions. \
+You cannot see the others and must not speculate about their work.
+
+You are given a question, reference sections from an engineering playbook, and \
+the source files the plan named, with line numbers. That is everything you \
+get: you cannot open other files, run anything, or search.
+
+Answer the question from the code in front of you. Every claim about what the \
+code DOES must cite the lines that show it, and the citation is CHECKED:
+- `file` must be one of the files you were shown, spelled exactly as shown.
+- `lines` must be a real line range in that file, e.g. "213" or "213-227".
+- `quoted_lines` must be the lines themselves, copied character for character. \
+It is a quotation, not an explanation. Compare:
+
+    quoted_lines: "88|         VALUES ('delete', ?, '', '', '')"   <- correct
+    quoted_lines: "The delete passes empty strings"                <- WRONG, prose
+
+An observation whose citation does not check out is DISCARDED, so a careless \
+quote loses a real answer.
+
+Rules:
+- A description of working code IS a valid answer here. You are explaining a \
+system, not auditing it. Do not manufacture problems, and do not withhold an \
+explanation because nothing is wrong with it.
+- Say what you could NOT determine. "The caller is not in the files I was \
+shown" is a useful answer; guessing at it is not. `answer` may end by naming \
+what would settle the rest.
+- Distinguish what the code does from what a comment or docstring SAYS it \
+does. When they disagree, that is the most valuable thing you can report, and \
+the citation is what proves it.
+- `examined` lists the files you actually read. Fill it in even when you \
+answer nothing: "I read these and the answer is not in them" and "I did not \
+look" are different answers and only you can tell them apart.
+- Answer only what was asked. A question about how retrieval works is not an \
+invitation to review the whole module.
+- Judge against the playbook sections you were given, not against general best \
+practice, wherever the two differ.
+"""
+
+
+class Observation(BaseModel):
+    """One claim about what the code does, with the lines that show it.
+
+    Deliberately NOT `Finding`. A finding must name a `failure`, a `severity`
+    and a `remediation`, and for "how does the playbook search work" all three
+    are meaningless -- a model required to fill them either invents them or
+    says less, and this project has already measured that verification inside
+    generation suppresses output. The citation half is identical and is
+    checked by the same code; the substance half is the part that differs.
+    """
+
+    claim: str = Field(description="What the code does, in one sentence.")
+    file: str = Field(description="Exactly as shown to you.")
+    lines: str = Field(description='A real line range, e.g. "213" or "213-227".')
+    quoted_lines: str = Field(
+        description=(
+            "The lines themselves, copied character for character from what you were "
+            "shown, with their line-number prefixes. NOT a description of them."
+        )
+    )
+
+
+class AnswerReport(BaseModel):
+    """What an `answer` worker returns.
+
+    `answer` is the prose a human reads; `observations` are the citations that
+    make it checkable. Both are required: prose alone cannot be verified, and
+    citations alone do not answer a question.
+    """
+
+    answer: str = Field(
+        description="The answer to the question asked. Prose, not a list.", max_length=2000
+    )
+    examined: list[str] = Field(default_factory=list, description="The files you actually read.")
+    observations: list[Observation] = Field(default_factory=list)
+    context_was_sufficient: bool = Field(
+        description="False if you needed something you were not shown."
+    )
+    missing: list[str] = Field(
+        default_factory=list,
+        description="What you needed and did not have. One short line each. Empty if none.",
+    )
+
+
 PLANNER_SYSTEM = """\
 You decompose a brief into independent analysis tasks for parallel workers.
 
@@ -224,19 +309,25 @@ class WorkerReport(BaseModel):
 
 
 SYNTHESIZER_SYSTEM = """\
-You write the summary a reader sees first, from findings that have already been \
+You write the summary a reader sees first, from claims that have already been \
 verified by other analysts working in parallel.
 
 You are a summariser. You may not introduce a claim that is not in the list you \
 were given.
 
-Every section cites the finding ids it rests on, and the citation is CHECKED: a \
+Every section cites the claim ids it rests on, and the citation is CHECKED: a \
 section citing an id that does not exist is DISCARDED, taking its text with it.
+
+The list holds two kinds of claim and you must not convert one into the other. \
+A claim with a severity and a proposed change says something is WRONG. A claim \
+with neither says what the code DOES -- it is an answer to a question, and \
+writing it up as a problem invents a defect nobody reported. If every claim is \
+of the second kind, you are answering a question, not reporting an audit.
 
 Rules:
 - Group by what a reader would act on together, not by which worker reported it.
 - Lead with what matters most. Severity is a signal, not an ordering.
-- A finding two workers reached independently is worth saying so about.
+- A claim two workers reached independently is worth saying so about.
 - Do not restate the list. If grouping adds nothing, say so in one line and \
 keep the sections few.
 - Do not describe the run, the process, or your own limitations. Those are \
