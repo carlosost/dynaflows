@@ -102,7 +102,7 @@ def test_a_rejection_reports_what_it_cost_before_stopping(isolated: FakeGateway)
     result = CliRunner().invoke(
         app, ["run", "audit auth", "--thread", "t4", "--yes-plan"], input="r\n"
     )
-    assert "$0.0020 spent" in result.output
+    assert "$0.0020 on this thread" in result.output
 
 
 def test_yes_prompt_never_asks(isolated: FakeGateway) -> None:
@@ -225,7 +225,7 @@ def test_run_and_resume_describe_a_finished_run_the_same_way(
     runner = CliRunner()
     ran = runner.invoke(app, ["run", "audit auth", "--thread", "d2", "--yes-prompt", "--yes-plan"])
     resumed = runner.invoke(app, ["resume", "d2"])
-    for fragment in ("task(s)", "spent", "call(s)"):
+    for fragment in ("task(s)", "on this thread", "call(s)"):
         assert fragment in ran.output, fragment
         assert fragment in resumed.output, fragment
 
@@ -245,7 +245,7 @@ def test_a_completed_run_reports_what_it_cost(isolated: FakeGateway) -> None:
 
     calls = 2 + len(_DEFAULT_PLAN_TASKS)
     assert f"{calls} call(s)" in result.output
-    assert f"${calls * 0.002:.4f} spent" in result.output
+    assert f"${calls * 0.002:.4f} on this thread" in result.output
     assert isolated.worker_calls == len(_DEFAULT_PLAN_TASKS)
 
 
@@ -505,3 +505,40 @@ def test_an_unanswered_gate_is_not_an_approval(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(typer.Abort):
         _ask(_err, "[a]pprove", default="a")
+
+
+def test_reusing_a_thread_for_a_different_prompt_is_refused(
+    isolated: FakeGateway, tmp_path: Path
+) -> None:
+    """The fifth wrong number.
+
+    LangGraph appends: a fresh input on a thread that already holds state
+    starts ANOTHER run over the same checkpoint and, because `cost` is a
+    summing reducer, bills both to one ledger. `brief --thread p2` therefore
+    reported "$0.0066 spent, 3 call(s)" for what its author believed was one
+    free call -- the thread's lifetime, presented as this run's cost.
+
+    Three threads in the real A/B run had 3, 2 and 1 runs on them. Only the
+    third reported a number that meant what it said.
+    """
+    first = CliRunner().invoke(app, ["brief", "fix the login bug", "--thread", "t20", "--yes"])
+    assert first.exit_code == 0
+
+    second = CliRunner().invoke(
+        app, ["brief", "something else entirely", "--thread", "t20", "--yes"]
+    )
+
+    assert second.exit_code == 3
+    assert second.stdout.strip() == ""
+
+
+def test_reusing_a_thread_for_the_same_prompt_is_a_revisit(isolated: FakeGateway) -> None:
+    """What `--thread` is actually for. The help says "reuse it to revisit",
+    and that has to keep working or the guard is just a papercut."""
+    args = ["brief", "fix the login bug", "--thread", "t21", "--yes"]
+    assert CliRunner().invoke(app, args).exit_code == 0
+
+    again = CliRunner().invoke(app, args)
+
+    assert again.exit_code == 0
+    assert again.stdout.strip()

@@ -17,7 +17,7 @@ from rich.table import Table
 from rich.text import Text
 
 from dynaflows import __version__
-from dynaflows.contracts.errors import DynaflowsError
+from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 from dynaflows.contracts.tiers import Tier
 from dynaflows.doctor import Status, run_checks
 from dynaflows.settings import get_settings
@@ -491,8 +491,12 @@ def _money(ledger: Any) -> str:
     an unpriced call is named here rather than added in as zero -- the reader
     can see that the total is a floor, not a figure.
     """
+    # "on this thread", not "spent". `cost` is a summing reducer and the
+    # checkpoint outlives the run, so a revisited thread reports every run it
+    # has ever held. Saying "spent" made that figure a claim about the command
+    # the user just typed, which it is not.
     line = (
-        f"${ledger.usd_spent:.4f} spent, ${ledger.usd_avoided:.4f} avoided by cache, "
+        f"${ledger.usd_spent:.4f} on this thread, ${ledger.usd_avoided:.4f} avoided by cache, "
         f"{ledger.calls_made} call(s)"
     )
     if ledger.calls_cached:
@@ -1182,7 +1186,6 @@ def _calibrate_once(
     # another model would be worse than failing: it would silently measure a
     # different model and label the number with this one. So the same model is
     # retried, with a backoff, and only a persistent failure is reported.
-    from dynaflows.contracts.errors import ErrorCode  # noqa: PLC0415
 
     transient = {ErrorCode.RATE_LIMIT, ErrorCode.TIMEOUT, ErrorCode.MODEL_UNAVAILABLE}
     state = {**initial_state("calib", "calib", task.objective), "task": task}
@@ -1215,6 +1218,36 @@ def _calibrate_once(
         discarded=result.findings_reported - result.findings_grounded,
     )
     return card, result
+
+
+async def _guard_thread(saver: Any, cfg: dict[str, Any], prompt: str) -> None:
+    """Refuse to start a second run on a thread that already has one.
+
+    LangGraph appends: invoking a graph with a fresh input on a thread that
+    already holds state starts ANOTHER run over the same checkpoint, re-runs
+    nodes, and -- because `cost` is a reducer that sums -- accumulates one
+    ledger across both. The cost line then reports the lifetime of the thread
+    while saying "spent", which is how `brief --thread p2` reported $0.0066
+    for what its author believed was one free call.
+
+    Fifth wrong number in this project, and the same shape as the other four:
+    structurally valid, semantically false, asserted nowhere.
+
+    Same prompt on the same thread is a revisit and is allowed -- that is what
+    `--thread` is for. A different prompt is a new run wearing an old name.
+    """
+    tup = await saver.aget_tuple(cfg)
+    if tup is None:
+        return
+    previous = str((tup.checkpoint.get("channel_values") or {}).get("raw_prompt") or "")
+    if previous.strip() == prompt.strip():
+        return
+    raise DynaflowsError.of(
+        ErrorCode.CONFIG_INVALID,
+        f"thread {cfg['configurable']['thread_id']!r} already holds a run of a different"
+        " prompt. Re-using it would start a second run over the same state and bill both"
+        " to one ledger. Choose another --thread, or omit it for a fresh one.",
+    )
 
 
 def _save_brief(
@@ -1304,6 +1337,7 @@ def brief(
             cfg = _graph_config(
                 settings, thread_id, auto_approve=["prompt"] if yes else [], root=root
             )
+            await _guard_thread(saver, cfg, prompt)
             state = initial_state(
                 uuid.uuid4().hex[:8],
                 thread_id,

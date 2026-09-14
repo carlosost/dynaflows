@@ -2130,6 +2130,43 @@ Replaced with `_ask()`: write the question to the console we were handed, read w
 which prompts nowhere. EOF raises `Abort` rather than returning the default — nobody answering is
 not a human saying yes.
 
+**CLOSED 2026-09-13: `$0.0066 spent` on a tier containing only free models — the FIFTH wrong number.**
+
+The A/B run reported `$0.0066 spent, 3 call(s)` for a `brief` whose only tier is `tiers.small`, five
+`:free` models. The response cache showed one call, a free model, `cost_usd: 0.0`.
+
+**The ledger was right. The word "spent" was wrong.** `cost` is a summing reducer and the checkpoint
+outlives the run, so `--thread p2` invoked twice started **two runs on one thread** — LangGraph
+appends a fresh input to existing state rather than refusing it — and both billed to one ledger. The
+cost line reported the lifetime of the thread while claiming to describe the command just typed.
+Counted from the checkpoints:
+
+| thread | runs started on it | reported |
+|---|---|---|
+| p1 | 3 | `$0.0000, 2 calls + 2 cached` |
+| p2 | 2 | `$0.0066, 3 calls` |
+| p3 | 1 | `$0.0000, 1 call` |
+
+Only p3 reported a number that meant what it said, and p3 is the one that got a fresh thread.
+
+Same shape as the other four (zero tokens, vacuous `passed=True`, zero cost, dropped
+`calls_unpriced`): **structurally valid, semantically false, asserted nowhere.** What is new here is
+that the number was not computed wrongly — it was *labelled* wrongly, and no amount of arithmetic
+testing would have caught it. A unit is part of a value. This one was implicit, and the implication
+was false.
+
+Two fixes, because the fault has two halves:
+- **`brief` refuses to start a second run on a thread that already holds a different prompt**, naming
+  the collision instead of silently appending. The same prompt on the same thread is still a revisit,
+  which is what `--thread` is documented to be for.
+- **The line says "on this thread", not "spent".** A revisit still legitimately accumulates, so the
+  label has to carry the scope rather than the guard carrying all of it.
+
+The reason this mattered beyond bookkeeping: the measured claim "one free call produced a brief that
+beat a hand-written prompt" was drawn from these figures. It holds for p3 and was unsupported for
+p1 and p2. **A wrong number does not stay in the cost report; it propagates into the conclusions
+drawn from the run**, and this one had already reached a written evaluation before it was caught.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
