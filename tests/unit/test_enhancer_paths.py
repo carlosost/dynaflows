@@ -141,3 +141,23 @@ def test_the_prompt_forbids_the_first_person_mechanically() -> None:
     plainly gets it right more often, and the two must not disagree."""
     assert "IMPERATIVE MOOD" in ENHANCER_SYSTEM
     assert "There is no first person in a brief." in ENHANCER_SYSTEM
+
+
+def test_the_standing_requirements_scope_what_execution_may_touch() -> None:
+    """The first live run of the verification requirement broke the repo.
+
+    "Verify by RUNNING it" is an instruction to execute, and it was appended
+    to every brief with no statement of where, or what execution was allowed
+    to touch. The executor built a benchmark harness, ran `git status` inside
+    the repository, and left a `.git/index.lock` behind that would have failed
+    the next commit.
+
+    A demand to execute that does not bound execution is half an instruction.
+    """
+    for clause in (
+        "scratch directory outside the repository",
+        "take no lock on it",
+        "`git status` takes one",
+        "Every number states how it was obtained",
+    ):
+        assert clause in STANDING_REQUIREMENTS, clause

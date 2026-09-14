@@ -116,10 +116,18 @@ class SqlitePlaybookRepository:
         cheap enough to send on every planner call rests on it.
 
         At twice the assumed size the argument still holds today, and the
-        headroom is half what the ADR implies. Against
-        `CATALOGUE_BUDGET_TOKENS = 6_000` this is about 10 documents at 12
-        chunks each, or 2.5 at this repository's own rate. The catalogue is
-        bounded by the corpus; the corpus is not bounded (§7).
+        headroom is half what the ADR implies.
+
+        **This is not budgeted.** `CATALOGUE_BUDGET_TOKENS` governs
+        `store/catalogue.py`'s SOURCE FILE catalogue, a different object; an
+        earlier version of this docstring divided one by the other and
+        reported a ceiling of "about 10 documents", which was two unrelated
+        numbers multiplied together. There is no ceiling. No truncation, no
+        cap, no error -- `catalog()` renders every chunk in the corpus into
+        the planner's system prompt on every run and grows until the provider
+        rejects the request. Measured at 49.2 tokens per chunk: 12 chunks a
+        document puts ~59k tokens in the prompt at 100 documents, ~591k at a
+        thousand, ~1.8M at three thousand.
 
         Also a full scan: `SELECT *` materialises every chunk's body to build
         a line that uses four columns.

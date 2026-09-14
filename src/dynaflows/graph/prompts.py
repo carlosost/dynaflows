@@ -69,10 +69,17 @@ Repository (path | size | what it is):
 # direction, in the same commit.
 STANDING_REQUIREMENTS = """\
 Verify every factual claim about the code by RUNNING it -- reading it is not \
-verifying it. State the interpreter version you verified against and whether \
-the working tree was clean. A confident claim that a file does not parse, \
-delivered with a line number and a verbatim quote, is indistinguishable from \
-a real finding until somebody re-runs it."""
+verifying it. A confident claim that a file does not parse, delivered with a \
+line number and a verbatim quote, is indistinguishable from a real finding \
+until somebody re-runs it.
+
+Run everything in a scratch directory outside the repository. Write nothing \
+inside it, take no lock on it, and run no command that does -- `git status` \
+takes one. Leave the working tree exactly as you found it.
+
+State the interpreter version you verified against and whether the tree was \
+clean. Every number states how it was obtained; a figure with no method is \
+worth less than no figure."""
 
 
 def compose_brief(enhanced: str) -> str:

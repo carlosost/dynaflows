@@ -2287,11 +2287,19 @@ one that names its holes.
   runtime graph path goes through `by_anchor`. The BM25 layer ADR-009 argues for hardest has never
   run in a real graph execution, which is how it carried a corrupt index undetected. Until the graph
   calls it, its behaviour under load, its ranking quality and its failure modes are all unmeasured.
-- **`catalog()` is O(corpus) and is paid on every planner call.** Measured on this repository:
-  4,840 tokens for 99 chunks, 48.9 tokens per chunk. Against `CATALOGUE_BUDGET_TOKENS = 6_000` that
-  is **10.2 documents at 12 chunks each, or 2.5 at this repository's own rate**. The catalogue is
-  bounded by the corpus and the corpus is not bounded. No decision is recorded for what happens past
-  that point.
+- **`repository.catalog()` is O(corpus), paid on every planner call, and has NO BUDGET.** Measured:
+  49.2 tokens per chunk. At 12 chunks a document that is ~59k tokens in the prompt at 100 documents,
+  ~591k at a thousand, ~1.8M at three thousand. There is no truncation, no cap and no error — it
+  grows until the provider rejects the request.
+  **Correction, 2026-09-14.** An earlier version of this line said the ceiling was "10.2 documents",
+  derived by dividing 48.9 tokens/chunk by `CATALOGUE_BUDGET_TOKENS = 6_000`. Those are two
+  different objects: that constant governs `store/catalogue.py`'s SOURCE FILE catalogue, and
+  `repository.catalog()` — the playbook chunk catalogue, called at `nodes.py:234` and `cli.py:804` —
+  is passed no budget at all. The number was two unrelated quantities divided by each other, written
+  into this document and into the function's own docstring as a measurement. It was caught by an
+  outside reader, in the same week this project corrected a different docstring for the same fault.
+  **Writing "measured" next to a figure does not make it one**, and the author of the correction to
+  `catalog()`'s "roughly 25 tokens" claim is the author of this one.
 - Every numeric threshold in this document (`EVAL_MAX_FAILURE_RATE`, `HITL_PLAN_THRESHOLD_USD`,
   `MAX_FANOUT`, retry counts, context budgets) is a **placeholder**, not a measurement (§4.5).
 - ADR-006's tier assignments are reasoning, not benchmark results. OQ-01 is the measurement.
