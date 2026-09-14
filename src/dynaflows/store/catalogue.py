@@ -72,6 +72,13 @@ class SourceCatalogue:
         )
 
 
+def is_test_path(relative: str) -> bool:
+    """Is this a test module, by path alone? Public, because the enhancer's
+    path list has to answer the same question and a second spelling of the
+    rule is a second thing to keep in step."""
+    return _is_test(Path(relative))
+
+
 def _is_test(path: Path) -> bool:
     return path.name.startswith("test_") or "tests" in path.parts
 

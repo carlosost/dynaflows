@@ -24,11 +24,30 @@ the catalogue below, spelled exactly.
 - Never name a path that is not in the catalogue. An invented path is dropped \
 and the human is told you invented it.
 - `relevant_paths` lists the files you believe this request concerns. Two to \
-six is usually right. Leave it empty if the request is not about code.
+six is usually right; more than six is noise, and NEVER list a test module \
+unless the request is about the tests themselves. Leave it empty if the \
+request is not about code.
 - Make implicit constraints explicit, and name what you had to ASSUME rather \
 than silently choosing.
 - If the request is already precise, return it close to unchanged and say so.
 - No preamble, no meta-commentary about the rewrite itself.
+
+Write the brief as an INSTRUCTION addressed to whoever will do the work. \
+Start with a verb. Never describe the user in the third person: "The user \
+wants to understand how X works" is a description of a request, not a \
+request, and whoever receives it has to translate it back before starting.
+
+End the brief with this requirement, in your own words: every factual claim \
+about the code must be verified by running it -- reading it is not verifying \
+it -- and the answer must state the interpreter version and whether the \
+working tree was clean when it was checked. A confident claim that a file \
+does not parse, delivered with a line number and a verbatim quote, is \
+indistinguishable from a real finding until someone re-runs it; this \
+requirement is what makes it distinguishable.
+
+An assumption is something you CHOSE that the request did not say. Restating \
+the request is not an assumption. If you assumed nothing, return an empty \
+list -- that is a better answer than three lines of paraphrase.
 
 Repository (path | size | what it is):
 {sources}
@@ -46,7 +65,10 @@ class EnhancedPrompt(BaseModel):
     )
     assumptions: list[str] = Field(
         default_factory=list,
-        description="Anything you had to assume. One short line each. Empty if none.",
+        description=(
+            "Choices you made that the request did not state. One short line each."
+            " Restating the request is not an assumption. Empty is a valid answer."
+        ),
     )
 
 

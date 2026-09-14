@@ -109,9 +109,20 @@ class SqlitePlaybookRepository:
     def catalog(self) -> str:
         """The compact map the planner reads instead of the corpus.
 
-        Roughly 25 tokens per section rather than the whole document, which is
-        what makes one Frontier-tier call able to route context for all N
-        workers (ADR-009).
+        MEASURED 2026-09-13: **48.9 tokens per section**, 4,840 for 99 chunks
+        on this repository. This said "roughly 25" from the day it was written
+        and nothing ever checked it -- the figure was a guess wearing the
+        grammar of a measurement, and ADR-009's argument that the catalogue is
+        cheap enough to send on every planner call rests on it.
+
+        At twice the assumed size the argument still holds today, and the
+        headroom is half what the ADR implies. Against
+        `CATALOGUE_BUDGET_TOKENS = 6_000` this is about 10 documents at 12
+        chunks each, or 2.5 at this repository's own rate. The catalogue is
+        bounded by the corpus; the corpus is not bounded (§7).
+
+        Also a full scan: `SELECT *` materialises every chunk's body to build
+        a line that uses four columns.
         """
         rows = self._connection.execute(
             "SELECT * FROM chunks ORDER BY source_path, ordinal"

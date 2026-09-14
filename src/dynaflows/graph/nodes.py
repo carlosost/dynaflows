@@ -66,8 +66,30 @@ from dynaflows.graph.prompts import (
     WorkerReport,
 )
 from dynaflows.playbook.pack import pack_sections
-from dynaflows.store.catalogue import build_catalogue, unknown_paths
+from dynaflows.store.catalogue import build_catalogue, is_test_path, unknown_paths
 from dynaflows.store.sources import SourceRefusal, read_sources
+
+_MAX_RELEVANT_PATHS = 6
+
+
+def _useful_paths(paths: list[str]) -> list[str]:
+    """Trim a grounded path list to the ones worth showing a human.
+
+    The prompt asks for two to six and no test modules. A prompt is a request,
+    not a guarantee -- this project has the scar tissue -- so the rule is
+    enforced where it can be, and a run that named eleven paths including
+    `PROJECT_MEMORY.md` and three test modules is what prompted it.
+
+    Test modules go first rather than last: a test module tells you where the
+    thing under test is ASSERTED, never where it lives, so it is the least
+    useful entry in a list whose whole job is to say where to look. Order is
+    otherwise preserved -- the model put its best guess first, and re-ranking
+    it here would be this function inventing an opinion it does not have.
+    """
+    kept = [p for p in paths if not is_test_path(p)]
+    # Unless they were all tests, in which case the model was probably right
+    # about the subject and dropping everything would say less than saying so.
+    return (kept or paths)[:_MAX_RELEVANT_PATHS]
 
 
 async def enhance_prompt(
@@ -107,7 +129,7 @@ async def enhance_prompt(
     # that cannot run. The unknown ones are dropped and named at G1, so the
     # human sees what it invented rather than approving it silently.
     invented = unknown_paths(list(payload.relevant_paths), catalogue)
-    grounded = [p for p in payload.relevant_paths if p not in invented]
+    grounded = _useful_paths([p for p in payload.relevant_paths if p not in invented])
     return {
         "enhanced_prompt": payload.enhanced,
         "relevant_paths": grounded,
