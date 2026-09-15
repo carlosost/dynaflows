@@ -2432,6 +2432,51 @@ is a choice the model made; "there may be X" is an admission of uncertainty and 
 `context_was_sufficient`, not in a list a human reads as decisions taken on their behalf. Prompt-only
 for now, and listed in §7 rather than assumed fixed.
 
+**The brief has two readers and only one of them has a shell (2026-09-15).**
+
+Live run `q3` reached G2 with a clean plan — three `answer` tasks, all inside budget, a sensible
+store/repository split — and one task that **could not be executed at all**:
+
+> "Independently verify the end-to-end behavior after a playbook markdown file changes: index an
+> initial version, change the file in an external scratch copy, and determine whether consistency
+> checks, drift detection, replacement, or rebuild prevent old search results from being returned."
+
+A worker is one LLM call with packed text in and JSON out. It has no tools; there is a test named
+`test_the_worker_never_receives_a_file_tool` asserting exactly that. All three objectives carried
+the same instruction to "run focused checks in an external scratch directory", and one was built
+entirely around an experiment it had no means to perform.
+
+**A worker told to report observed outputs it cannot observe invents them**, and nothing downstream
+catches it: ADR-019 checks `quoted_lines` against the packed source and never inspects the prose. A
+fabricated command output is not a citation, so it is not checkable. That is run `w1`'s failure with
+a better excuse for it.
+
+**Cause.** `STANDING_REQUIREMENTS` was appended inside `enhance_prompt`, so the composed brief became
+`enhanced_prompt` in state — which the PLANNER reads, which is how executor policy became task
+objectives. Confirmed by reversing it: the old state value contained `scratch directory`,
+`interpreter version` and `RUNNING it`; the new one is the sharpened request alone.
+
+The brief has two consumers and they are not alike:
+
+| reader | gets | why |
+|---|---|---|
+| a coding agent, via `brief` stdout | request **+** standing requirements | it has a shell; "verify by running it" is actionable |
+| the planner and workers, via state | the request alone | they cannot run anything, and asking makes them invent |
+
+`compose_brief()` now runs at the CLI boundary rather than in the node. A test walks every gateway
+request in a full graph run and asserts no prompt or system message mentions a scratch directory or
+an interpreter version.
+
+**The same mistake, third instance, and the pattern is now clear enough to name.** That block has
+caused three problems: it took a `.git/index.lock` in the user's repository because it demanded
+execution without bounding it; it was ignored by both models when it was a paragraph asking a model
+to reproduce a constant; and now it has reached a reader who cannot act on it. Each time the fault
+was the same one — **a constant was added without asking who would read it.** The first fix moved it
+from the prompt into the program, which was right, and put it one layer too early in the pipeline.
+
+*Writing something once does not decide where it goes.* A constant needs an audience before it needs
+a home.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than

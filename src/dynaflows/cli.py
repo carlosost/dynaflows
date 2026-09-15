@@ -1385,14 +1385,19 @@ def brief(
         _fail(exc)
 
     from dynaflows.contracts.state import GateDecision  # noqa: PLC0415
+    from dynaflows.graph.prompts import compose_brief  # noqa: PLC0415
 
     gate = values.get("prompt_gate")
     rejected = gate is not None and gate.decision is GateDecision.REJECT
 
-    enhanced = values.get("enhanced_prompt") or ""
-    if not enhanced.strip():
+    sharpened = values.get("enhanced_prompt") or ""
+    if not sharpened.strip():
         _err.print("[red]The enhancer returned nothing.[/]")
         raise typer.Exit(code=2)
+    # Composed HERE, at the boundary. This output is pasted into something
+    # with a shell; the same text inside the graph reaches workers that have
+    # no tools, and telling those to run commands makes them invent output.
+    enhanced = compose_brief(sharpened)
 
     ledger = values.get("cost")
     if save:

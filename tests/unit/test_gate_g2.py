@@ -30,7 +30,7 @@ from dynaflows.graph.planner import (
     plan_hash,
     violation_of,
 )
-from dynaflows.graph.prompts import PlanDraft, PlannedTask, compose_brief
+from dynaflows.graph.prompts import PlanDraft, PlannedTask
 from dynaflows.store.source_map import build_source_map
 from tests.conftest import FakeGateway, cfg_factory, draft_with
 
@@ -150,8 +150,34 @@ async def test_the_planner_is_shown_the_brief_the_human_approved(tmp_path: Path,
     # planner picks `answer` vs `analyse` from it and used to infer it from
     # the wording, which is how "what would I have to change" became a work
     # order (ADR-024's division, one node upstream).
-    assert prompt.endswith(compose_brief("APPROVED BRIEF"))
+    assert prompt.endswith("APPROVED BRIEF")
     assert prompt.startswith("THE USER ASKED A QUESTION.")
+
+
+async def test_the_planner_is_not_handed_the_executor_s_policy(tmp_path: Path, cfg: Any) -> None:
+    """The standing requirements tell whoever acts on a brief to verify claims
+    by RUNNING them. That is addressed to a coding agent with a shell.
+
+    They used to live in `enhanced_prompt`, so they reached the planner, so
+    they reached every task objective. Live run q3 produced three tasks each
+    told to "run focused checks in an external scratch directory" -- handed to
+    a worker that is one LLM call with no tools. A worker told to report
+    outputs it cannot observe invents them, and the citation check never sees
+    prose, so nothing downstream would have caught it.
+
+    The brief has two readers and only one of them has a shell.
+    """
+    gateway = FakeGateway("APPROVED BRIEF")
+    async with open_checkpointer(tmp_path / "s.db") as saver:
+        graph = build_graph(saver)
+        await graph.ainvoke(initial_state("r", "p4", "raw"), cfg("p4", gateway))
+
+    for request in gateway.requests:
+        haystack = f"{request.prompt}\n{request.system or ''}"
+        assert "scratch directory" not in haystack, (
+            f"{request.schema.__name__ if request.schema else '?'} was told to run commands"
+        )
+        assert "interpreter version" not in haystack
 
 
 async def test_an_oversized_plan_is_re_planned_not_trimmed(tmp_path: Path, cfg: Any) -> None:

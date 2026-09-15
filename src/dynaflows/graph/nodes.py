@@ -72,7 +72,6 @@ from dynaflows.graph.prompts import (
     SynthesisDraft,
     WorkerReport,
     asks_a_question,
-    compose_brief,
 )
 from dynaflows.playbook.pack import pack_sections
 from dynaflows.store.source_map import build_source_map, is_test_path, unknown_paths
@@ -158,12 +157,24 @@ async def enhance_prompt(
     invented = unknown_paths(list(payload.relevant_paths), catalogue)
     grounded = _useful_paths([p for p in payload.relevant_paths if p not in invented])
     return {
-        # The brief handed over is two halves with two authors: the sharpened
-        # request, which the model wrote, and the standing requirements, which
-        # are constant and therefore belong in the program. Asking a model to
-        # reproduce a constant paid tokens for it and then got neither -- both
-        # live runs dropped it entirely.
-        "enhanced_prompt": compose_brief(payload.enhanced),
+        # The SHARPENED REQUEST, and nothing else. `compose_brief` appends the
+        # standing requirements at the boundary where the brief is handed to
+        # something that can act on them -- see `cli.brief`.
+        #
+        # It used to be applied here, and the requirements travelled into
+        # state, which meant into the PLANNER, which meant into every task
+        # objective. Live run q3 produced three tasks each told to "run
+        # focused checks in an external scratch directory" and one built
+        # entirely around indexing a file, changing it and re-querying --
+        # handed to a worker that is a single LLM call with no tools
+        # (`test_the_worker_never_receives_a_file_tool`). A worker told to
+        # report observed outputs it has no way to observe invents them, and
+        # the citation check cannot catch that: it verifies `quoted_lines`
+        # against the packed source and never sees the prose.
+        #
+        # The brief has two readers. One can run commands; the other cannot.
+        # Executor policy belongs only to the first.
+        "enhanced_prompt": payload.enhanced,
         "enhancer_model": result.model_id,
         "enhancer_intent": _settled_intent(state.get("raw_prompt", ""), payload.intent),
         "enhancer_intent_claimed": payload.intent,
