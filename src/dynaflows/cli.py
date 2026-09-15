@@ -276,7 +276,14 @@ def _render_gate(payload: dict[str, Any], out: Console | None = None) -> None:
     if intent:
         # Shown because it decides which capability the whole run uses, and a
         # question silently read as work produces a diff nobody asked for.
-        c.print(f"[dim]read as a {intent}[/]")
+        claimed = payload.get("intent_claimed")
+        if claimed and claimed != intent:
+            # A correction is louder than a reading. It says the model got
+            # this wrong, which is the most useful thing on the gate when it
+            # happens -- silently fixing it would hide a bad enhancer.
+            c.print(f"[yellow]read as a {intent}[/] [dim](the model said {claimed})[/]")
+        else:
+            c.print(f"[dim]read as a {intent}[/]")
     model = payload.get("model")
     if model:
         # At the gate, because it is the single best predictor of whether this

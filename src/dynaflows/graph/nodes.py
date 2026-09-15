@@ -71,6 +71,7 @@ from dynaflows.graph.prompts import (
     PlanDraft,
     SynthesisDraft,
     WorkerReport,
+    asks_a_question,
     compose_brief,
 )
 from dynaflows.playbook.pack import pack_sections
@@ -78,6 +79,24 @@ from dynaflows.store.source_map import build_source_map, is_test_path, unknown_p
 from dynaflows.store.sources import SourceRefusal, read_sources
 
 _MAX_RELEVANT_PATHS = 6
+
+
+def _settled_intent(raw_prompt: str, claimed: str) -> str:
+    """The model's reading of the request, corrected by its grammar.
+
+    A 2.6B model labelled "how does the playbook index avoid returning stale
+    results after a file changes" as `work` on the first live run. Approving
+    that would have told the planner to audit the retrieval code for defects
+    rather than explain it, at frontier-tier prices for an answer to a
+    question nobody asked.
+
+    `intent` is a field a model fills, which makes it a request. Whether a
+    sentence opens with "how does" is a fact about the sentence, so it is
+    checked. One way only -- see `asks_a_question`.
+    """
+    if claimed != "question" and asks_a_question(raw_prompt):
+        return "question"
+    return claimed
 
 
 def _useful_paths(paths: list[str]) -> list[str]:
@@ -146,7 +165,8 @@ async def enhance_prompt(
         # live runs dropped it entirely.
         "enhanced_prompt": compose_brief(payload.enhanced),
         "enhancer_model": result.model_id,
-        "enhancer_intent": payload.intent,
+        "enhancer_intent": _settled_intent(state.get("raw_prompt", ""), payload.intent),
+        "enhancer_intent_claimed": payload.intent,
         "relevant_paths": grounded,
         "invented_paths": invented,
         "enhancer_assumptions": list(payload.assumptions),
@@ -184,6 +204,7 @@ async def approve_prompt(
             "invented_paths": list(state.get("invented_paths") or []),
             "model": state.get("enhancer_model", ""),
             "intent": state.get("enhancer_intent", ""),
+            "intent_claimed": state.get("enhancer_intent_claimed", ""),
         }
     )
     outcome = _gate_outcome(answer)

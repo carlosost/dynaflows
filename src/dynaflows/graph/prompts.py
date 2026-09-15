@@ -106,6 +106,46 @@ clean. Every number states how it was obtained; a figure with no method is \
 worth less than no figure."""
 
 
+# A polite imperative, not a question. "Can you add .txt support" is a request
+# for work wearing a question mark, and treating it as interrogative would
+# make the override below fire on exactly the case it must not.
+_POLITE = re.compile(r"^\s*(?:please\b|(?:can|could|would|will)\s+you\b)", re.IGNORECASE)
+
+# Interrogative openings. The user asking to be TOLD something, in the
+# grammar they actually use.
+_INTERROGATIVE = re.compile(
+    r"^\s*(?:how|what|why|when|where|which|who|whose"
+    r"|does|do|did|is|are|was|were|can|could|would|should|will|has|have)\b",
+    re.IGNORECASE,
+)
+
+
+def asks_a_question(raw_prompt: str) -> bool:
+    """Is this request interrogative, by its grammar alone?
+
+    Deterministic, and it OVERRIDES the model when the two disagree. The
+    first live `run` asked "how does the playbook index avoid returning stale
+    results after a file changes" and a 2.6B model labelled it `work` -- which
+    would have sent the planner to audit the retrieval code for defects
+    instead of explaining it, at frontier-tier prices.
+
+    `intent` is a field the model fills, and a field a model fills is a
+    request. Whether a sentence opens with "how does" is a fact about the
+    sentence, so it is checked rather than asked. Same rule as trimming
+    `relevant_paths` and rejecting narration in code.
+
+    The override runs ONE WAY on purpose. Grammar that says "question" wins,
+    because answering when work was wanted costs a turn and working when an
+    answer was wanted costs a diff nobody asked for. Grammar that says
+    nothing leaves the model's judgement alone: "add support for .txt" is not
+    interrogative, and neither is "the login page 500s on a bad token".
+    """
+    text = raw_prompt.strip()
+    if _POLITE.match(text):
+        return False
+    return bool(_INTERROGATIVE.match(text)) or text.endswith("?")
+
+
 def compose_brief(enhanced: str) -> str:
     """The brief as it is handed over: the sharpened request, then the policy.
 
@@ -122,10 +162,29 @@ def compose_brief(enhanced: str) -> str:
 # start by looking at" and "I need to read the playbook indexing files... Let
 # me start by reading the key files". Both are role-play, neither is a brief,
 # and both passed every structural check there was.
+# Two shapes, because the first pattern here caught only one of them and the
+# very next live run produced the other.
+#
+# First person: "I'll examine X. Let me start by reading Y."
 _NARRATION = re.compile(
     r"^\s*(?:i['’]?(?:ll|m|\s+will|\s+need|\s+should|\s+am|\s+can)"
     r"|let(?:'|’)?s?\s+(?:me|us)?|we(?:['’]ll|\s+will|\s+need|\s+should)"
     r"|first,?\s+i|to\s+answer\s+this,?\s+i)\b",
+    re.IGNORECASE,
+)
+
+# Bare gerund: "Looking at the playbook index mechanism to understand how
+# stale results are avoided." No first person at all, so the pattern above
+# walked straight past it -- and it is the same failure. A participle names
+# an activity in progress; a brief names a task to be done. The difference
+# is whether the reader is being told what someone is doing or what to do.
+#
+# Only ONE clause is inspected: a brief may legitimately contain "...,
+# checking each caller" further in. This fires on the opening word, where a
+# verb belongs.
+_GERUND_OPENING = re.compile(
+    r"^\s*(?:look|examin|review|analy[sz]|investigat|explor|check|inspect|read"
+    r"|trac|stud|consider|assess|evaluat|search|start|begin)\w*ing\b",
     re.IGNORECASE,
 )
 
@@ -161,7 +220,7 @@ class EnhancedPrompt(BaseModel):
         Same rule as trimming `relevant_paths` in code rather than asking
         nicely. If you can enforce it, do not ask for it.
         """
-        if _NARRATION.match(value):
+        if _NARRATION.match(value) or _GERUND_OPENING.match(value):
             opening = " ".join(value.split()[:8])
             raise ValueError(
                 "a brief is a task, not an announcement that you are about to do it. "

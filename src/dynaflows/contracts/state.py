@@ -293,6 +293,11 @@ class WorkflowState(TypedDict, total=False):
     # turned "what would I have to change here" into "Modify the pipeline so
     # that...", a work order for a question.
     enhancer_intent: str
+    # What the MODEL said, before the grammar of the request corrected it.
+    # Kept apart from the settled value (AP-20): a model that reads "how does
+    # X work" as a work order and one that reads it correctly are different
+    # facts, and only the pair shows which you have.
+    enhancer_intent_claimed: str
     prompt_gate: GateOutcome | None
 
     plan: Plan | None
@@ -343,6 +348,7 @@ def initial_state(
         invented_paths=[],
         enhancer_model="",
         enhancer_intent="question",
+        enhancer_intent_claimed="question",
         prompt_gate=None,
         plan=None,
         plan_hash=None,

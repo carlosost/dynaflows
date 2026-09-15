@@ -10,11 +10,12 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from dynaflows.graph.nodes import _MAX_RELEVANT_PATHS, _useful_paths
+from dynaflows.graph.nodes import _MAX_RELEVANT_PATHS, _settled_intent, _useful_paths
 from dynaflows.graph.prompts import (
     ENHANCER_SYSTEM,
     STANDING_REQUIREMENTS,
     EnhancedPrompt,
+    asks_a_question,
     compose_brief,
 )
 from dynaflows.store import is_test_path
@@ -195,3 +196,80 @@ def test_the_planner_is_told_which_it_is() -> None:
 
     assert "QUESTION or asked for" in PLANNER_SYSTEM
     assert "is a question about a change" in PLANNER_SYSTEM
+
+
+@pytest.mark.parametrize(
+    "narration",
+    [
+        "Looking at the playbook index mechanism to understand how stale results are avoided.",
+        "Examining the retrieval stack for the answer.",
+        "Reviewing how drift detection works in this repository.",
+        "Analyzing the chunker to determine what would change.",
+        "Starting with the store module.",
+    ],
+)
+def test_a_gerund_opening_is_rejected_too(narration: str) -> None:
+    """The first pattern caught first-person narration and the very next live
+    run produced the other shape: "Looking at the playbook index mechanism..."
+    -- no first person anywhere, and the same failure. A participle names an
+    activity in progress; a brief names a task to be done."""
+    with pytest.raises(ValidationError):
+        EnhancedPrompt(enhanced=narration)
+
+
+@pytest.mark.parametrize(
+    "brief",
+    [
+        "Check whether the FTS index agrees with the chunk table, then report.",
+        "Read the retrieval layer and explain the anchor lookup.",
+        "Trace the drift check from store.drift into index_corpus.",
+        "Review the chunker and name every Markdown assumption.",
+    ],
+)
+def test_the_imperative_of_those_same_verbs_is_accepted(brief: str) -> None:
+    """The half that matters more. "Check" and "Read" are how a brief
+    legitimately opens; only "Checking" and "Reading" are the failure. A gate
+    that fires on ordinary work is a gate people disable (playbook 5.2)."""
+    assert EnhancedPrompt(enhanced=brief).enhanced == brief
+
+
+@pytest.mark.parametrize(
+    ("raw", "interrogative"),
+    [
+        ("how does the playbook index avoid returning stale results", True),
+        ("what would I have to change here to index something other than markdown", True),
+        ("why does resume analyse the wrong tree", True),
+        ("can I reuse anything here for a RAG?", True),
+        ("would it scale to a few thousand documents?", True),
+        ("add support for .txt files", False),
+        ("fix the login bug", False),
+        ("refactor the gateway to use a protocol", False),
+        ("the login page 500s on a bad token", False),
+        # Polite imperatives. Interrogative grammar, a request for work.
+        ("can you add support for .txt files", False),
+        ("could you fix the failing test", False),
+        ("please fix the failing test", False),
+    ],
+)
+def test_the_question_form_is_decided_by_grammar(raw: str, interrogative: bool) -> None:
+    assert asks_a_question(raw) is interrogative
+
+
+def test_a_question_the_model_called_work_is_corrected() -> None:
+    """The first live `run`. A 2.6B model read "how does the playbook index
+    avoid returning stale results after a file changes" as `work`; approving
+    that would have sent the planner to audit the retrieval code for defects
+    instead of explaining it, at frontier prices."""
+    settled = _settled_intent("how does the playbook index avoid stale results", "work")
+
+    assert settled == "question"
+
+
+def test_the_override_runs_one_way_only() -> None:
+    """Grammar that says nothing leaves the model's judgement alone. "Add
+    support for .txt" is not interrogative and neither is a bug report, and
+    forcing those to `question` would break the case the field exists for."""
+    assert _settled_intent("add support for .txt files", "work") == "work"
+    assert _settled_intent("fix the login bug", "work") == "work"
+    # And it never drags a question towards work.
+    assert _settled_intent("how does retrieval work", "question") == "question"

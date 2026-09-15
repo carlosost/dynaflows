@@ -2382,11 +2382,66 @@ silently inflate every score from then on.
 `--capability answer` to dispatch these four questions through the real worker is the next step, and
 until it exists this fixture is a scorer with no live caller.
 
+**The first live `run` of `answer` was rejected at G1, and the gate is why (2026-09-15).**
+
+Asked *"how does the playbook index avoid returning stale results after a file changes"* — the most
+interrogative phrasing available — the enhancer returned:
+
+- `read as a work`. A question labelled a work order. Approving it would have told the planner
+  `THE USER ASKED A WORK`, which selects `analyse`, which audits the retrieval code for defects
+  instead of explaining it — at frontier-tier prices, for an answer to a question nobody asked.
+- A brief that was narration again: *"Looking at the playbook index mechanism to understand how
+  stale results are avoided."* No first person anywhere, so the narration validator walked past it.
+- Two "assumptions" that were hedges: *"There **may be** a refresh or invalidation strategy."* That
+  is the model declaring it does not know, not a choice it made.
+
+Written by `liquid/lfm-2.5-2.6b:free`, chain index 3 — the head and the two models after it failed,
+and the smallest model in the chain answered.
+
+**Nothing was spent, and every added instrument did its job.** The model line named the author, the
+intent line exposed the misreading, the paths were correct and minimal. The run was rejected by
+reading three lines. That is the gate earning its place, and it is the strongest evidence so far for
+showing the model and the intent at the point of decision rather than in a log.
+
+**Two fixes, both the same rule: if you can enforce it, do not ask for it.**
+
+*The narration detector was too narrow.* It matched `I`, `I'll`, `Let me`, `We'll` — first person
+only. A bare gerund is the same failure with no pronoun in it. `_GERUND_OPENING` now matches a
+participle in the opening word, and only there: a brief may legitimately say "…, checking each
+caller" further in. The imperatives of the same verbs stay valid — **"Check the index" passes,
+"Checking the index" does not** — because a gate that fires on ordinary work is a gate people
+disable (§5.2, Pattern 5).
+
+*`intent` was a field a model fills, which makes it a request.* Whether a sentence opens with "how
+does" is a fact about the sentence, so it is now checked. `asks_a_question()` is deterministic, and
+`_settled_intent()` lets it **override the model, one way only**: grammar saying "question" wins,
+grammar saying nothing leaves the model's judgement alone. The asymmetry is the same one behind the
+`question` default — answering when work was wanted costs a turn, working when an answer was wanted
+costs a diff nobody asked for.
+
+Polite imperatives are the trap this had to avoid and does: *"can you add .txt support"* is
+interrogative grammar and a request for work, and forcing it to `question` would break the case the
+field exists for. `"can I reuse anything here"` → question; `"can you add support"` → work.
+
+The correction is shown at the gate in yellow, with what the model claimed beside it, and both
+values are in state. **A corrected intent and a natively correct one are different facts** (AP-20),
+and silently fixing the first would hide a bad enhancer behind a good outcome.
+
+**Still open from this run:** the "assumptions" were hedges, and nothing detects that. An assumption
+is a choice the model made; "there may be X" is an admission of uncertainty and belongs in
+`context_was_sufficient`, not in a list a human reads as decisions taken on their behalf. Prompt-only
+for now, and listed in §7 rather than assumed fixed.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
 one that names its holes.
 
+- **A hedge is accepted as an assumption.** The enhancer's `assumptions` list is what a human reads
+  as decisions taken on their behalf. The first live `run` filled it with "there **may be** a
+  refresh or invalidation strategy" — an admission of uncertainty, which belongs in
+  `context_was_sufficient`. Nothing detects the difference, and unlike narration and intent this one
+  has no mechanical test yet.
 - **`answer` is measurable but not yet measured.** The fixture and scorer exist
   (`token_bucket.py`); `calibrate` still runs the `analyse` path only, so nothing dispatches those
   four questions through a real worker. A scorer with no live caller is AP-11, and the number it
