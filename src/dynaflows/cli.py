@@ -13,6 +13,7 @@ from typing import Annotated, Any
 import typer
 from langgraph.types import Command
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 
@@ -393,7 +394,13 @@ def _ask(c: Console, question: str, default: str) -> str:
     something else there is wrong at any size, and the size is why it went
     unnoticed. `input()` with no argument prompts nowhere.
     """
-    c.print(f"\n{question} [dim]\\[{default}][/]: ", end="")
+    # escape(): Rich reads square brackets as markup tags, so "[a]pprove
+    # [e]dit [r]eject" rendered as "pprove dit eject" -- it swallowed the
+    # three letters that tell the user what to type. Introduced by replacing
+    # `typer.prompt` to stop the one-byte stdout leak: that function printed
+    # plain text and this one does not, and taking over a library call means
+    # taking over everything it was doing, not only the part being fixed.
+    c.print(f"\n{escape(question)} [dim]\\[{default}][/]: ", end="")
     try:
         answer = input().strip().lower()
     except (EOFError, KeyboardInterrupt) as exc:

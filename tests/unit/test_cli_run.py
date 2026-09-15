@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 import typer
+from rich.console import Console
 from typer.testing import CliRunner
 
 from dynaflows.cli import app
@@ -545,3 +546,28 @@ def test_reusing_a_thread_for_the_same_prompt_is_a_revisit(isolated: FakeGateway
 
     assert again.exit_code == 0
     assert again.stdout.strip()
+
+
+def test_the_gate_question_survives_rich_markup(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ "[a]pprove [e]dit [r]eject" rendered as "pprove dit eject".
+
+    Rich reads square brackets as markup tags and swallowed the three letters
+    that tell the user which key to press. Introduced by replacing
+    `typer.prompt` to stop a one-byte stdout leak -- that function printed
+    plain text, this one does not, and taking over a library call means
+    taking over everything it was doing rather than only the part being
+    fixed. Second regression from the same replacement.
+    """
+    from dynaflows.cli import _ask
+
+    monkeypatch.setattr("builtins.input", lambda: "a")
+    err = Console(stderr=True, force_terminal=False, width=100)
+
+    _ask(err, "[a]pprove  [e]dit  [r]eject", default="a")
+
+    printed = capsys.readouterr().err
+    assert "[a]pprove" in printed
+    assert "[e]dit" in printed
+    assert "[r]eject" in printed
