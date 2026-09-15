@@ -42,6 +42,7 @@ from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 from dynaflows.contracts.tiers import Tier
 from dynaflows.gateway.breaker import CircuitBreaker
 from dynaflows.gateway.cache import CacheBackend, NullCache
+from dynaflows.gateway.invoker import affordable_ceiling
 from dynaflows.gateway.registry import ModelRegistry
 
 Invoker = Callable[[str, CallRequest], Awaitable[RawResponse]]
@@ -200,21 +201,50 @@ class GatewayClient:
                 skipped.append(model_id)
                 continue
 
+            trimmed = False
             try:
                 response, attempts = await self._attempt_model(model_id, request)
             except DynaflowsError as exc:
                 if exc.envelope.code in _FATAL:
                     raise
-                # Counted here, where the failure is. This branch used to
-                # `continue` without touching the ledger, so three failed
-                # provider requests followed by one success reported "1
-                # call(s)" -- real requests, real latency, real rate-limit
-                # budget, invisible.
-                self.ledger = _bump(self.ledger, "calls_attempted")
-                last = exc
-                if exc.envelope.code in _RETRYABLE:
-                    self.breaker.record_failure(model_id)
-                continue
+                # A 402 is a RESERVATION ceiling, not an empty account.
+                # OpenRouter reserves `max_tokens` worth of balance BEFORE the
+                # call and states what the balance can cover -- "You requested
+                # up to 4096 tokens, but can only afford 2432" -- and the same
+                # request at that number goes through. Read the provider's own
+                # figure rather than guess at one: the rule that fixed the cost
+                # ledger, applied in the other direction.
+                #
+                # Once, on this model, and never below MIN_USEFUL_TOKENS. A
+                # plan written inside a few hundred tokens is a truncated plan
+                # that looks complete, which is worse than stopping and saying
+                # why.
+                ceiling = (
+                    affordable_ceiling(exc.envelope.message)
+                    if exc.envelope.code is ErrorCode.INSUFFICIENT_CREDIT
+                    else None
+                )
+                retried: tuple[RawResponse, int] | None = None
+                if ceiling is not None:
+                    try:
+                        retried = await self._attempt_model(
+                            model_id, dc_replace(request, max_tokens=ceiling)
+                        )
+                    except DynaflowsError as retry_exc:
+                        exc = retry_exc
+                if retried is None:
+                    # Counted here, where the failure is. This branch used to
+                    # `continue` without touching the ledger, so three failed
+                    # provider requests followed by one success reported "1
+                    # call(s)" -- real requests, real latency, real rate-limit
+                    # budget, invisible.
+                    self.ledger = _bump(self.ledger, "calls_attempted")
+                    last = exc
+                    if exc.envelope.code in _RETRYABLE:
+                        self.breaker.record_failure(model_id)
+                    continue
+                response, attempts = retried
+                trimmed = True
 
             cost = self._cost_of(model_id, response)
             try:
@@ -258,6 +288,8 @@ class GatewayClient:
             )
             result = self._result(request, model_id, response, depth, attempts, cost, payload)
             self.ledger = self.ledger.record(result)
+            if trimmed:
+                self.ledger = _bump(self.ledger, "calls_trimmed")
             return result
 
         if skipped:

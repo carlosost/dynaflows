@@ -532,3 +532,82 @@ async def test_a_failed_chain_position_is_counted(registry) -> None:  # noqa: AN
     assert result.model_id == "cobalt/three"
     assert gateway.ledger.calls_made == 1, "one call produced an answer"
     assert gateway.ledger.calls_attempted == 2, "and two produced nothing"
+
+
+async def test_a_402_naming_an_affordable_ceiling_is_retried_at_it(registry) -> None:  # noqa: ANN001
+    """A 402 is a RESERVATION ceiling, not an empty account.
+
+    OpenRouter reserves `max_tokens` worth of balance BEFORE the call and
+    says what the balance can cover. The live message was:
+
+        You requested up to 4096 tokens, but can only afford 2432
+
+    The identical request at 2432 goes through. The error code's own comment
+    used to justify not retrying -- "a request you cannot afford costs the
+    same on every attempt" -- and that is false when the price is a function
+    of a number we choose.
+    """
+    from dynaflows.contracts.errors import DynaflowsError, ErrorCode
+
+    seen: list[int | None] = []
+
+    async def broke_once(model_id: str, request: CallRequest) -> RawResponse:
+        seen.append(request.max_tokens)
+        if len(seen) == 1:
+            raise DynaflowsError.of(
+                ErrorCode.INSUFFICIENT_CREDIT,
+                f"{model_id}: Error code: 402 - This request requires more credits, or fewer"
+                " max_tokens. You requested up to 4096 tokens, but can only afford 2432.",
+            )
+        return RawResponse(text='{"value":"ok"}')
+
+    gateway = client(registry, broke_once)
+
+    result = await gateway.call(REQUEST)
+
+    assert seen == [4096, 2432], "the retry used the provider's own figure"
+    assert result.model_id == "acme/one", "and stayed on the same model"
+    assert gateway.ledger.calls_trimmed == 1, "a shorter allowance is a fact the run should carry"
+
+
+async def test_a_balance_too_small_to_use_is_not_retried(registry) -> None:  # noqa: ANN001
+    """The floor. A planner given a few hundred tokens emits a truncated plan
+    that looks complete, which is worse than a run that stopped and said
+    why -- so below MIN_USEFUL_TOKENS this behaves as it did before: fall
+    through to the next model, and fail honestly when there is none."""
+    from dynaflows.contracts.errors import DynaflowsError, ErrorCode
+
+    calls: list[int | None] = []
+
+    async def nearly_empty(model_id: str, request: CallRequest) -> RawResponse:
+        calls.append(request.max_tokens)
+        raise DynaflowsError.of(
+            ErrorCode.INSUFFICIENT_CREDIT,
+            "You requested up to 4096 tokens, but can only afford 12.",
+        )
+
+    gateway = client(registry, nearly_empty)
+
+    with pytest.raises(DynaflowsError):
+        await gateway.call(REQUEST)
+
+    assert calls == [4096, 4096, 4096], "one attempt per model, none retried smaller"
+    assert gateway.ledger.calls_trimmed == 0
+
+
+async def test_a_402_with_no_stated_ceiling_falls_through(registry) -> None:  # noqa: ANN001
+    """Every other kind of 402 -- a genuinely empty account included. The
+    parser returning None is the honest answer, and the behaviour it falls
+    back to is the one this replaced."""
+    from dynaflows.contracts.errors import DynaflowsError, ErrorCode
+
+    async def no_hint(model_id: str, request: CallRequest) -> RawResponse:
+        raise DynaflowsError.of(ErrorCode.INSUFFICIENT_CREDIT, "Payment required.")
+
+    gateway = client(registry, no_hint)
+
+    with pytest.raises(DynaflowsError) as excinfo:
+        await gateway.call(REQUEST)
+
+    assert excinfo.value.envelope.code is ErrorCode.INSUFFICIENT_CREDIT
+    assert gateway.ledger.calls_trimmed == 0

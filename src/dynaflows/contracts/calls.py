@@ -127,6 +127,12 @@ class CostLedger:
     # different facts and only the pair says which model actually answered
     # (AP-20).
     calls_attempted: int = 0
+    # Calls that only went through after the output allowance was cut to what
+    # the provider said the balance could reserve. Its own counter because a
+    # plan written under a smaller ceiling may be a SHORTER plan, and a run
+    # that quietly produced fewer tasks than it wanted is a fact the reader
+    # needs (AP-20).
+    calls_trimmed: int = 0
     calls_cached: int = 0
     # AP-20 again: a call that failed and a call that was never attempted are
     # different facts and do not share a counter.

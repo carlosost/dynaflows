@@ -2584,6 +2584,48 @@ attributed, and two counters that were lying. **Four gates were rejected before 
 them found anything; the run that executed found three defects in one pass.** Reading a plan tells
 you what a system intends. Only running it tells you what it does.
 
+**A 402 is a reservation ceiling, and the code reasoned its way into ignoring the remedy (2026-09-15).**
+
+Run `q5` halted at the planner:
+
+> `This request requires more credits, or fewer max_tokens. You requested up to 4096 tokens, but can
+> only afford 2432.`
+
+OpenRouter reserves `max_tokens` worth of balance **before** the call. The account was not empty and
+the model was not unavailable — **the identical request at 2,432 tokens succeeds.** The provider
+states the affordable ceiling in the message, and dynaflows printed the raw `APIStatusError` and gave
+up.
+
+`ErrorCode.INSUFFICIENT_CREDIT` carried its own justification for that:
+
+> *A request you cannot afford costs the same on every attempt, so retrying is three wasted calls.*
+
+**The reasoning is false whenever the price is a function of a number we choose**, and here it is
+exactly that. The comment was written from the documented meaning of 402 and never met one; it is a
+worked example of the gap AP-19 habit 3 names between a mapping written from status codes and a
+mapping that has seen a response.
+
+The gateway now parses the ceiling and retries **once, on the same model, at the provider's own
+figure** — the same rule that fixed the cost ledger, which stopped computing a price and started
+reading the one the provider sent. A floor guards it: below `MIN_USEFUL_TOKENS` the retry is skipped,
+because a planner writing inside a few hundred tokens emits a truncated plan that looks complete, and
+that is worse than a run that stopped and said why. Every other 402 — a genuinely empty account
+included — parses to `None` and behaves as before.
+
+`calls_trimmed` counts it, and the cost line says *"ran with a REDUCED output allowance to fit the
+remaining balance; the result may be shorter than intended"*. That is not bookkeeping: **a plan
+written under a smaller ceiling may be a shorter plan**, and a run that quietly produced fewer tasks
+than it wanted is the shape this project has shipped as a silent zero four times.
+
+Two things this exposes and does not fix:
+
+- **The frontier chain is one model deep.** `openai/gpt-5.6-luna-pro` is the only planner, so a
+  single 402 ends every run. ADR-006 leaves that tier deliberately unpopulated — "uncomment one or
+  two deliberately" — and the consequence is that the most expensive call in the pipeline has no
+  alternative.
+- **Gateway errors reach the user as a raw provider dump.** The 402's own `remedy_hint` field says
+  what to do and is never read; what the user sees is the whole JSON body on one line.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
@@ -2594,6 +2636,10 @@ one that names its holes.
   refresh or invalidation strategy" — an admission of uncertainty, which belongs in
   `context_was_sufficient`. Nothing detects the difference, and unlike narration and intent this one
   has no mechanical test yet.
+- **The frontier chain is one model deep**, so a single provider failure ends every run at the
+  planner. ADR-006 leaves the tier deliberately unpopulated; the cost of that is now measured.
+- **Gateway errors reach the user as a raw provider dump.** The 402 carried a `remedy_hint` field
+  naming the fix, and the user saw the whole JSON body instead.
 - **`answer` is measurable but not yet measured.** The fixture and scorer exist
   (`token_bucket.py`); `calibrate` still runs the `analyse` path only, so nothing dispatches those
   four questions through a real worker. A scorer with no live caller is AP-11, and the number it

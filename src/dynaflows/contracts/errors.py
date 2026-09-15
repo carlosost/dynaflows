@@ -19,8 +19,23 @@ class ErrorCode(StrEnum):
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
     # 402. Distinct from MODEL_UNAVAILABLE on purpose: a model that is down
-    # may come back, so retrying is reasonable. A request you cannot afford
-    # costs the same on every attempt, so retrying is three wasted calls.
+    # may come back, so retrying is reasonable.
+    #
+    # This used to say "a request you cannot afford costs the same on every
+    # attempt, so retrying is three wasted calls", and that reasoning was
+    # wrong. OpenRouter reserves `max_tokens` worth of balance BEFORE the
+    # call, so the price of the attempt is a function of a number we choose:
+    #
+    #   "You requested up to 4096 tokens, but can only afford 2432"
+    #
+    # The identical request at 2432 succeeds. The provider even states the
+    # affordable ceiling, and the gateway reads it and retries once at that
+    # figure -- the same rule as taking the provider's own cost number
+    # instead of computing one.
+    #
+    # The name is kept and is imperfect: this is a reservation ceiling, not
+    # an empty account, and a balance too small to be worth using is the only
+    # case where it means what it says.
     INSUFFICIENT_CREDIT = "INSUFFICIENT_CREDIT"
     # A reasoning model spent the whole output allowance thinking and had
     # nothing left for the answer. Met live: a model burned 2,297 reasoning

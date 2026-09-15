@@ -7,6 +7,7 @@ the ladder be tested with a fake invoker and no HTTP at all.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -28,6 +29,34 @@ _STATUS_TO_CODE = {
     503: ErrorCode.MODEL_UNAVAILABLE,
     504: ErrorCode.TIMEOUT,
 }
+
+
+# "You requested up to 4096 tokens, but can only afford 2432."
+#
+# The provider states the ceiling its own reservation will allow, which makes
+# a 402 recoverable rather than terminal. Parsed from the message because
+# that is where OpenRouter puts it; a wording change makes this return None
+# and the caller falls back to failing, which is the behaviour this replaced.
+_AFFORDABLE = re.compile(r"can only afford\s+(\d+)", re.IGNORECASE)
+
+# Below this an output allowance is not worth spending a call on: a planner
+# given a few hundred tokens emits a truncated plan, and a truncated plan that
+# looks complete is worse than a run that stopped and said why.
+# PLACEHOLDER (playbook 4.5) -- no measurement sets it.
+MIN_USEFUL_TOKENS = 512
+
+
+def affordable_ceiling(message: str) -> int | None:
+    """The output allowance the provider says the balance can reserve.
+
+    None when the message does not state one, which is the honest answer for
+    every other kind of 402 -- a genuinely empty account included.
+    """
+    match = _AFFORDABLE.search(message)
+    if not match:
+        return None
+    ceiling = int(match.group(1))
+    return ceiling if ceiling >= MIN_USEFUL_TOKENS else None
 
 
 def classify(exc: BaseException) -> ErrorCode:

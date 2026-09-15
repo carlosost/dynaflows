@@ -534,6 +534,15 @@ def _money(ledger: Any) -> str:
         # and it mattered: brief quality tracked WHICH model answered, and
         # nothing said that three had already failed.
         line += f" after {ledger.calls_attempted} that returned nothing usable"
+    if ledger.calls_trimmed:
+        # Not bookkeeping. A planner that had to write inside a smaller output
+        # allowance may have written a SHORTER plan, and a run that quietly
+        # produced fewer tasks than it wanted is the kind of thing this
+        # project has shipped four times as a silent zero.
+        line += (
+            f" -- {ledger.calls_trimmed} call(s) ran with a REDUCED output allowance"
+            " to fit the remaining balance; the result may be shorter than intended"
+        )
     if ledger.calls_unpriced:
         line += (
             f" -- {ledger.calls_unpriced} unpriced, so the total is a LOWER BOUND."
