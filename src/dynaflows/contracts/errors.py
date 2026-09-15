@@ -37,11 +37,26 @@ class ErrorCode(StrEnum):
     # an empty account, and a balance too small to be worth using is the only
     # case where it means what it says.
     INSUFFICIENT_CREDIT = "INSUFFICIENT_CREDIT"
-    # A reasoning model spent the whole output allowance thinking and had
-    # nothing left for the answer. Met live: a model burned 2,297 reasoning
-    # tokens against a 2,048 cap and returned no content at all. Retrying the
-    # same model with the same cap cannot help, so this is not retryable -- but
-    # the next model in the chain may well be fine, so it is not fatal either.
+    # A model spent the whole output allowance and had nothing left to close
+    # its answer with. Met live twice: a model burned 2,297 reasoning tokens
+    # against a 2,048 cap, and later both workers of run `q5` stopped at
+    # exactly `completion_tokens=4096` with unparseable JSON.
+    #
+    # "Retrying the same model with the same cap cannot help" is true and
+    # stops one step short of the remedy. The provider states the binding
+    # constraint -- the completion count IS the cap -- so the answer is to
+    # retry that model with a DIFFERENT cap.
+    #
+    # Exactly the mirror of INSUFFICIENT_CREDIT above, which the gateway
+    # learned to read an hour earlier:
+    #
+    #   402         "you can only afford 2432"     -> retry smaller
+    #   truncation  "you produced exactly 4096"    -> retry larger
+    #
+    # Same class of error, same provider signal, opposite direction, and the
+    # second one sat unread in the same `except` block while the first was
+    # being fixed. **A remedy found for one error is worth testing against
+    # its neighbours.**
     OUTPUT_TRUNCATED = "OUTPUT_TRUNCATED"
     AUTH_FAILED = "AUTH_FAILED"
     CONFIG_INVALID = "CONFIG_INVALID"

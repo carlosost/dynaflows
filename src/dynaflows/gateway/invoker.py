@@ -46,6 +46,29 @@ _AFFORDABLE = re.compile(r"can only afford\s+(\d+)", re.IGNORECASE)
 MIN_USEFUL_TOKENS = 512
 
 
+# No model may be asked for more output than this however often it truncates.
+# A worker that cannot finish inside it is asking the wrong question, and an
+# unbounded doubling turns one expensive mistake into several.
+# PLACEHOLDER (playbook 4.5) -- no measurement sets it.
+MAX_OUTPUT_TOKENS = 16_384
+
+
+def widened_ceiling(current: int | None) -> int | None:
+    """The allowance to retry a truncated call with, or None to give up.
+
+    Doubling rather than reading a number back, because the provider reports
+    the cap it HIT, not the size the answer needed -- which nobody knows,
+    including the model. One doubling is the cheapest probe that distinguishes
+    "the schema outgrew this default" from "this model cannot finish".
+
+    `None` when already at the ceiling, so the caller falls through to the
+    next model exactly as it did before.
+    """
+    if current is None or current >= MAX_OUTPUT_TOKENS:
+        return None
+    return min(current * 2, MAX_OUTPUT_TOKENS)
+
+
 def affordable_ceiling(message: str) -> int | None:
     """The output allowance the provider says the balance can reserve.
 

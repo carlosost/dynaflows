@@ -42,7 +42,7 @@ from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 from dynaflows.contracts.tiers import Tier
 from dynaflows.gateway.breaker import CircuitBreaker
 from dynaflows.gateway.cache import CacheBackend, NullCache
-from dynaflows.gateway.invoker import affordable_ceiling
+from dynaflows.gateway.invoker import affordable_ceiling, widened_ceiling
 from dynaflows.gateway.registry import ModelRegistry
 
 Invoker = Callable[[str, CallRequest], Awaitable[RawResponse]]
@@ -202,6 +202,7 @@ class GatewayClient:
                 continue
 
             trimmed = False
+            widened_success = False
             try:
                 response, attempts = await self._attempt_model(model_id, request)
             except DynaflowsError as exc:
@@ -219,11 +220,19 @@ class GatewayClient:
                 # plan written inside a few hundred tokens is a truncated plan
                 # that looks complete, which is worse than stopping and saying
                 # why.
-                ceiling = (
-                    affordable_ceiling(exc.envelope.message)
-                    if exc.envelope.code is ErrorCode.INSUFFICIENT_CREDIT
-                    else None
-                )
+                # Two errors, one shape: the provider names the binding
+                # constraint and the remedy is a different `max_tokens`.
+                # INSUFFICIENT_CREDIT says the balance is the constraint and
+                # wants a smaller number; OUTPUT_TRUNCATED says the cap is,
+                # and wants a larger one. They were written months apart and
+                # only the first was being read.
+                ceiling: int | None = None
+                widened = False
+                if exc.envelope.code is ErrorCode.INSUFFICIENT_CREDIT:
+                    ceiling = affordable_ceiling(exc.envelope.message)
+                elif exc.envelope.code is ErrorCode.OUTPUT_TRUNCATED:
+                    ceiling = widened_ceiling(request.max_tokens)
+                    widened = ceiling is not None
                 retried: tuple[RawResponse, int] | None = None
                 if ceiling is not None:
                     try:
@@ -244,7 +253,8 @@ class GatewayClient:
                         self.breaker.record_failure(model_id)
                     continue
                 response, attempts = retried
-                trimmed = True
+                trimmed = not widened
+                widened_success = widened
 
             cost = self._cost_of(model_id, response)
             try:
@@ -290,6 +300,8 @@ class GatewayClient:
             self.ledger = self.ledger.record(result)
             if trimmed:
                 self.ledger = _bump(self.ledger, "calls_trimmed")
+            if widened_success:
+                self.ledger = _bump(self.ledger, "calls_widened")
             return result
 
         if skipped:

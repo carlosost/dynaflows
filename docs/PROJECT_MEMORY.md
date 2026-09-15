@@ -2626,6 +2626,55 @@ Two things this exposes and does not fix:
 - **Gateway errors reach the user as a raw provider dump.** The 402's own `remedy_hint` field says
   what to do and is never read; what the user sees is the whole JSON body on one line.
 
+**The mirror of the 402, unread in the same `except` block (2026-09-15).**
+
+Run `q5` planned cleanly and then lost both workers:
+
+```
+OUTPUT_TRUNCATED  openai/gpt-oss-20b
+  completion_tokens=4096   prompt_tokens=13102   reasoning_tokens=942
+  completion_tokens=4096   prompt_tokens=16448   reasoning_tokens=535
+```
+
+Exactly the cap, twice, with unparseable JSON. Not a model failing — **the `answer` schema asking
+for more than 4,096 tokens can hold.** `AnswerReport` carries prose plus N observations, and every
+observation quotes source verbatim; the task that triggered it asked for five decision paths *with
+citations*, which was the best-aimed objective of the day and the most likely to overrun. Reasoning
+tokens took 942 and 535 before any answer was written.
+
+`ErrorCode.OUTPUT_TRUNCATED`'s comment said *"retrying the same model with the same cap cannot
+help"* — true, and one step short of the remedy. **The provider states the binding constraint: the
+completion count IS the cap.** So the answer is to retry that model with a different cap.
+
+Which is exactly what had been built an hour earlier, for the error immediately above it:
+
+| | provider says | remedy |
+|---|---|---|
+| `INSUFFICIENT_CREDIT` | "you can only afford 2432" | retry **smaller** |
+| `OUTPUT_TRUNCATED` | "you produced exactly 4096" | retry **larger** |
+
+Same class, same signal, opposite direction, two adjacent enum members — and the second sat unread in
+the same `except` block while the first was being fixed. ***A remedy found for one error is worth
+testing against its neighbours.*** This is the second time in one day that fixing a thing did not
+send anyone looking for its siblings; `_merge_delta` was the first, and `merge_cost` had been fixed
+the same way months before.
+
+`widened_ceiling()` doubles once, bounded by `MAX_OUTPUT_TOKENS`. **Doubling rather than reading a
+number back, because the provider reports the cap it HIT, not the size the answer needed** — which
+nobody knows, the model included. One doubling is the cheapest probe that separates "the schema
+outgrew this default" from "this model cannot finish"; at the ceiling it falls through to the next
+model exactly as before.
+
+`calls_widened` counts it, apart from `calls_trimmed`: one means the balance squeezed the answer and
+the other means the schema outgrew the default, **and they call for opposite adjustments**. Reporting
+them as one number would say nothing.
+
+**What the run proved, separately from the fix.** Every counter repaired earlier in the day reported
+honestly under a real failure: `2 call(s) after 2 that returned nothing usable`, `fallbacks=1`,
+`0 ok, 2 failed`, `passed=False`. A day earlier the same run would have shown `fallbacks=0` and given
+no hint that the chain had fallen through to an unmeasured model. The counters are now load-bearing
+rather than decorative, which is what let this failure be diagnosed from one line of output.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than

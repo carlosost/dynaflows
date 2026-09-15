@@ -543,6 +543,14 @@ def _money(ledger: Any) -> str:
             f" -- {ledger.calls_trimmed} call(s) ran with a REDUCED output allowance"
             " to fit the remaining balance; the result may be shorter than intended"
         )
+    if ledger.calls_widened:
+        # The schema outgrew the default allowance. The opposite adjustment to
+        # `calls_trimmed` above, and saying which one happened is the whole
+        # point of counting them apart.
+        line += (
+            f" -- {ledger.calls_widened} call(s) needed a LARGER output allowance than the"
+            " default to finish"
+        )
     if ledger.calls_unpriced:
         line += (
             f" -- {ledger.calls_unpriced} unpriced, so the total is a LOWER BOUND."

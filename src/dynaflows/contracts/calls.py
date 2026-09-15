@@ -133,6 +133,12 @@ class CostLedger:
     # that quietly produced fewer tasks than it wanted is a fact the reader
     # needs (AP-20).
     calls_trimmed: int = 0
+    # Calls that only went through after the output allowance was RAISED,
+    # because the first attempt stopped exactly at the cap with nothing
+    # parseable. Counted apart from `calls_trimmed` -- one means the balance
+    # squeezed the answer, the other means the schema outgrew the default,
+    # and they call for opposite adjustments.
+    calls_widened: int = 0
     calls_cached: int = 0
     # AP-20 again: a call that failed and a call that was never attempted are
     # different facts and do not share a counter.

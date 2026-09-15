@@ -8,6 +8,7 @@ suite someone eventually skips.
 
 from __future__ import annotations
 
+from dataclasses import replace as dc_replace
 from pathlib import Path
 
 import pytest
@@ -611,3 +612,68 @@ async def test_a_402_with_no_stated_ceiling_falls_through(registry) -> None:  # 
 
     assert excinfo.value.envelope.code is ErrorCode.INSUFFICIENT_CREDIT
     assert gateway.ledger.calls_trimmed == 0
+
+
+async def test_a_truncated_answer_is_retried_with_a_bigger_allowance(registry) -> None:  # noqa: ANN001
+    """Run q5: both workers stopped at exactly `completion_tokens=4096` with
+    unparseable JSON, and the run produced nothing.
+
+    The error code's comment said "retrying the same model with the same cap
+    cannot help" -- true, and one step short. The provider names the binding
+    constraint: the completion count IS the cap. The remedy is a different
+    cap, which is the exact mirror of the 402 fix, in the same `except` block,
+    unread while that one was being written.
+    """
+    from dynaflows.contracts.errors import DynaflowsError, ErrorCode
+
+    seen: list[int | None] = []
+
+    async def ran_out_once(model_id: str, request: CallRequest) -> RawResponse:
+        seen.append(request.max_tokens)
+        if len(seen) == 1:
+            raise DynaflowsError.of(
+                ErrorCode.OUTPUT_TRUNCATED,
+                f"{model_id}: LengthFinishReasonError: length limit reached"
+                " - completion_tokens=4096",
+            )
+        return RawResponse(text='{"value":"ok"}')
+
+    gateway = client(registry, ran_out_once)
+
+    result = await gateway.call(dc_replace(REQUEST, max_tokens=4096))
+
+    assert seen == [4096, 8192], "one doubling, on the same model"
+    assert result.model_id == "acme/one"
+    assert gateway.ledger.calls_widened == 1
+    assert gateway.ledger.calls_trimmed == 0, "widening and trimming are different facts"
+
+
+async def test_the_allowance_is_not_doubled_without_end(registry) -> None:  # noqa: ANN001
+    """A worker that cannot finish inside the ceiling is asking the wrong
+    question, and unbounded doubling turns one expensive mistake into
+    several. At the ceiling it falls through to the next model, as before."""
+    from dynaflows.contracts.errors import DynaflowsError, ErrorCode
+    from dynaflows.gateway.invoker import MAX_OUTPUT_TOKENS
+
+    seen: list[int | None] = []
+
+    async def always_truncates(model_id: str, request: CallRequest) -> RawResponse:
+        seen.append(request.max_tokens)
+        raise DynaflowsError.of(ErrorCode.OUTPUT_TRUNCATED, "length limit reached")
+
+    gateway = client(registry, always_truncates)
+
+    with pytest.raises(DynaflowsError):
+        await gateway.call(dc_replace(REQUEST, max_tokens=MAX_OUTPUT_TOKENS))
+
+    assert seen == [MAX_OUTPUT_TOKENS] * 3, "one attempt per model, no doubling past the ceiling"
+    assert gateway.ledger.calls_widened == 0
+
+
+def test_widening_stops_at_the_ceiling() -> None:
+    from dynaflows.gateway.invoker import MAX_OUTPUT_TOKENS, widened_ceiling
+
+    assert widened_ceiling(4096) == 8192
+    assert widened_ceiling(MAX_OUTPUT_TOKENS - 1) == MAX_OUTPUT_TOKENS
+    assert widened_ceiling(MAX_OUTPUT_TOKENS) is None
+    assert widened_ceiling(None) is None
