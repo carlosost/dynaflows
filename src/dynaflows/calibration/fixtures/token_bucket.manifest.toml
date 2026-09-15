@@ -1,0 +1,69 @@
+# Known answers for `token_bucket.py`. ADR-022, the `answer` half.
+#
+# Every `lines` range below is ASSERTED against the source by
+# `tests/unit/test_answer_calibration.py`, via the `contains` field. The last
+# manifest in this project was written from memory and all five ranges were
+# wrong; a range nobody checks is a measurement nobody can trust.
+#
+# `must_mention` entries are regexes, matched case-insensitively against the
+# answer text. They are chosen to be satisfiable by any correct phrasing and
+# unsatisfiable by a wrong one -- a test that a plausible wrong answer could
+# pass measures nothing.
+
+[[question]]
+id = "refill"
+ask = "How does the bucket work out how many tokens are available right now?"
+kind = "mechanism"
+lines = [51, 60]
+contains = "elapsed = now - self._last"
+must_mention = ["elapsed|since|monotonic", "capacity|cap\\b|capped|min\\("]
+why = """
+Answerable by reading, and also roughly guessable from the words "token
+bucket". It is here as the control: a model scoring well HERE and badly on
+`retry-after-units` was working from priors, and the pair is what shows it.
+"""
+
+[[question]]
+id = "empty-bucket"
+ask = "What happens when a caller asks for a token and the bucket is empty?"
+kind = "behaviour"
+lines = [68, 75]
+contains = "time.sleep(delay)"
+must_mention = ["sleep|block|wait"]
+why = """
+The common design is to refuse and let the caller retry. This one blocks.
+Both are ordinary, so priors do not settle it -- the file does.
+"""
+
+[[question]]
+id = "retry-after-units"
+ask = "What unit does `retry_after` return, and is that what its docstring says?"
+kind = "contradiction"
+lines = [84, 89]
+contains = "* 1000"
+must_mention = ["millisecond|\\bms\\b"]
+why = """
+THE MEASUREMENT. Every name and docstring in the file says seconds; the
+arithmetic multiplies by 1000. A model that read the body answers
+milliseconds and can quote the line. A model that pattern-matched the method
+name and the docstring answers seconds, fluently, with a citation that does
+not contain the multiplication.
+
+This is the `answer` analogue of `broken_client.py`'s `lost-cause`: the one
+question where being wrong is the default outcome.
+"""
+
+[[question]]
+id = "callers"
+ask = "Which parts of the wider codebase call this limiter, and how often?"
+kind = "unanswerable"
+answerable = false
+why = """
+Nothing in this file names a caller. The correct reply reports that the
+context does not contain it -- `context_was_sufficient = false`, with the gap
+named in `missing`.
+
+Scored separately from the rest and worth more than any of them. Run `w1`
+invented four filenames and a HIGH severity finding about them; that failure
+is invisible to a fixture whose every question has an answer.
+"""

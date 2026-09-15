@@ -6,12 +6,13 @@ decides whether something is true.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from dynaflows.graph.grounding import parse_range
-from dynaflows.graph.prompts import Finding
+from dynaflows.graph.prompts import Finding, Observation
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -155,3 +156,159 @@ def aggregate(cards: list[Scorecard], defects: list[Defect]) -> Aggregate:
         for found in card.found:
             hits[found] = hits.get(found, 0) + 1
     return Aggregate(cards=tuple(cards), hits=hits, planted=len(defects))
+
+
+# --- the `answer` half (ADR-022 for ADR-024) -----------------------------
+#
+# Scoring prose is the problem this has to solve without an LLM judge, which
+# ADR-004 rules out. Two mechanical signals, kept apart because they fail
+# independently and only the PAIR is informative:
+#
+#   grounded  -- did it cite the lines that hold the answer?
+#   correct   -- does the answer contain the fact those lines establish?
+#
+# Grounded-and-wrong is a model that looked and misread. Correct-but-
+# ungrounded is worse and is the thing this fixture exists to catch: a model
+# answering from priors, fluently, about a file it did not read. Collapsing
+# them into one score would hide exactly that.
+
+
+@dataclass(frozen=True, slots=True)
+class Question:
+    id: str
+    ask: str
+    kind: str
+    why: str
+    start: int = 0
+    end: int = 0
+    contains: str = ""
+    must_mention: tuple[str, ...] = ()
+    answerable: bool = True
+
+    def covers(self, start: int, end: int) -> bool:
+        return bool(self.start) and start <= self.end and end >= self.start
+
+    def satisfied_by(self, answer: str) -> bool:
+        """Every `must_mention` pattern appears in the answer.
+
+        Regex and case-insensitive, and each pattern is written to be
+        satisfiable by any correct phrasing. A pattern a plausible WRONG
+        answer could also match measures nothing, which is why they are
+        reviewed in the manifest beside the reason for the question.
+        """
+        return all(re.search(pattern, answer, re.IGNORECASE) for pattern in self.must_mention)
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerResult:
+    question: Question
+    grounded: bool
+    correct: bool
+    declared_insufficient: bool
+
+    @property
+    def passed(self) -> bool:
+        if not self.question.answerable:
+            # The only right answer is to say the file does not contain one.
+            # Citing something anyway is the `w1` failure, and it is scored as
+            # a failure here however well-formed the citation is.
+            return self.declared_insufficient and not self.grounded
+        return self.grounded and self.correct
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerScorecard:
+    results: tuple[AnswerResult, ...]
+
+    @property
+    def asked(self) -> int:
+        return len(self.results)
+
+    @property
+    def passed(self) -> int:
+        return sum(1 for r in self.results if r.passed)
+
+    @property
+    def answered_from_priors(self) -> tuple[AnswerResult, ...]:
+        """Right answer, no citation to support it.
+
+        The headline number. It is not a scoring detail: a tool whose answers
+        are right when the model already knew and unchecked when it did not
+        is a tool that cannot be trusted on the questions that matter.
+        """
+        return tuple(
+            r for r in self.results if r.question.answerable and r.correct and not r.grounded
+        )
+
+    @property
+    def looked_but_misread(self) -> tuple[AnswerResult, ...]:
+        return tuple(
+            r for r in self.results if r.question.answerable and r.grounded and not r.correct
+        )
+
+    @property
+    def invented(self) -> tuple[AnswerResult, ...]:
+        """Cited something for a question the file cannot answer."""
+        return tuple(r for r in self.results if not r.question.answerable and r.grounded)
+
+
+def load_questions(path: Path) -> list[Question]:
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    questions: list[Question] = []
+    for entry in raw.get("question", []):
+        lines = entry.get("lines") or [0, 0]
+        questions.append(
+            Question(
+                id=str(entry["id"]),
+                ask=str(entry["ask"]),
+                kind=str(entry.get("kind", "")),
+                why=str(entry.get("why", "")),
+                start=int(lines[0]),
+                end=int(lines[1]),
+                contains=str(entry.get("contains", "")),
+                must_mention=tuple(str(p) for p in entry.get("must_mention", [])),
+                answerable=bool(entry.get("answerable", True)),
+            )
+        )
+    return questions
+
+
+def score_answer(
+    question: Question,
+    answer: str,
+    observations: list[Observation],
+    *,
+    context_was_sufficient: bool,
+) -> AnswerResult:
+    """One question, scored against what the worker actually returned.
+
+    `observations` are the VERIFIED ones -- whatever survived the citation
+    check. An observation quoting a line the worker was never shown has
+    already been dropped by then, so this cannot reward a fabricated cite.
+    """
+    if question.answerable:
+        grounded = any(
+            (span := parse_range(o.lines)) is not None and question.covers(*span)
+            for o in observations
+        )
+        correct = question.satisfied_by(answer)
+    else:
+        # An unanswerable question has no anchor, so "did it cite the right
+        # lines" is the wrong test and the first version of this silently
+        # returned False for every observation -- which made `invented`
+        # unreachable, defeating the one detection this fixture exists for.
+        #
+        # Here ANY surviving citation is the finding: the file does not
+        # contain the answer, so a citation into it is the worker inventing
+        # support for something it made up.
+        grounded = bool(observations)
+        # `must_mention` is empty for these, and `all([])` is True -- so a
+        # meaningless `correct` would read as a pass in any summary that
+        # printed it. There is no right prose here, only a right refusal.
+        correct = False
+    return AnswerResult(
+        question=question,
+        grounded=grounded,
+        correct=correct,
+        declared_insufficient=not context_was_sufficient,
+    )

@@ -2322,15 +2322,75 @@ of the brief so the capability is carried rather than inferred from wording. The
 when a question was asked costs a diff nobody asked for against code the user was still deciding
 about.
 
+**A known-answer fixture for `answer`, and the two signals it keeps apart (2026-09-15).**
+
+ADR-022 exists because "no findings" is unfalsifiable: a clean codebase and a worker that cannot
+find anything produce identical output. **"A plausible answer" is unfalsifiable in exactly the same
+way**, and ADR-024 shipped without a fixture, which is listed in §7.
+
+`calibration/fixtures/token_bucket.py` is that fixture. It is deliberately ORDINARY code — nothing
+in it is a planted defect — because the question is not whether a worker finds a bug. It is whether
+an explanation came from the file or from the model's priors.
+
+**Scoring prose without an LLM judge (ADR-004 forbids one).** Two mechanical signals, never merged:
+
+| | meaning |
+|---|---|
+| `grounded` | it cited the lines that hold the answer |
+| `correct` | the answer carries the fact those lines establish (regex, case-insensitive) |
+
+The pair is the instrument, and the interesting cases are where they disagree:
+
+- **`answered_from_priors`** — correct, uncited. The headline number. A tool whose answers are right
+  when the model already knew and unchecked when it did not is a tool that cannot be trusted on the
+  questions that matter.
+- **`looked_but_misread`** — cited the right lines, got it wrong. Ordinary, and far less alarming.
+- **`invented`** — cited anything at all for a question the file cannot answer. Run `w1`'s failure.
+
+Four questions, each doing a different job:
+- `refill` is the **control**: answerable by reading and roughly guessable from the words "token
+  bucket". A model scoring well here and badly on the next one was working from priors, and only the
+  pair shows it.
+- `empty-bucket` blocks rather than refusing. Both designs are ordinary, so priors do not settle it.
+- `retry-after-units` is **the measurement**: every name and docstring says seconds, the arithmetic
+  multiplies by 1000. Reading the body gives milliseconds and a quotable line; pattern-matching the
+  method name gives seconds, fluently, with a citation that does not contain the multiplication.
+  This is the `answer` analogue of `broken_client.py`'s `lost-cause` — the question where being
+  wrong is the default outcome.
+- `callers` **has no answer in the file.** The correct reply is `context_was_sufficient = false`.
+  A fixture whose every question has an answer cannot see a worker invent one.
+
+**Two defects in the harness, both found while building it, both the shapes this project keeps
+producing:**
+
+- `invented` could never fire. An unanswerable question has no anchor range, so `covers()` returned
+  False for every observation and the one detection the fixture exists for was unreachable. Fixed by
+  scoring answerable and unanswerable questions differently: with no answer in the file, **any**
+  surviving citation IS the invention.
+- `correct` was `all([])` → `True` for unanswerable questions, so a meaningless value would have read
+  as a pass in any summary that printed it. There is no right prose for those, only a right refusal.
+
+**Every line range in the manifest is asserted against the source**, via a `contains` string checked
+by a test. The previous manifest in this project was written from memory: all five ranges were wrong
+and two overlapped. A range nobody checks is a measurement nobody can trust.
+
+A second test asserts that no `must_mention` pattern matches the question text — a pattern satisfied
+by echoing the question back is not a test of the answer, is cheap to write by accident, and would
+silently inflate every score from then on.
+
+**Still to do before this reports a number:** `calibrate` runs the `analyse` path only. Wiring
+`--capability answer` to dispatch these four questions through the real worker is the next step, and
+until it exists this fixture is a scorer with no live caller.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
 one that names its holes.
 
-- **`answer` has no calibration fixture.** ADR-022 exists because "no findings" is unfalsifiable.
-  "A plausible answer" is unfalsifiable in exactly the same way, and `calibrate` measures only the
-  `analyse` path. Until a fixture with known answers exists, ADR-024's capability is unmeasured —
-  the same hole this project already closed once for findings.
+- **`answer` is measurable but not yet measured.** The fixture and scorer exist
+  (`token_bucket.py`); `calibrate` still runs the `analyse` path only, so nothing dispatches those
+  four questions through a real worker. A scorer with no live caller is AP-11, and the number it
+  would produce does not exist yet.
 - **ADR-009's reversal condition cannot be evaluated.** It fires on corpus size **or** an anchor-hit
   rate below 60%, and nothing anywhere records anchor-hit rate. The size half is checkable; the half
   that would actually detect "the planner cannot name what it needs" has never been measurable. This
