@@ -181,14 +181,7 @@ async def enhance_prompt(
         "relevant_paths": grounded,
         "invented_paths": invented,
         "enhancer_assumptions": list(payload.assumptions),
-        "cost": cost_delta(
-            usd_spent=0.0 if result.cache_hit else result.cost_usd,
-            usd_avoided=result.cost_usd if result.cache_hit else 0.0,
-            tokens_in=0 if result.cache_hit else result.tokens_in,
-            tokens_out=0 if result.cache_hit else result.tokens_out,
-            calls_made=0 if result.cache_hit else 1,
-            calls_cached=1 if result.cache_hit else 0,
-        ),
+        "cost": delta_for(result),
     }
 
 
@@ -325,20 +318,49 @@ def _models_version(gateway: Any) -> str:
     return str(getattr(registry, "version", "unknown"))
 
 
+def delta_for(result: Any) -> Any:
+    """One call's contribution to the ledger. The ONLY place this is written.
+
+    It used to be a hand-listed set of six fields here and another in the
+    enhancer, and both omitted `fallbacks`. Live run `q4` ran both workers on
+    `openai/gpt-oss-20b` -- mid[3], three models past `llama-4-scout`, the
+    only model in that chain anyone has calibrated -- and reported
+    `fallbacks=0`. The run silently used an unmeasured model and the figure
+    that would have said so read zero.
+
+    `merge_cost` had exactly this fault and was fixed by enumerating
+    `dataclasses.fields()` instead of a list. The list it replaced had a
+    sibling one file away, and nobody looked. **A rule that fixes one hand-
+    written list should send you looking for the others.**
+    """
+    from dynaflows.contracts.state import cost_delta as _delta
+
+    if result.cache_hit:
+        return _delta(
+            usd_avoided=result.cost_usd or 0.0,
+            calls_cached=1,
+            calls_unpriced=1 if result.cost_usd is None else 0,
+        )
+    return _delta(
+        usd_spent=result.cost_usd or 0.0,
+        tokens_in=result.tokens_in,
+        tokens_out=result.tokens_out,
+        calls_made=1,
+        calls_unpriced=1 if result.cost_usd is None else 0,
+        # The two the hand-written version dropped. `fallback_depth` is how
+        # many models in the chain were tried and did not answer; a depth of
+        # three means the head and two others were skipped or failed, which
+        # decides whether a result can be attributed to the model you think
+        # you are measuring.
+        fallbacks=1 if result.fallback_depth else 0,
+        calls_attempted=result.fallback_depth,
+    )
+
+
 def _merge_delta(ledger: Any, result: Any) -> Any:
     from dynaflows.contracts.state import merge_cost
 
-    return merge_cost(
-        ledger,
-        cost_delta(
-            usd_spent=0.0 if result.cache_hit else result.cost_usd,
-            usd_avoided=result.cost_usd if result.cache_hit else 0.0,
-            tokens_in=0 if result.cache_hit else result.tokens_in,
-            tokens_out=0 if result.cache_hit else result.tokens_out,
-            calls_made=0 if result.cache_hit else 1,
-            calls_cached=1 if result.cache_hit else 0,
-        ),
-    )
+    return merge_cost(ledger, delta_for(result))
 
 
 async def approve_plan(
@@ -602,12 +624,30 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
     # nothing -- which is exactly what runs w1 and w2 did.
     looked_at_nothing = not analysed.examined
     everything_invented = analysed.all_ungrounded
+    # An ANSWER with no surviving citation is the failure this capability
+    # exists to prevent, and it was passing as `ok`.
+    #
+    # Live run q4: the worker that wrote unsupported prose scored `ok`, and
+    # the worker that produced one verified citation scored `degraded`. The
+    # artifact for the first one says "None verified. The answer above is
+    # unsupported." while its status said the run was fine.
+    #
+    # `all_ungrounded` is false when a worker claimed nothing, which is
+    # correct for `analyse` -- "I read these and found no defects" is a
+    # legitimate result. It is not a legitimate ANSWER. A question was asked
+    # and prose came back with nothing behind it, which is exactly the
+    # `answered_from_priors` shape ADR-022's fixture measures.
+    #
+    # Same family as this project's first bug: `passed=True` while five
+    # workers fabricated, because the fact had no counter.
+    unsupported_answer = task.capability == "answer" and not analysed.grounded
     incomplete = (
         not analysed.context_was_sufficient
         or bool(context.dropped_ids)
         or bool(refusals)
         or looked_at_nothing
         or everything_invented
+        or unsupported_answer
     )
     try:
         return {

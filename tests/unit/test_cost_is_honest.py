@@ -148,3 +148,74 @@ def test_the_report_refuses_to_imply_a_total_it_does_not_have() -> None:
     unpriced = _money(CostLedger(usd_spent=0.0, calls_made=1, calls_unpriced=1))
     assert "LOWER BOUND" in unpriced
     assert "1 unpriced" in unpriced
+
+
+def test_a_fallback_is_counted() -> None:
+    """Seventh wrong number.
+
+    Live run q4 ran both workers on `openai/gpt-oss-20b` -- mid[3], three
+    models past `meta-llama/llama-4-scout`, the only model in that chain
+    anyone has calibrated -- and the ledger reported `fallbacks=0`. The run
+    silently used an unmeasured model and the figure that would have said so
+    read zero, so a weak answer could not be attributed to anything.
+
+    `_merge_delta` hand-listed six fields and dropped the rest. `merge_cost`
+    had exactly this fault, was fixed by enumerating `dataclasses.fields()`,
+    and the list it replaced had a sibling one file away. A rule that fixes
+    one hand-written list should send you looking for the others.
+    """
+    from dynaflows.graph.nodes import delta_for
+
+    deep = CallResult(
+        payload=None,
+        model_id="acme/fourth-choice",
+        tier=Tier.MID,
+        raw="{}",
+        tokens_in=100,
+        tokens_out=20,
+        cost_usd=0.001,
+        fallback_depth=3,
+        attempts=1,
+        cache_hit=False,
+    )
+
+    delta = delta_for(deep)
+
+    assert delta.fallbacks == 1, "a result served three models deep is a fallback"
+    assert delta.calls_attempted == 3, "three models were tried and did not answer"
+    assert delta.calls_made == 1
+
+
+def test_the_head_of_the_chain_is_not_counted_as_a_fallback() -> None:
+    from dynaflows.graph.nodes import delta_for
+
+    first = CallResult(
+        payload=None,
+        model_id="acme/first-choice",
+        tier=Tier.MID,
+        raw="{}",
+        tokens_in=100,
+        tokens_out=20,
+        cost_usd=0.001,
+        fallback_depth=0,
+        attempts=1,
+        cache_hit=False,
+    )
+
+    delta = delta_for(first)
+
+    assert (delta.fallbacks, delta.calls_attempted) == (0, 0)
+
+
+def test_one_function_writes_every_delta() -> None:
+    """The structural half. Two hand-written lists is how the first one's fix
+    missed the second; there is one now, and this fails if another appears."""
+    import pathlib
+    import re
+
+    source = pathlib.Path("src/dynaflows/graph/nodes.py").read_text()
+    constructions = re.findall(r"cost_delta\(\s*\w", source)
+
+    assert not constructions, (
+        f"build a ledger delta through `delta_for`, not by listing fields again: {constructions}"
+    )

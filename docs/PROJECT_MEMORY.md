@@ -2530,6 +2530,60 @@ short fake summary. *A test double that is always small cannot find a size limit
 dispatch, `verify_observations`, and `collect` reading `Observation` rows back have still never run
 end to end.
 
+**The first complete `answer` run: the plumbing works, the answer did not, and the instrument that would have explained why read zero (2026-09-15).**
+
+`resume q4` finished. Every part built and fixed without ever being executed ran correctly the first
+time: the capability dispatch handed `AnswerReport` to the worker, `verify_observations` kept one
+observation and the citation checks ran with `NOT_A_DEFECT` relaxed, `collect` read the stored
+`Observation` row back through `_MODELS[result.capability]` and it reached the synthesis, and
+`_render_answer` printed *"None verified. The answer above is unsupported."* on the worker that cited
+nothing. The computed half reported `passed=False` and told the reader to discount the prose.
+
+**The answer itself was poor.** Against three facts verified by hand two days earlier: it got
+`drift()`'s sha256 comparison — in prose, uncited — and missed both `_unindex_source` and the fact
+that `index_corpus` reindexes every file regardless of what `drift` reported. One of three, with
+nothing behind it. `answered_from_priors` in the wild, which is the shape `token_bucket.py` exists to
+measure, appearing before that fixture has a live caller.
+
+**Two defects, and the second explains part of the first.**
+
+*An `answer` with no surviving citation was scoring `ok`.* The run produced an inversion that says it
+plainly:
+
+| task | status | reported | grounded |
+|---|---|---|---|
+| index-freshness | **ok** | 0 | 0 |
+| retrieval-freshness | **degraded** | 1 | 1 |
+
+The worker that wrote unsupported prose passed; the worker that produced a verified citation did not.
+`all_ungrounded` is false when a worker claimed nothing — correct for `analyse`, where "I read these
+and found no defects" is a real result, and exactly wrong for `answer`, where prose with nothing
+behind it is the failure the capability exists to prevent. The artifact said "unsupported" while the
+status said fine. Same family as this project's first bug: `passed=True` while five workers
+fabricated, because the fact had no counter. Now keyed on capability, so a clean audit stays `ok`.
+
+***Seventh wrong number: the run silently fell through three models and said `fallbacks=0`.*** Both
+workers ran on `openai/gpt-oss-20b`, **mid[3]** — three past `meta-llama/llama-4-scout`, the only
+model in that chain anyone has calibrated (4/5 on ADR-022's fixture). The ledger reported
+`fallbacks=0, calls_attempted=0`. So the weak answer above **cannot be attributed to the `answer`
+capability at all**: it was produced by an unmeasured model, and the figure that would have said so
+read zero.
+
+`_merge_delta` hand-listed six fields. `merge_cost` had precisely this fault — §7 records it: *"the
+hand-written version omitted `calls_unpriced` for two commits."* — and was fixed by enumerating
+`dataclasses.fields()` instead of a list. **The list that fix replaced had a sibling one file away,
+and a second in the enhancer, and nobody looked.** Both are gone; `delta_for()` is the only place a
+ledger delta is written, and a test fails if another appears.
+
+*A rule that fixes one hand-written list should send you looking for the others.* The same is true of
+every fix in this document that replaced an enumeration with a derivation.
+
+**What the run cost and bought.** $0.0115 across the thread, including the crashed attempt. It
+produced the first end-to-end evidence that ADR-024 works, one bad answer that cannot yet be
+attributed, and two counters that were lying. **Four gates were rejected before this one and none of
+them found anything; the run that executed found three defects in one pass.** Reading a plan tells
+you what a system intends. Only running it tells you what it does.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than

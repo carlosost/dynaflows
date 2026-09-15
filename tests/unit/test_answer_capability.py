@@ -267,3 +267,40 @@ async def test_an_oversized_answer_does_not_take_the_run_down(workspace: Path) -
     assert result.status in {"ok", "degraded"}, "the node returned instead of raising"
     assert len(result.summary) <= 1200
     assert "trimmed" in result.summary
+
+
+async def test_an_answer_with_no_citation_is_degraded(workspace: Path) -> None:
+    """Live run q4's inversion.
+
+    The worker that wrote unsupported prose was `ok`; the worker that
+    produced one verified citation was `degraded`. `all_ungrounded` is false
+    when a worker claimed nothing -- correct for `analyse`, where "I read
+    these and found no defects" is a real result, and wrong for `answer`,
+    where prose with nothing behind it is the failure the capability exists
+    to prevent. The artifact already said "None verified. The answer above is
+    unsupported" while the status said the run was fine.
+    """
+    gateway = FakeGateway()
+    gateway.answer_report = lambda _: AnswerReport(
+        answer="The index uses a refresh strategy to invalidate stale entries.",
+        examined=["src/auth.py"],
+        observations=[],
+        context_was_sufficient=True,
+    )
+
+    out = await run_worker(an_answer_task(inputs=["src/auth.py"]), gateway, workspace)
+
+    assert out["results"][0].status == "degraded"
+
+
+async def test_finding_no_defects_is_still_ok_for_analyse(workspace: Path) -> None:
+    """The other half, and the reason this is keyed on capability rather than
+    applied to both. An auditor that reads three files and reports nothing has
+    done its job; forcing that to `degraded` would make a clean audit
+    indistinguishable from a broken one."""
+    gateway = FakeGateway()
+    task = PlanTask(task_id="t1", capability="analyse", objective="review login")
+
+    out = await run_worker(task, gateway, workspace)
+
+    assert out["results"][0].status == "ok"
