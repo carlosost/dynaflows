@@ -2477,6 +2477,59 @@ from the prompt into the program, which was right, and put it one layer too earl
 *Writing something once does not decide where it goes.* A constant needs an audience before it needs
 a home.
 
+**A worker raised, and the run died. The promise it broke was never enforced (2026-09-15).**
+
+Live run `q4`, the first fan-out of `answer` workers this project has ever executed. Both gates
+approved, two tasks dispatched, and then:
+
+```
+ValidationError: 1 validation error for WorkerResult
+summary
+  String should have at most 1200 characters
+```
+
+`AnswerReport.answer` was capped at **2,000**; `WorkerResult.summary` is capped at **1,200**. The
+worker wrote about 1,300, pydantic refused the assignment, and the exception escaped a LangGraph
+`Send` branch. The node's own docstring names this outcome exactly:
+
+> *An exception inside a Send branch aborts the whole superstep, turning "one of twelve failed" into
+> "the run is gone" — the single worst outcome available in this design, and the easiest one to
+> cause by accident.*
+
+**The docstring was right and the code did not implement it.** Every `except` in `worker` wraps the
+gateway call. The statement that threw was the last one in the function: the assembly of the result.
+The guarantee covered the part most likely to fail and left the part that actually did.
+
+**The mismatch was mine, introduced with ADR-024.** `WorkerReport.summary` and `WorkerResult.summary`
+both said 1,200 and agreed. I added a third contract, gave it 2,000, and never checked it against the
+field it is assigned to. Two files, two numbers that must match, nothing comparing them — the same
+shape as the `catalogue` collisions and the FTS delete, in a project that has now produced it four
+times.
+
+Four changes, in increasing order of what they prevent:
+
+- **The cap is 1,200 on the model's contract**, not only at the seam, so an overrun becomes a schema
+  failure with a repair attempt rather than a crash. A model told it may write 2,000 characters will
+  eventually write more than 1,200.
+- **`_fit()` trims at the seam**, reading the limit from `WorkerResult.model_fields` rather than
+  repeating it — the last time that number lived in two places they disagreed. It marks the trim;
+  the full text is in the artifact regardless (ADR-008).
+- **The final assembly is inside the never-raise guard**, and a contract violation in dynaflows' own
+  assembly is reported as a `failed` result naming it as a bug here, not dressed up as a failed
+  analysis.
+- **An architecture test asserts every capability's report cap is ≤ the state field's**, and a
+  separate assertion fails if a capability is registered whose schema the test does not cover. A
+  third capability would otherwise be a third chance to make this exact mistake.
+
+**What this cost and what it bought.** The run spent a frontier planner call and two worker calls and
+produced nothing. It also found, on the first attempt, a defect that had been latent since ADR-024
+shipped two days earlier and was invisible to 558 passing tests — because every one of them used a
+short fake summary. *A test double that is always small cannot find a size limit.*
+
+**Still unmeasured after four attempts:** no `answer` worker has yet returned a result. The capability
+dispatch, `verify_observations`, and `collect` reading `Observation` rows back have still never run
+end to end.
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than

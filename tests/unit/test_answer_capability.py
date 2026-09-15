@@ -243,3 +243,27 @@ def test_an_observation_is_not_rendered_as_a_defect() -> None:
     assert "proposed:" not in rendered
     assert "(high)" not in rendered and "(low)" not in rendered
     assert "login() returns True with no checks." in rendered
+
+
+async def test_an_oversized_answer_does_not_take_the_run_down(workspace: Path) -> None:
+    """The crash, reproduced through the node.
+
+    A worker must never raise: an exception inside a `Send` branch aborts the
+    whole superstep, so one long answer ended a run that had already paid for
+    a planner and two workers. Every `except` in the node was upstream of the
+    statement that threw -- the assembly of the result itself.
+    """
+    gateway = FakeGateway()
+    gateway.answer_report = lambda _: AnswerReport.model_construct(
+        answer="x" * 5000,  # past the schema, as a bad model's output would be
+        examined=["src/auth.py"],
+        observations=[],
+        context_was_sufficient=True,
+    )
+
+    out = await run_worker(an_answer_task(inputs=["src/auth.py"]), gateway, workspace)
+
+    result = out["results"][0]
+    assert result.status in {"ok", "degraded"}, "the node returned instead of raising"
+    assert len(result.summary) <= 1200
+    assert "trimmed" in result.summary

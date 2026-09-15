@@ -313,8 +313,23 @@ class AnswerReport(BaseModel):
     citations alone do not answer a question.
     """
 
+    # 1200, matching `WorkerReport.summary` -- and both match
+    # `WorkerResult.summary`, which is what they are assigned to. This was
+    # 2000, and a live `answer` worker wrote 1,300 characters: pydantic
+    # refused the WorkerResult, the exception escaped a Send branch, and the
+    # whole superstep died. "One task failed" became "the run is gone", which
+    # this node's docstring calls the worst outcome available in the design.
+    #
+    # The cap belongs on the MODEL's contract, not only at the seam, so an
+    # overrun becomes a schema failure with a repair attempt instead of a
+    # silent truncation. The full text is in the artifact either way; this
+    # field is the summary state carries (ADR-008).
     answer: str = Field(
-        description="The answer to the question asked. Prose, not a list.", max_length=2000
+        description=(
+            "The answer to the question asked. Prose, not a list."
+            " Keep it under 1200 characters -- detail belongs in the observations."
+        ),
+        max_length=1200,
     )
     examined: list[str] = Field(default_factory=list, description="The files you actually read.")
     observations: list[Observation] = Field(default_factory=list)

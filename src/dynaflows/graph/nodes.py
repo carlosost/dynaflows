@@ -29,7 +29,7 @@ from typing import Any
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from dynaflows.contracts.calls import CallRequest
 from dynaflows.contracts.errors import DynaflowsError, ErrorCode
@@ -392,6 +392,27 @@ async def approve_plan(
     return update
 
 
+# What `WorkerResult.summary` accepts. Read from the model rather than
+# repeated, because the last time this number lived in two places they
+# disagreed and a worker took the run down with it.
+_SUMMARY_LIMIT = WorkerResult.model_fields["summary"].metadata[0].max_length
+
+
+def _fit(summary: str) -> str:
+    """Trim a summary to what state will accept, saying so when it trims.
+
+    Belt to the schema's braces. `AnswerReport.answer` is capped at the same
+    number now, so this should never fire -- but the failure it guards against
+    was an exception inside a Send branch, which does not fail one task, it
+    ends the run. A silent truncation is a much smaller harm than that, and
+    the marker keeps it from being silent.
+    """
+    if len(summary) <= _SUMMARY_LIMIT:
+        return summary
+    marker = " […trimmed; full text in the artifact]"
+    return summary[: _SUMMARY_LIMIT - len(marker)] + marker
+
+
 @dataclass(frozen=True, slots=True)
 class _Analysed:
     """One worker's output, with the capability-specific shape already gone.
@@ -423,7 +444,7 @@ class CapabilityHandler:
 def _analysed_findings(report: WorkerReport, seen: list[Chunk]) -> _Analysed:
     result = grounding_check.verify(report.findings, seen)
     return _Analysed(
-        summary=report.summary,
+        summary=_fit(report.summary),
         examined=list(report.examined),
         context_was_sufficient=report.context_was_sufficient,
         reported=result.reported,
@@ -437,7 +458,7 @@ def _analysed_findings(report: WorkerReport, seen: list[Chunk]) -> _Analysed:
 def _analysed_answer(report: AnswerReport, seen: list[Chunk]) -> _Analysed:
     result = grounding_check.verify_observations(report.observations, seen)
     return _Analysed(
-        summary=report.answer,
+        summary=_fit(report.answer),
         examined=list(report.examined),
         context_was_sufficient=report.context_was_sufficient,
         reported=result.reported,
@@ -588,27 +609,56 @@ async def worker(state: WorkflowState, config: RunnableConfig | None = None) -> 
         or looked_at_nothing
         or everything_invented
     )
-    return {
-        "results": [
-            WorkerResult(
-                task_id=task.task_id,
-                capability=task.capability,
-                status="degraded" if incomplete else "ok",
-                summary=analysed.summary,
-                artifact=artifact,
-                model_id=result.model_id,
-                tier=result.tier,
-                fallback_depth=result.fallback_depth,
-                tokens_in=result.tokens_in,
-                tokens_out=result.tokens_out,
-                cost_usd=result.cost_usd,
-                findings_reported=analysed.reported,
-                findings_grounded=analysed.grounded,
-                findings_ref=findings_ref,
-            )
-        ],
-        "cost": ledger,
-    }
+    try:
+        return {
+            "results": [
+                _ok_result(task, analysed, result, artifact, findings_ref, incomplete=incomplete)
+            ],
+            "cost": ledger,
+        }
+    except ValidationError as exc:
+        # The docstring at the top promises this node never raises, and until
+        # a live run proved otherwise that promise was enforced only around
+        # the gateway call -- every `except` above is upstream of here. A
+        # capped field disagreeing with its source got past all of them and
+        # killed the superstep from the last statement in the function.
+        #
+        # A contract violation in OUR OWN assembly is a bug in dynaflows, not
+        # a failed analysis, so it is reported as one rather than dressed up
+        # as a worker result.
+        return {
+            "results": [
+                _failed(task, DynaflowsError.of(ErrorCode.UNKNOWN, f"result rejected: {exc}"))
+            ],
+            "cost": ledger,
+        }
+
+
+def _ok_result(
+    task: PlanTask,
+    analysed: _Analysed,
+    result: Any,
+    artifact: Any,
+    findings_ref: Any,
+    *,
+    incomplete: bool,
+) -> WorkerResult:
+    return WorkerResult(
+        task_id=task.task_id,
+        capability=task.capability,
+        status="degraded" if incomplete else "ok",
+        summary=analysed.summary,
+        artifact=artifact,
+        model_id=result.model_id,
+        tier=result.tier,
+        fallback_depth=result.fallback_depth,
+        tokens_in=result.tokens_in,
+        tokens_out=result.tokens_out,
+        cost_usd=result.cost_usd,
+        findings_reported=analysed.reported,
+        findings_grounded=analysed.grounded,
+        findings_ref=findings_ref,
+    )
 
 
 def _render_findings(report: WorkerReport, grounding: Grounding[Finding]) -> str:
