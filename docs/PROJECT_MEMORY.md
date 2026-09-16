@@ -1488,6 +1488,25 @@ that need it. The seventy lines moved to `src/dynaflows/editing.py` and the exem
 file. **An exception should be the size of the need**; an exception larger than its need is the
 allowlist growing a pattern while still looking like a list of names.
 
+**The worktree gets its own environment, and the reason is not performance.** Sharing the
+project's `.venv` with the worktree is the obvious saving and it is silently wrong. An editable
+install writes an absolute path into a `.pth` file — `.venv/.../dynaflows.pth` contains
+`/Users/.../Projects/dynaflows/src` — so a suite run inside the worktree against that venv imports
+the package from the **original** source tree. It exercises the user's code rather than the
+agent's, passes, and produces a green verdict about a change it never loaded. No error and no
+signal anywhere in the output. `uv sync` in the worktree costs seconds against a warm cache; a
+green light that does not refer to the change it claims to be about costs the whole feature.
+
+**The oracle compares sets of test ids, not counts.** A suite that was already red stays red, and
+"3 failures" before and after can be disjoint sets — a change that broke one test and fixed
+another reads as no change at all. So the verdict carries three fields (`newly_failing`,
+`newly_passing`, `still_failing`) per AP-20, and `clean` means "nothing that passed now fails"
+rather than "the suite is green" — a project with pre-existing failures would otherwise be unable
+to accept any change, and a gate nobody can pass is a gate people route around (§5.2, Pattern 5).
+When the ids cannot be read at all — collection error, internal crash, missing binary — `parsed`
+is False and no comparison is offered, because an empty `newly_failing` from a run that collected
+nothing is indistinguishable from a clean change.
+
 **Reversal condition:** a change that must be verified against the user's uncommitted state, where
 branching from HEAD loses the thing being fixed.
 
