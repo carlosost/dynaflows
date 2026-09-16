@@ -145,6 +145,22 @@ def check_langsmith_connectivity(settings: Settings) -> Check:
     )
 
 
+def check_coding_agent(settings: Settings) -> Check:
+    """ADR-025: the change shape is unusable without it, and says so early.
+
+    Not a FAIL when it is missing. The read shape (`run`, `brief`, `answer`)
+    does not use the coding agent at all, so a machine with no agent is a
+    correctly configured machine for two thirds of this tool -- and a doctor
+    that fails on a capability you are not using is a doctor people stop
+    running (playbook 5.2, Pattern 5). AP-20: "not installed" and "installed
+    but not logged in" are different facts and get different text.
+    """
+    from dynaflows.executor.agent import check_agent_auth
+
+    ok, detail = check_agent_auth()
+    return Check("coding agent", Status.OK if ok else Status.WARN, detail)
+
+
 def check_openrouter(settings: Settings) -> Check:
     """Auth plus the live structured-output catalogue, in one request."""
     from dynaflows.gateway.probe import catalogue
@@ -264,6 +280,7 @@ def run_checks(settings: Settings | None = None, *, offline: bool = False) -> It
         return
     yield check_langsmith_connectivity(settings)
     yield check_openrouter(settings)
+    yield check_coding_agent(settings)
     yield check_tier_capability(settings)
     yield check_context_homogeneity(settings)
     yield check_handshake(settings)

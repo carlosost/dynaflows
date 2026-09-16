@@ -1507,9 +1507,85 @@ When the ids cannot be read at all — collection error, internal crash, missing
 is False and no comparison is offered, because an empty `newly_failing` from a run that collected
 nothing is indistinguishable from a clean change.
 
+**Amendment 2026-09-16 — `--permission-mode` is measured, and round one measured the wrong
+thing.** The help text documents six modes and the non-interactive behaviour of none. Round one
+gave each mode one task — `git rev-parse --short HEAD` — and three modes passed. That result was
+worthless: a read-only git command is very likely auto-allowed, so "the mode completed" meant "the
+mode did not need to ask", which is not the question. Round two added a second task per mode that
+no allowlist covers (`python3 -c ...`):
+
+| mode | benign | arbitrary |
+|---|---|---|
+| `acceptEdits` | OK | **silent no-op** |
+| `auto` | OK | OK |
+| `bypassPermissions` | OK | OK |
+| `dontAsk` | silent no-op | not re-run |
+
+**`acceptEdits` does not hang, which is worse than hanging.** It returns in seven seconds, exit 0,
+`is_error` false, having refused the command — the refusal appears only in the result text
+("Command needs your approval"). A run that reports success with an empty diff is the one failure a
+change tool must not have, and a block would at least be loud once the timeout fired. It was caught
+by checking the DIFF, not the exit code, which is why `Changes.is_empty` is a first-class outcome
+and why `usable` deliberately says nothing about whether the change is correct.
+
+`auto` passed both and is still rejected: it routes through a classifier, so the same command can be
+allowed on one run and refused on the next. An **intermittent** silent no-op is the worst version of
+the defect above.
+
+`bypassPermissions` is chosen for determinism, not for safety, and this ADR does not pretend
+otherwise. The boundary is the worktree, the explicit `disallowed_tools`, and the human approving at
+G2 before anything runs. A mode that feels safer while silently skipping work would be theatre paid
+for in correctness.
+
+**The rule, which is the third form of one this project keeps meeting.** Round one's task was chosen
+for being easy to verify, and that is exactly why it proved nothing — it never exercised the thing
+under test. **A probe that cannot fail is not a measurement.** Same shape as AP-11's green-but-never-
+runs test, and as the counters that read zero because nothing incremented them.
+
 **Reversal condition:** a change that must be verified against the user's uncommitted state, where
 branching from HEAD loses the thing being fixed.
 
+
+---
+
+### ADR-026: the approved diff lands in your working tree, unstaged
+
+**Context.** ADR-025 puts the agent's work in a worktree under `.dynaflows/`. That answers where the
+change is made and leaves open what becomes of it. The requirement is specific and it came from
+using the tool, not from designing it: review the change in VS Code or Cursor, accept some hunks,
+reject others, and commit on your own schedule.
+
+**Decision.** At G3, on approval, dynaflows applies the diff to the user's working tree as
+**unstaged** changes and stops. The source-control panel of any editor then shows it file by file
+and hunk by hunk, which is the review interface the user already has and already trusts. The
+worktree is kept, so "what did the agent actually do" stays answerable after the user has edited
+its output.
+
+**This amends ADR-016, and the amendment is the narrow part.** ADR-016 says dynaflows never writes
+to the target repository, and the architecture linter enforces it. This is one write outside
+`.dynaflows/`, and it is scoped by four conditions, all of which must hold: it is a `git apply` of
+a patch the human has already seen; it happens only at G3; it happens only after an explicit
+approval; and it happens nowhere else in the codebase. The linter exemption is therefore one
+function, not one package — the same shape as `editing.py` earning its spawn exemption, and for
+the same reason: **an exception should be the size of the need.**
+
+**Why not the alternatives.**
+- *Leave it on the branch and let the user merge.* Preserves ADR-016 untouched and was my
+  recommendation. It fails the actual requirement: hunk-level accept/reject against a branch you
+  have not merged is not something an editor's diff view does well, and "run this git command"
+  is the tool handing back the work it was asked to do.
+- *Write a `.patch` file.* Safest, most friction, and the friction buys nothing the four
+  conditions above do not already buy.
+
+**Consequences.**
+- Applying can fail — the user's tree moved under a paused run. A failed `git apply` is a reported
+  outcome, not an exception: the branch still exists, and the user is told so.
+- `dirty_paths` from ADR-025 becomes load-bearing rather than informational. A change branched from
+  HEAD, applied onto a tree with uncommitted edits to the same files, is the conflict case, and G2
+  is where it is visible.
+
+**Reversal condition:** a user who consistently rejects at G3 and re-runs, which would mean the
+review belongs before the apply rather than after it.
 ---
 
 ## 2. Data Contracts
@@ -1701,7 +1777,7 @@ never `sqlite3.connect` (§2.2, AP-02).
 | ID | Question | Blocks | Status |
 |---|---|---|---|
 | OQ-01 | Which concrete model ids fill each tier in `models.toml`? | `config/models.toml`; the Phase 1 cost baseline | Open — requires measurement, not opinion |
-| OQ-02 | Does a plan need intra-plan task dependencies (`depends_on`), or is a flat map sufficient? | `PlanTask.depends_on`; whether fan-out is one superstep or a scheduler | Open — **deliberately deferred.** Phase 1 is a pure map and `depends_on` is contract-bound to empty, so nothing is blocked. Reversal condition: the first plan where the planner wants task B to consume task A's output. Deciding it in the abstract would be guessing at a shape no real task has demanded. |
+| OQ-02 | Does a plan need intra-plan task dependencies (`depends_on`), or is a flat map sufficient? | `PlanTask.depends_on`; whether fan-out is one superstep or a scheduler | Open — **deliberately deferred, and the trigger was sharpened 2026-09-16.** The original reversal condition ("the first plan where the planner wants task B to consume task A's output") is too easy to satisfy on paper: ADR-023 asserted the change shape was that task, and it is not. The executor invokes a coding agent that is **itself** a planner and executor with its own task list, its own iteration and its own ability to run tests between steps. Decomposing a change into ordered dynaflows tasks means building a worse planner than the one already inside the process being called, and discarding the agent's context at every boundary. New reversal condition: **a single change exceeds what one agent session can hold — context exhaustion or budget — and must be split into stages that each verify independently.** That is a condition you hit and notice, not one you argue about. |
 | OQ-03 | What is `MAX_FANOUT`, and does it derive from the rate limit or the checkpoint write cost? | `Send` dispatch; the G2 cost estimate | **Resolved 2026-09-10 → ADR-014.** The framing was wrong: the rate limit binds the semaphore, not the plan width. 12 and 6, both provisional. |
 | OQ-04 | Is an offline/local tracing backend required, or is LangSmith a hard dependency? | `gateway/telemetry.py` abstraction — or its absence | **Resolved 2026-09-10 → ADR-015.** Hard dependency; no abstraction. |
 | OQ-05 | Does the Obsidian vault need frontmatter-tag filtering, or are wikilinks + FTS5 enough? | `links` table usage; `PlaybookRepository.search` signature | **Resolved 2026-09-10 → ADR-009 amendment.** No vault yet; `docs/` only, adjacency deferred. |
