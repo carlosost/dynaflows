@@ -50,6 +50,7 @@ from dynaflows.graph import planner as planning
 from dynaflows.graph import synthesis as synth
 from dynaflows.graph.budgets import worker_context_budget
 from dynaflows.graph.capabilities import render_capabilities
+from dynaflows.graph.gates import gate_outcome
 from dynaflows.graph.deps import (
     auto_approved,
     gateway_from,
@@ -211,7 +212,7 @@ async def approve_prompt(
             "intent_claimed": state.get("enhancer_intent_claimed", ""),
         }
     )
-    outcome = _gate_outcome(answer)
+    outcome = gate_outcome(answer)
     update: dict[str, Any] = {"prompt_gate": outcome}
     if outcome.decision is GateDecision.EDIT and outcome.replacement:
         # The human's text beats the model's. Replacing it here rather than
@@ -220,22 +221,6 @@ async def approve_prompt(
     if outcome.decision is GateDecision.REJECT:
         update["halted"] = "rejected by human at gate G1"
     return update
-
-
-def _gate_outcome(answer: Any) -> GateOutcome:
-    """Normalise whatever `Command(resume=...)` carried.
-
-    A bare string is accepted so a human answering "approve" at a terminal is
-    not a crash, but anything unrecognised is a REJECT: defaulting an
-    unparseable answer to approval would let a typo authorise a fan-out.
-    """
-    if isinstance(answer, GateOutcome):
-        return answer
-    if isinstance(answer, dict):
-        return GateOutcome.model_validate(answer)
-    if isinstance(answer, str) and answer.strip().lower() in set(GateDecision):
-        return GateOutcome(decision=GateDecision(answer.strip().lower()))
-    return GateOutcome(decision=GateDecision.REJECT, note=f"unparseable gate answer: {answer!r}")
 
 
 async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> dict[str, Any]:
@@ -407,7 +392,7 @@ async def approve_plan(
             ],
         }
     )
-    outcome = _gate_outcome(answer)
+    outcome = gate_outcome(answer)
     update: dict[str, Any] = {"plan_gate": outcome}
     if outcome.decision is GateDecision.REJECT:
         update["halted"] = "rejected by human at gate G2"

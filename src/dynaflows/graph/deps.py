@@ -15,6 +15,11 @@ PLAYBOOK_KEY = "playbook"
 AUTO_APPROVE_KEY = "auto_approve"
 STORE_KEY = "store"
 SOURCE_ROOT_KEY = "source_root"
+# The WRITE pipeline only (ADR-023). Injected like every other dependency so a
+# test hands the graph a fake agent and a tmp_path home, rather than cutting a
+# real worktree and spending a real agent turn.
+AGENT_KEY = "agent"
+HOME_KEY = "home"
 
 
 def configurable(config: Any) -> dict[str, Any]:
@@ -74,3 +79,25 @@ def source_root_from(config: Any) -> Any:
             "no source root in config['configurable']",
         )
     return root
+
+
+def agent_from(config: Any) -> Any:
+    """The coding agent (ADR-025). WRITE pipeline only."""
+    agent = configurable(config).get(AGENT_KEY)
+    if agent is None:
+        raise DynaflowsError.of(
+            ErrorCode.CONFIG_INVALID,
+            "no coding agent in config['configurable']; the WRITE pipeline was built without one",
+        )
+    return agent
+
+
+def home_from(config: Any) -> Any:
+    """`.dynaflows/`, under which worktrees are cut. ADR-016's boundary."""
+    home = configurable(config).get(HOME_KEY)
+    if home is None:
+        raise DynaflowsError.of(
+            ErrorCode.CONFIG_INVALID,
+            "no home directory in config['configurable']",
+        )
+    return home

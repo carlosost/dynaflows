@@ -321,13 +321,37 @@ def test_a_task_naming_an_unregistered_capability_is_rejected() -> None:
 
 def test_only_implemented_capabilities_are_registered() -> None:
     """AP-11: an entry here with no node behind it is surface the planner will
-    happily emit tasks against and nothing can run. The set is asserted
-    exactly, so ADDING one is a deliberate act with a test to update."""
-    from dynaflows.graph.capabilities import CAPABILITY_IDS
+    happily emit tasks against and nothing can run. The sets are asserted
+    exactly, so ADDING one is a deliberate act with a test to update.
+
+    Split by pipeline since ADR-023: `implement` is run by the WRITE
+    pipeline's `execute` node, not by a `CAPABILITY_HANDLERS` entry, so a
+    single set comparison would have demanded a read handler for a capability
+    that writes.
+    """
+    from dynaflows.graph.capabilities import CAPABILITY_IDS, capabilities_for
     from dynaflows.graph.nodes import CAPABILITY_HANDLERS
 
-    assert {"analyse", "answer"} == CAPABILITY_IDS
-    assert set(CAPABILITY_HANDLERS) == CAPABILITY_IDS, (
-        "every registered capability needs a handler, and every handler a registration"
+    read = {c.id for c in capabilities_for("read")}
+    write = {c.id for c in capabilities_for("write")}
+
+    assert read == {"analyse", "answer"}
+    assert write == {"implement"}
+    assert read | write == CAPABILITY_IDS, "every capability belongs to exactly one pipeline"
+    assert set(CAPABILITY_HANDLERS) == read, (
+        "every READ capability needs a worker handler, and every handler a registration"
     )
     assert PlanTask(task_id="t", capability="answer", objective="o").capability == "answer"
+
+
+def test_the_read_planner_is_never_shown_a_capability_that_writes() -> None:
+    """A planner cannot choose what it was not shown.
+
+    Cheaper and more reliable than a prompt asking it not to -- the rule this
+    project keeps re-deriving: if you can enforce it, do not ask for it.
+    """
+    from dynaflows.graph.capabilities import render_capabilities
+
+    assert "implement" not in render_capabilities("read")
+    assert "implement" in render_capabilities("write")
+    assert "analyse" not in render_capabilities("write")
