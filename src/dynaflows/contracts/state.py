@@ -265,7 +265,7 @@ def merge_cost(current: CostLedger, update: CostLedger) -> CostLedger:
 
 
 # ---------------------------------------------------------------------------
-# The change shape. ADR-023, ADR-025, ADR-026.
+# The write pipeline. ADR-023, ADR-025, ADR-026.
 # ---------------------------------------------------------------------------
 
 
@@ -441,7 +441,7 @@ class WorkflowState(TypedDict, total=False):
     synthesis: ArtifactRef | None
     halted: str | None
 
-    # --- the change shape (ADR-023). Absent on a read run. ----------------
+    # --- the write pipeline (ADR-023). Absent on a read run. ----------------
     workspace: WorkspaceRef | None
     baseline: SuiteRun | None
     agent: AgentOutcome | None

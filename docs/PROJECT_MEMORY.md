@@ -1323,7 +1323,7 @@ lives beside the fixture and names each defect by line range and kind.
 
 ---
 
-### ADR-023: Two graph shapes, divided by whether workers write; capabilities divide the work inside each
+### ADR-023: Two pipelines, divided by whether workers write; capabilities divide the work inside each
 
 **Date:** 2026-09-13
 **Status:** Accepted — supersedes the informal "keep `audit`, add `implement`" split
@@ -1349,16 +1349,37 @@ catalogue distinguishing work within each.
 ```
 shared front half   enhance (codebase-aware) → G1 → plan → G2
 
-READ shape          → N parallel readers → evaluate → synthesize
+READ pipeline       → N parallel readers → evaluate → synthesize
                       capabilities: answer   (question about the codebase)
                                     analyse  (find defects — the existing auditor)
 
-CHANGE shape        → sequenced executors → verify (the test suite) → report
+WRITE pipeline      → one executor → verify (the test suite) → G3 → apply
                       capabilities: implement (bug fix, feature)
-                      may end by running the READ shape over the resulting diff
+                      may end by running the READ pipeline over the resulting diff
 ```
 
-Everything before G2 is one implementation, shared as code and not as a conditional path. Each shape
+**Renamed 2026-09-16: "shape" → "pipeline", and "change" → "write".** The original word was
+abstract where the thing it names is concrete. Exactly one property divides these two — whether the
+run writes files outside `.dynaflows/` — and "read pipeline" / "write pipeline" says that, while
+"read shape" / "change shape" made the reader ask what a shape was. Renamed before `dynaflows
+change` shipped, because the word would otherwise have reached `--help` and stopped being cheap.
+
+**The three levels of vocabulary, which were never written down and should have been.** Confusing
+them is why the original naming survived as long as it did:
+
+| level | what it is | values |
+|---|---|---|
+| **command** | what the user types | `run`, `change`, `brief`, `index` |
+| **pipeline** | the graph the command builds, after the shared front half | read, write |
+| **capability** | what ONE worker does inside ONE plan task | `analyse`, `answer`, later `implement` |
+
+So `answer` is a capability, not a pipeline: it is one of the things a worker in the READ pipeline
+can be asked to do. The command is what the user wants, the pipeline is what the system will do,
+the capability is what a single worker is for. The command name and the pipeline name differ on
+purpose — `dynaflows change` builds the WRITE pipeline — because the user names an intent and the
+system names a consequence.
+
+Everything before G2 is one implementation, shared as code and not as a conditional path. Each pipeline
 is a separate graph and a separate command, so the command names what is about to happen — which
 matters when one of them writes.
 
@@ -1372,7 +1393,7 @@ matters when one of them writes.
   calibration log concerns finding defects without being told what is wrong. Retrieval and synthesis
   against real citations is a different task with a different failure mode, and is unmeasured.
   It needs its own fixture before any claim is made about it.
-- **The change shape needs what the read shape never did:** ordered tasks (OQ-02, open since Phase 0
+- **The write pipeline needs what the read pipeline never did:** ordered tasks (OQ-02, open since Phase 0
   precisely for want of a task a flat parallel map cannot express — this is that task), a verify step
   whose oracle is the project's own test suite, and a failure story where a half-applied change is
   the risk rather than a missing paragraph.
@@ -1380,10 +1401,10 @@ matters when one of them writes.
   with its own permissions, on a brief a human approved at G2. dynaflows still writes only inside
   `.dynaflows/`. That needs its own short ADR when the executor is built; it is a paragraph, not a
   sandbox.
-- **The router that picks a shape from the request is explicitly NOT part of this** (Phase 3). Three
+- **The router that picks a pipeline from the request is explicitly NOT part of this** (Phase 3). Three
   commands, chosen by the user, until there is evidence that automatic selection is wanted.
 - **Reversal condition:** a capability that both reads and writes within one task, where splitting it
-  across the two shapes loses something. A refactor that must measure before and after is the
+  across the two pipelines loses something. A refactor that must measure before and after is the
   candidate.
 
 ---
@@ -1419,7 +1440,7 @@ for an answer.
 - `CATALOGUE_VERSION` is 2, which is hashed into `plan_hash` — no plan is compared across the
   change.
 - The planner chooses between the two from the catalogue text, with no new node and no new graph
-  shape. ADR-023's division is by whether workers WRITE; both of these read.
+  pipeline. ADR-023's division is by whether workers WRITE; both of these read.
 - A test asserts `CAPABILITY_IDS == set(CAPABILITY_HANDLERS)`, so a registration without an
   implementation cannot ship (AP-11).
 - **`WorkerResult` now carries its `capability`.** It has to: the synthesizer reads stored claim
@@ -1441,7 +1462,7 @@ of work, and it is listed in §7 rather than assumed.
 
 ### ADR-025: the agent writes in a worktree, not in your tree
 
-**Context.** ADR-023 split the workflow into a read shape and a change shape, and said the
+**Context.** ADR-023 split the workflow into a read pipeline and a write pipeline, and said the
 executor's boundary "needs its own short ADR when the executor is built; it is a paragraph, not a
 sandbox." This is that paragraph. The question is narrow: a coding agent is about to edit files,
 and something has to decide which files it can reach.
@@ -1777,7 +1798,7 @@ never `sqlite3.connect` (§2.2, AP-02).
 | ID | Question | Blocks | Status |
 |---|---|---|---|
 | OQ-01 | Which concrete model ids fill each tier in `models.toml`? | `config/models.toml`; the Phase 1 cost baseline | Open — requires measurement, not opinion |
-| OQ-02 | Does a plan need intra-plan task dependencies (`depends_on`), or is a flat map sufficient? | `PlanTask.depends_on`; whether fan-out is one superstep or a scheduler | Open — **deliberately deferred, and the trigger was sharpened 2026-09-16.** The original reversal condition ("the first plan where the planner wants task B to consume task A's output") is too easy to satisfy on paper: ADR-023 asserted the change shape was that task, and it is not. The executor invokes a coding agent that is **itself** a planner and executor with its own task list, its own iteration and its own ability to run tests between steps. Decomposing a change into ordered dynaflows tasks means building a worse planner than the one already inside the process being called, and discarding the agent's context at every boundary. New reversal condition: **a single change exceeds what one agent session can hold — context exhaustion or budget — and must be split into stages that each verify independently.** That is a condition you hit and notice, not one you argue about. |
+| OQ-02 | Does a plan need intra-plan task dependencies (`depends_on`), or is a flat map sufficient? | `PlanTask.depends_on`; whether fan-out is one superstep or a scheduler | Open — **deliberately deferred, and the trigger was sharpened 2026-09-16.** The original reversal condition ("the first plan where the planner wants task B to consume task A's output") is too easy to satisfy on paper: ADR-023 asserted the write pipeline was that task, and it is not. The executor invokes a coding agent that is **itself** a planner and executor with its own task list, its own iteration and its own ability to run tests between steps. Decomposing a change into ordered dynaflows tasks means building a worse planner than the one already inside the process being called, and discarding the agent's context at every boundary. New reversal condition: **a single change exceeds what one agent session can hold — context exhaustion or budget — and must be split into stages that each verify independently.** That is a condition you hit and notice, not one you argue about. |
 | OQ-03 | What is `MAX_FANOUT`, and does it derive from the rate limit or the checkpoint write cost? | `Send` dispatch; the G2 cost estimate | **Resolved 2026-09-10 → ADR-014.** The framing was wrong: the rate limit binds the semaphore, not the plan width. 12 and 6, both provisional. |
 | OQ-04 | Is an offline/local tracing backend required, or is LangSmith a hard dependency? | `gateway/telemetry.py` abstraction — or its absence | **Resolved 2026-09-10 → ADR-015.** Hard dependency; no abstraction. |
 | OQ-05 | Does the Obsidian vault need frontmatter-tag filtering, or are wikilinks + FTS5 enough? | `links` table usage; `PlaybookRepository.search` signature | **Resolved 2026-09-10 → ADR-009 amendment.** No vault yet; `docs/` only, adjacency deferred. |

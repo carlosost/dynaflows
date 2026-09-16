@@ -1,6 +1,6 @@
 """An isolated checkout the coding agent may write to. ADR-025.
 
-The change shape hands an approved brief to a coding agent that edits files.
+The write pipeline hands an approved brief to a coding agent that edits files.
 The question this module answers is *which* files, and the answer is not "the
 ones the user is looking at".
 
@@ -183,7 +183,7 @@ def create(repo_root: Path, home: Path, run_id: str) -> Workspace:
     if inside != "true":
         raise WorkspaceError.of(
             ErrorCode.CONFIG_INVALID,
-            f"{repo_root} is not a git repository; the change shape needs one "
+            f"{repo_root} is not a git repository; the write pipeline needs one "
             "because the worktree is how a half-applied edit stays out of your tree",
         )
 

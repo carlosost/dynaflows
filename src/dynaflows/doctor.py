@@ -146,9 +146,9 @@ def check_langsmith_connectivity(settings: Settings) -> Check:
 
 
 def check_coding_agent(settings: Settings) -> Check:
-    """ADR-025: the change shape is unusable without it, and says so early.
+    """ADR-025: the write pipeline is unusable without it, and says so early.
 
-    Not a FAIL when it is missing. The read shape (`run`, `brief`, `answer`)
+    Not a FAIL when it is missing. The read pipeline (`run`, `brief`, `answer`)
     does not use the coding agent at all, so a machine with no agent is a
     correctly configured machine for two thirds of this tool -- and a doctor
     that fails on a capability you are not using is a doctor people stop

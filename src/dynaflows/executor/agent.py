@@ -160,7 +160,7 @@ class AgentRun:
 
         Met on the first live probe: every permission mode returned in under
         two seconds at $0.0000 with `terminal_reason: api_error`, and the
-        cause was `Not logged in`. Without this distinction the change shape
+        cause was `Not logged in`. Without this distinction the write pipeline
         would tell the user their change failed -- sending them to read a
         diff that does not exist -- when what it needed to say was "log in".
         The same shape as ADR-025's missing-binary case, and the same rule

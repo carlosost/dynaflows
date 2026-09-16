@@ -57,7 +57,7 @@ FILESYSTEM_PACKAGES = (
     # (ADR-022). Added with the same justification as the others rather than
     # as a convenience: this package's whole job is reading files it ships.
     Path("src") / "dynaflows" / "calibration",
-    # ADR-025. The change shape's write half: it cuts a git worktree and
+    # ADR-025. The write pipeline: it cuts a git worktree and
     # reads the diff back, so filesystem work is not incidental to it, it is
     # the whole job. ADR-016 is NOT weakened by this -- the worktree lives
     # under .dynaflows/work/, which is the same boundary every other entry
