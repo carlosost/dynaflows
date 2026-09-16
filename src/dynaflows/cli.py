@@ -231,6 +231,103 @@ def _render_plan_gate(payload: dict[str, Any], out: Console | None = None) -> No
         )
 
 
+def _render_change_gate(payload: dict[str, Any], out: Console | None = None) -> None:
+    """Gate G3 -- what the agent did, and whether it can be said to be safe.
+
+    The ORDER is the design. Every line below `empty` reads as success when
+    the diff is empty, and every line below `comparable` reads as a verdict
+    when there is no verdict. So each of those gets its own early, loud line
+    rather than a field the reader is trusted to check first.
+    """
+    c = out or console
+    c.print()
+
+    if payload.get("empty"):
+        # Measured live: `acceptEdits` exits 0 having silently refused a
+        # command. `usable` was true, the agent said it was done, and the
+        # only thing that caught it was an empty diff.
+        c.print("[yellow]The agent changed nothing.[/]")
+        said = payload.get("agent_said")
+        if said:
+            c.print(Text(f"  it said: {said[:600]}"), markup=False)
+        c.print("[dim]Approving applies nothing. Reject and rerun with a sharper brief.[/]")
+        return
+
+    files = payload.get("files") or []
+    c.print(f"[bold]{len(files)} file(s) changed[/] [dim]on {payload.get('branch') or '?'}[/]")
+    stat = payload.get("stat")
+    if stat:
+        c.print(Text(stat.rstrip()), markup=False)
+
+    if not payload.get("comparable"):
+        # The most dangerous output this gate could produce is silence here:
+        # an empty `newly_failing` from a suite that collected no tests looks
+        # exactly like a clean change.
+        c.print("[red]The test suite could not be compared.[/] [dim]Treat this as unverified.[/]")
+        tail = payload.get("suite_tail")
+        if tail:
+            c.print(Text(tail[-800:]), markup=False)
+    else:
+        broke = payload.get("newly_failing") or []
+        fixed = payload.get("newly_passing") or []
+        still = payload.get("still_failing") or []
+        if broke:
+            c.print(f"[red]{len(broke)} test(s) this change broke:[/]")
+            for name in broke[:20]:
+                c.print(Text(f"  · {name}"), markup=False)
+        else:
+            c.print("[green]Nothing that passed before fails now.[/]")
+        if fixed:
+            c.print(f"[green]{len(fixed)} test(s) this change fixed:[/]")
+            for name in fixed[:20]:
+                c.print(Text(f"  · {name}"), markup=False)
+        if still:
+            # Named, not counted, and explicitly not this change's doing --
+            # otherwise a project that was already red reads as a broken run.
+            c.print(
+                f"[dim]{len(still)} test(s) were already failing before this change "
+                "and still are[/]"
+            )
+
+    dirty = payload.get("dirty_paths") or []
+    if dirty:
+        # The last moment this can matter. The worktree was cut from HEAD, so
+        # the agent never saw these edits, and the patch is about to land on
+        # top of them (ADR-025, ADR-026).
+        c.print(
+            f"[yellow]{len(dirty)} file(s) had uncommitted edits the agent never saw:[/]"
+        )
+        c.print(Text("  " + ", ".join(dirty[:20])), markup=False)
+    elif not payload.get("dirty_checked", True):
+        # AP-20. After a resume the list describes a different moment, so an
+        # empty one is "not re-measured", not "clean".
+        c.print("[dim]uncommitted files were not re-checked on resume[/]")
+
+    said = payload.get("agent_said")
+    if said:
+        c.print("[dim]the agent's account:[/]")
+        c.print(Text(f"  {said[:800]}"), markup=False)
+
+    turns = payload.get("agent_turns")
+    spent = payload.get("agent_cost_equivalent")
+    if turns is not None or spent is not None:
+        # A SEPARATE line from the run's dollar ledger, and worded so the two
+        # cannot be read as one number. Under subscription auth this figure is
+        # an estimate of equivalent API spend and the run consumed quota.
+        parts = []
+        if turns is not None:
+            parts.append(f"{turns} turn(s)")
+        if spent is not None:
+            parts.append(f"~${spent:.4f} equivalent, billed as agent quota not as API spend")
+        c.print(f"[dim]agent: {', '.join(parts)}[/]")
+
+    patch = payload.get("patch")
+    if patch:
+        c.print("[dim]full diff:[/] ", end="")
+        c.print(Text(patch), markup=False)
+    c.print("[dim]Approving writes this into your working tree, unstaged.[/]")
+
+
 def _render_gate(payload: dict[str, Any], out: Console | None = None) -> None:
     """Show the human what they are approving, and what it cost them nothing to see.
 
@@ -243,6 +340,10 @@ def _render_gate(payload: dict[str, Any], out: Console | None = None) -> None:
 
     if payload.get("gate") == "plan":
         _render_plan_gate(payload, out=c)
+        return
+
+    if payload.get("gate") == "change":
+        _render_change_gate(payload, out=c)
         return
 
     c.print()
@@ -398,7 +499,12 @@ def _fail(exc: DynaflowsError) -> None:
 
 
 def _graph_config(
-    settings: Any, thread_id: str, *, auto_approve: list[str], root: Path | None = None
+    settings: Any,
+    thread_id: str,
+    *,
+    auto_approve: list[str],
+    root: Path | None = None,
+    agent: Any = None,
 ) -> dict[str, Any]:
     """Every dependency a node can ask for, built in ONE place.
 
@@ -425,6 +531,13 @@ def _graph_config(
             # defaults to the project root but is NOT fixed to it -- a tool
             # that can only ever audit its own repository is a demo.
             "source_root": root or settings.project_root,
+            # ADR-016's boundary, and where the WRITE pipeline cuts worktrees.
+            "home": settings.home,
+            # ADR-025. Absent on a read run: `agent_from` raises if a node
+            # asks for one that was never injected, which is the right
+            # failure -- a read run that somehow reaches `execute` should
+            # stop, not quietly acquire a coding agent.
+            **({"agent": agent} if agent is not None else {}),
             "auto_approve": auto_approve,
         }
     }
@@ -492,6 +605,13 @@ def _report(values: dict[str, Any]) -> None:
         ledger = values.get("cost")
         if ledger is not None:
             console.print(f"[dim]before stopping: {_money(ledger)}[/]")
+        # A halted WRITE run has a worktree with real work in it, and this is
+        # the only line that says so. Without it, rejecting at G3 ends the run
+        # with "Stopped." and no hint that the agent's branch still exists --
+        # a user would reasonably conclude the work was thrown away.
+        reference = values.get("workspace")
+        if reference is not None:
+            console.print(f"[dim]the agent's work is on[/] {reference.branch}")
         raise typer.Exit(code=2)
 
     console.print("[green]Completed.[/]")
@@ -588,6 +708,135 @@ def run(
     _report(outcome["values"])
 
 
+def _finish_change(values: dict[str, Any], root: Path) -> None:
+    """Land the approved diff, then say what happened. ADR-026.
+
+    Deliberately NOT a graph node. The one write outside `.dynaflows/` stays
+    out of the checkpointed graph entirely: a node would make it replayable,
+    and a replayed apply is a second write the user approved once.
+    """
+    from dynaflows.contracts.state import GateDecision  # noqa: PLC0415
+    from dynaflows.executor.apply import apply_to_working_tree  # noqa: PLC0415
+
+    gate = values.get("change_gate")
+    changes = values.get("changes")
+    reference = values.get("workspace")
+
+    if gate is None or changes is None:
+        return
+    if gate.decision is not GateDecision.APPROVE:
+        console.print("[dim]Nothing was applied.[/]")
+        if reference is not None:
+            console.print(f"[dim]the work is still on[/] {reference.branch}")
+        return
+    if changes.is_empty:
+        console.print("[yellow]Approved, but the agent produced no diff. Nothing applied.[/]")
+        return
+    if changes.patch is None:
+        console.print("[red]Approved, but no patch was recorded.[/] Nothing applied.")
+        return
+
+    patch = Path(changes.patch.path).read_text(encoding="utf-8")
+    result = apply_to_working_tree(root, patch, gate)
+    if result.ok:
+        console.print(f"[green]Applied {len(result.files)} file(s) to your working tree[/], unstaged.")
+        console.print("[dim]Review and stage the hunks you want, then commit when you are ready.[/]")
+        if reference is not None:
+            console.print(f"[dim]the agent's branch is kept:[/] {reference.branch}")
+        return
+
+    console.print(f"[red]Not applied.[/] {result.reason}")
+    if reference is not None:
+        console.print(f"[dim]the work is on[/] {reference.branch}[dim], nothing was lost[/]")
+
+
+@app.command()
+def change(
+    prompt: Annotated[str, typer.Argument(help="What you want changed.")],
+    thread: Annotated[str | None, typer.Option(help="Thread id. Generated if omitted.")] = None,
+    yes_prompt: Annotated[
+        bool, typer.Option("--yes-prompt", help="Skip gate G1.")
+    ] = False,
+    yes_plan: Annotated[bool, typer.Option("--yes-plan", help="Skip gate G2.")] = False,
+    yes_change: Annotated[
+        bool,
+        typer.Option(
+            "--yes-change",
+            help="Skip gate G3. The diff is applied to your tree unreviewed.",
+        ),
+    ] = False,
+    root: Annotated[
+        Path | None, typer.Option(help="Repository to change. Defaults to the project root.")
+    ] = None,
+) -> None:
+    """Make a change: brief it, plan it, hand it to a coding agent, run your tests.
+
+    The WRITE pipeline (ADR-023). The agent works in a git worktree under
+    `.dynaflows/` and never touches your tree; the suite runs before and after
+    so the verdict is a comparison rather than a count; and at G3 an approved
+    diff is applied to your working tree UNSTAGED, so your editor shows it as
+    hunks you can take or discard one at a time (ADR-026).
+
+    `--yes-change` exists and should be rare: it applies a diff to your own
+    files without you having seen it.
+    """
+    import asyncio
+    import uuid
+
+    from dynaflows.contracts.state import initial_state
+    from dynaflows.executor.agent import MEASURED_PERMISSION_MODE, AgentOptions, ClaudeCodeAgent
+    from dynaflows.gateway.telemetry import configure_tracing
+    from dynaflows.graph import open_checkpointer
+    from dynaflows.graph.builder import build_write_graph
+
+    settings = get_settings()
+    configure_tracing(settings)
+    thread_id = thread or f"chg-{uuid.uuid4().hex[:8]}"
+    agent = ClaudeCodeAgent(AgentOptions(permission_mode=MEASURED_PERMISSION_MODE))
+
+    async def _go() -> dict[str, Any]:
+        async with open_checkpointer(settings.state_db) as saver:
+            graph = build_write_graph(saver)
+            cfg = _graph_config(
+                settings,
+                thread_id,
+                auto_approve=(["prompt"] if yes_prompt else [])
+                + (["plan"] if yes_plan else [])
+                + (["change"] if yes_change else []),
+                root=root,
+                agent=agent,
+            )
+            state = initial_state(
+                uuid.uuid4().hex[:8],
+                thread_id,
+                prompt,
+                source_root=str(cfg["configurable"]["source_root"]),
+                pipeline="write",
+            )
+            await _drive(graph, cfg, state)
+            snapshot = await graph.aget_state(cfg)
+            return {
+                "next": snapshot.next,
+                "values": snapshot.values,
+                "root": cfg["configurable"]["source_root"],
+            }
+
+    try:
+        outcome = asyncio.run(_go())
+    except DynaflowsError as exc:
+        console.print(
+            f"[dim]thread[/] {thread_id}  [dim](resume with: dynaflows resume {thread_id})[/]"
+        )
+        _fail(exc)
+    console.print(f"[dim]thread[/] {thread_id}")
+    if outcome["next"]:
+        console.print(f"[yellow]HALTED[/] before {', '.join(outcome['next'])}")
+        console.print(f"[dim]resume with:[/] dynaflows resume {thread_id}")
+        return
+    _report(outcome["values"])
+    _finish_change(outcome["values"], Path(outcome["root"]))
+
+
 @app.command()
 def resume(
     thread: Annotated[str, typer.Argument(help="The thread id to continue.")],
@@ -614,16 +863,43 @@ def resume(
 
     async def _go() -> dict[str, Any]:
         async with open_checkpointer(settings.state_db) as saver:
-            graph = build_graph(saver)
             # Read state FIRST, with a config carrying only the thread id, so
             # the root this run was actually planned against can be recovered
             # rather than guessed. Resuming against a different tree analyses
             # different files and says nothing about it.
+            #
+            # The READ graph is used for the probe regardless of which pipeline
+            # this thread is: reading a checkpoint executes no nodes, and both
+            # graphs share the same state schema. Which graph is then BUILT to
+            # run is decided below, from the recorded pipeline.
             probe_cfg: dict[str, Any] = {"configurable": {"thread_id": thread}}
-            before = await graph.aget_state(probe_cfg)
+            before = await build_graph(saver).aget_state(probe_cfg)
             recorded = before.values.get("source_root") if before.values else None
             target = root or (Path(recorded) if recorded else None)
-            cfg = _graph_config(settings, thread, auto_approve=[], root=target)
+            pipeline = (before.values or {}).get("pipeline", "read")
+
+            agent = None
+            if pipeline == "write":
+                # ADR-023. Resuming a write thread into the read graph would
+                # dispatch readers against a plan whose only task writes: it
+                # fails, but several nodes away from the cause. The thread
+                # records which pipeline it is precisely so this is a lookup
+                # rather than a guess.
+                from dynaflows.executor.agent import (  # noqa: PLC0415
+                    MEASURED_PERMISSION_MODE,
+                    AgentOptions,
+                    ClaudeCodeAgent,
+                )
+                from dynaflows.graph.builder import build_write_graph  # noqa: PLC0415
+
+                agent = ClaudeCodeAgent(AgentOptions(permission_mode=MEASURED_PERMISSION_MODE))
+                graph = build_write_graph(saver)
+            else:
+                graph = build_graph(saver)
+
+            cfg = _graph_config(
+                settings, thread, auto_approve=[], root=target, agent=agent
+            )
             if not before.created_at:
                 return {"missing": True}
             if not before.next:
@@ -635,7 +911,12 @@ def resume(
             # "start again" -- the whole point of resume.
             await _drive(graph, cfg, None)
             snapshot = await graph.aget_state(cfg)
-            return {"next": snapshot.next, "values": snapshot.values}
+            return {
+                "next": snapshot.next,
+                "values": snapshot.values,
+                "pipeline": pipeline,
+                "root": cfg["configurable"]["source_root"],
+            }
 
     try:
         outcome = asyncio.run(_go())
@@ -652,6 +933,8 @@ def resume(
         console.print(f"[yellow]HALTED[/] before {', '.join(outcome['next'])}")
         return
     _report(outcome["values"])
+    if outcome.get("pipeline") == "write":
+        _finish_change(outcome["values"], Path(outcome["root"]))
 
 
 @app.command()

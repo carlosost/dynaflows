@@ -382,6 +382,12 @@ class WorkflowState(TypedDict, total=False):
 
     run_id: str
     thread_id: str
+    # WHICH pipeline this thread is (ADR-023). Recorded because `resume`
+    # rebuilds a graph from a checkpoint, and it cannot know which graph to
+    # build by looking at the thread id. A write run resumed into the read
+    # graph would dispatch readers against a plan whose only task writes --
+    # it would fail, confusingly, several nodes from the cause.
+    pipeline: Literal["read", "write"]
 
     raw_prompt: str
     enhanced_prompt: str | None
@@ -458,7 +464,11 @@ class WorkflowState(TypedDict, total=False):
 
 
 def initial_state(
-    run_id: str, thread_id: str, raw_prompt: str, source_root: str = ""
+    run_id: str,
+    thread_id: str,
+    raw_prompt: str,
+    source_root: str = "",
+    pipeline: Literal["read", "write"] = "read",
 ) -> WorkflowState:
     """The only place an initial state is built.
 
@@ -468,6 +478,7 @@ def initial_state(
     return WorkflowState(
         run_id=run_id,
         thread_id=thread_id,
+        pipeline=pipeline,
         raw_prompt=raw_prompt,
         source_root=source_root,
         enhanced_prompt=None,

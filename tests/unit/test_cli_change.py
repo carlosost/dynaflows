@@ -1,0 +1,169 @@
+"""The `change` command's rendering and its one write. ADR-023, ADR-026.
+
+The graph itself is covered by `test_write_pipeline.py`. What is tested here
+is the part a human actually experiences: whether the gate says the dangerous
+thing FIRST, and whether an approval is required before anything reaches the
+user's files.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import pytest
+from rich.console import Console
+
+from dynaflows import cli
+from dynaflows.contracts.state import (
+    ArtifactRef,
+    ChangeSet,
+    GateDecision,
+    GateOutcome,
+    WorkspaceRef,
+)
+
+pytestmark = pytest.mark.deterministic
+
+
+def _render(payload: dict[str, Any]) -> str:
+    buffer = Console(record=True, width=100)
+    cli._render_change_gate(payload, out=buffer)
+    return buffer.export_text()
+
+
+def _payload(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "gate": "change",
+        "empty": False,
+        "files": ["a.py"],
+        "stat": " a.py | 2 +-",
+        "branch": "dynaflows/chg-1",
+        "comparable": True,
+        "newly_failing": [],
+        "newly_passing": [],
+        "still_failing": [],
+        "dirty_paths": [],
+        "dirty_checked": True,
+    }
+    base.update(over)
+    return base
+
+
+# --------------------------------------------------------------------------
+# The order is the design.
+# --------------------------------------------------------------------------
+
+
+def test_an_empty_diff_is_the_first_thing_said_and_nothing_else_is(
+    ) -> None:
+    """Every line below `empty` reads as success when the diff is empty.
+
+    Measured live: `acceptEdits` exits 0 having silently refused a command,
+    reports itself done, and leaves no diff.
+    """
+    text = _render(_payload(empty=True, agent_said="All done!", newly_passing=["t::x"]))
+
+    assert "changed nothing" in text
+    assert "t::x" not in text, "no verdict may be shown beside an empty diff"
+    assert "Approving applies nothing" in text
+
+
+def test_an_uncomparable_suite_is_called_unverified_not_clean() -> None:
+    """An empty `newly_failing` from a suite that collected no tests looks
+    exactly like a clean change."""
+    text = _render(_payload(comparable=False, suite_tail="INTERNALERROR"))
+
+    assert "could not be compared" in text
+    assert "unverified" in text.lower()
+    assert "Nothing that passed before fails now" not in text
+
+
+def test_a_clean_change_says_so_in_terms_of_what_passed_before() -> None:
+    text = _render(_payload())
+    assert "Nothing that passed before fails now" in text
+
+
+def test_broken_tests_are_named_not_counted() -> None:
+    text = _render(_payload(newly_failing=["tests/a.py::test_one"]))
+    assert "tests/a.py::test_one" in text
+
+
+def test_pre_existing_failures_are_not_blamed_on_this_change() -> None:
+    text = _render(_payload(still_failing=["tests/old.py::red"]))
+    assert "already failing before this change" in text
+
+
+def test_uncommitted_files_the_agent_never_saw_are_warned_about() -> None:
+    """The worktree was cut from HEAD; this patch is about to land on top of
+    edits the agent could not see (ADR-025)."""
+    text = _render(_payload(dirty_paths=["module.py"]))
+    assert "never saw" in text
+    assert "module.py" in text
+
+
+def test_after_a_resume_an_empty_dirty_list_says_it_was_not_rechecked() -> None:
+    """AP-20: the list describes the moment the worktree was cut."""
+    text = _render(_payload(dirty_paths=[], dirty_checked=False))
+    assert "not re-checked" in text
+
+
+def test_the_agents_cost_is_never_shown_as_api_spend() -> None:
+    """Two currencies in one number is AP-20 in a cost line."""
+    text = _render(_payload(agent_cost_equivalent=0.1734, agent_turns=6))
+    assert "equivalent" in text
+    assert "quota" in text
+
+
+def test_the_gate_says_what_approving_will_do() -> None:
+    assert "into your working tree, unstaged" in _render(_payload())
+
+
+# --------------------------------------------------------------------------
+# The write.
+# --------------------------------------------------------------------------
+
+
+def _values(tmp_path: Path, decision: GateDecision, patch_text: str) -> dict[str, Any]:
+    patch_file = tmp_path / "p.diff"
+    patch_file.write_text(patch_text, encoding="utf-8")
+    return {
+        "change_gate": GateOutcome(decision=decision),
+        "changes": ChangeSet(
+            files=["module.py"],
+            stat=" module.py | 2 +-",
+            patch=ArtifactRef(sha="abc", path=str(patch_file), kind="diff"),
+            captured=True,
+        ),
+        "workspace": WorkspaceRef(path="/w", branch="dynaflows/chg-1", base="deadbeef"),
+    }
+
+
+def test_a_rejected_gate_applies_nothing_and_says_where_the_work_is(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli._finish_change(_values(tmp_path, GateDecision.REJECT, "diff"), tmp_path)
+    out = capsys.readouterr().out
+
+    assert "Nothing was applied" in out
+    assert "dynaflows/chg-1" in out
+
+
+def test_an_empty_change_is_not_reported_as_applied(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    values = _values(tmp_path, GateDecision.APPROVE, "diff")
+    values["changes"] = ChangeSet(files=[], captured=True)
+    cli._finish_change(values, tmp_path)
+
+    assert "no diff" in capsys.readouterr().out
+
+
+def test_a_missing_patch_is_a_loud_failure_not_a_silent_success(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    values = _values(tmp_path, GateDecision.APPROVE, "diff")
+    values["changes"] = ChangeSet(files=["module.py"], captured=True, patch=None)
+    cli._finish_change(values, tmp_path)
+
+    assert "no patch was recorded" in capsys.readouterr().out
