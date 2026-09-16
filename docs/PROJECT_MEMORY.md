@@ -1436,6 +1436,61 @@ is unfalsifiable; **"a plausible answer" is unfalsifiable in exactly the same wa
 fixture with known answers exists, this capability's quality is unmeasured. That is the next piece
 of work, and it is listed in §7 rather than assumed.
 
+
+---
+
+### ADR-025: the agent writes in a worktree, not in your tree
+
+**Context.** ADR-023 split the workflow into a read shape and a change shape, and said the
+executor's boundary "needs its own short ADR when the executor is built; it is a paragraph, not a
+sandbox." This is that paragraph. The question is narrow: a coding agent is about to edit files,
+and something has to decide which files it can reach.
+
+**Decision.** Every change run gets a git worktree at `.dynaflows/work/<run_id>`, on a branch
+`dynaflows/<run_id>`, cut from a **resolved HEAD sha** rather than a ref name. The agent runs with
+that directory as its working directory. dynaflows itself still writes only inside `.dynaflows/`,
+so ADR-016 is preserved literally rather than by argument.
+
+**Why a worktree rather than a copy or a sandbox.** Four properties, and no other option has all
+four: a half-applied edit never reaches the user's tree; the diff is `git diff` against the base,
+so no bookkeeping of touched files can disagree with what actually changed; abandoning is
+`git worktree remove --force`, one command, no orphan branch; and the whole thing already lives
+under `.dynaflows/`. A container would add all of that plus an install story, for a boundary that
+git already draws.
+
+**The consequence that will surprise someone, so it is measured.** A worktree branches from a
+commit. Uncommitted work in the user's tree is not in it. "Fix the bug in the file I'm editing"
+would operate on the last committed version and return a diff that silently ignores the edit on
+the user's screen. So `create()` records the modified-but-uncommitted paths, and G2 shows them.
+Per AP-20 the workspace carries `dirty_checked` separately from an empty `dirty_paths`, because
+`adopt()` on resume cannot honestly answer a question about the moment of creation, and a stale
+list presented as current is worse than no list.
+
+**What this ADR does NOT authorise.** The agent's own permissions are its own; dynaflows chooses
+the working directory and nothing else. There is no claim here that the agent cannot escape the
+worktree — it runs as the user, and a determined process can write anywhere the user can. The
+worktree is a boundary against *accident*, which is the failure that actually happens, and calling
+it a sandbox would be a claim this project cannot back.
+
+**A hole this closed on the way past.** The architecture linter forbade a worker calling
+`Path.mkdir` and said nothing about a worker calling `subprocess.run`, which is strictly more
+capable. It could not be caught by call name — `run` is an ordinary method name in this repo and
+banning it would fire on correct code, which is how a gate gets disabled (§5.2, Pattern 5) — so
+`subprocess` is banned by **import**, exempt only inside `executor/`, exactly as ADR-010 bans the
+provider SDKs outside `gateway/`. The rule existed for two phases and was noticed only when the
+first package with a legitimate need arrived. **A permission you grant is the moment to ask what
+was preventing everyone else from taking it.**
+
+The new rule then caught a second caller the same day: `cli.py` spawns the user's `$EDITOR` at a
+gate, which is legitimate. The fix was **not** to exempt `cli.py` — a thousand-line module, about
+to grow a `change` command, granted the right to spawn anything in order to serve seventy lines
+that need it. The seventy lines moved to `src/dynaflows/editing.py` and the exemption is that one
+file. **An exception should be the size of the need**; an exception larger than its need is the
+allowlist growing a pattern while still looking like a list of names.
+
+**Reversal condition:** a change that must be verified against the user's uncommitted state, where
+branching from HEAD loses the thing being fixed.
+
 ---
 
 ## 2. Data Contracts

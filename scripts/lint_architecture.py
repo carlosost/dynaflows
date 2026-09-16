@@ -57,14 +57,51 @@ FILESYSTEM_PACKAGES = (
     # (ADR-022). Added with the same justification as the others rather than
     # as a convenience: this package's whole job is reading files it ships.
     Path("src") / "dynaflows" / "calibration",
+    # ADR-025. The change shape's write half: it cuts a git worktree and
+    # reads the diff back, so filesystem work is not incidental to it, it is
+    # the whole job. ADR-016 is NOT weakened by this -- the worktree lives
+    # under .dynaflows/work/, which is the same boundary every other entry
+    # here respects. What changed is that a second package now has a reason
+    # to cross it, and the reason is written down rather than assumed.
+    Path("src") / "dynaflows" / "executor",
 )
+
+# ADR-016, the half this linter did not have. The rule above forbids a worker
+# calling `Path.mkdir`, and said nothing about a worker calling
+# `subprocess.run("rm -rf ...")` -- a strictly larger capability that the
+# filesystem-call list cannot see, because an AST walk of `subprocess.run`
+# sees the attribute `run` and `run` is a method name this repo uses for
+# ordinary things. So the ban is on the IMPORT, which is unambiguous, exactly
+# as GATEWAY_ONLY_MODULES bans the provider SDKs by name.
+#
+# Found when `executor` was added: the one package in the project whose
+# purpose is to shell out was also the first to make anyone ask what stops
+# everything else from doing it. Nothing did.
+EXECUTOR_ONLY_MODULES = frozenset({"subprocess"})
+EXECUTOR_PACKAGE = Path("src") / "dynaflows" / "executor"
+
+# One file outside `executor/` may spawn: the module that opens the user's
+# $EDITOR at a gate. It exists as a separate module precisely so this
+# exemption can be one file rather than all of `cli.py` -- a thousand lines,
+# about to grow a `change` command, granted the right to spawn anything in
+# order to serve seventy lines that need it. The rule above is only worth
+# having if its exceptions stay the size of the need.
+SPAWN_MODULES = frozenset({"editing.py"})
 
 # Data, not code. The calibration fixtures are deliberately defective by
 # design -- planted exception swallowing, a logged credential, a retry of a
 # non-retryable error -- so every rule here would fire on them correctly and
 # every fire would be noise.
 NOT_SOURCE = (Path("src") / "dynaflows" / "calibration" / "fixtures",)
-FILESYSTEM_MODULES = frozenset({"settings.py", "cli.py", "doctor.py", "checkpoint.py"})
+# `editing.py` writes the gate text to a temp file, hands the path to the
+# user's editor and reads the result back. It inherited this exemption from
+# `cli.py` when the editor launch moved out of it -- which is worth a line,
+# because extracting code OUT of an exempt module silently revokes every
+# exemption that module held, and the revocation shows up as a linter failure
+# rather than as anything at the call site.
+FILESYSTEM_MODULES = frozenset(
+    {"settings.py", "cli.py", "doctor.py", "checkpoint.py", "editing.py"}
+)
 # Write calls first: these are what ADR-016 forbids. Reads are listed too,
 # because ADR-017's whole point is that reading happens in ONE place.
 #
@@ -211,6 +248,14 @@ def check_file(path: Path, project_root: Path) -> list[str]:
             f"inside {GATEWAY_PACKAGE}/"
             for module, lineno in _imports(tree)
             if module in GATEWAY_ONLY_MODULES
+        ]
+    if EXECUTOR_PACKAGE not in relative.parents and relative.name not in SPAWN_MODULES:
+        violations += [
+            f"{relative}:{lineno}: ADR-016 violation -- '{module}' may only be imported "
+            f"inside {EXECUTOR_PACKAGE}/; a node that can spawn a process can do "
+            "anything the filesystem rule forbids, and more"
+            for module, lineno in _imports(tree)
+            if module in EXECUTOR_ONLY_MODULES
         ]
     return (
         violations

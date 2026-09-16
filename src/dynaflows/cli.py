@@ -21,6 +21,7 @@ from dynaflows import __version__
 from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 from dynaflows.contracts.tiers import Tier
 from dynaflows.doctor import Status, run_checks
+from dynaflows.editing import edit_text
 from dynaflows.settings import get_settings
 from dynaflows.store.run_store import get_run_store
 
@@ -299,84 +300,6 @@ def _render_gate(payload: dict[str, Any], out: Console | None = None) -> None:
         c.print("[dim]no assumptions declared[/]")
 
 
-def _find_editor() -> list[str] | None:
-    """The editor to open, or None.
-
-    Order matters. An explicit $VISUAL/$EDITOR is the user's own choice and
-    wins. Otherwise nano before vim before vi: someone who never set $EDITOR
-    is unlikely to be a vi user, and dropping them into modal editing with no
-    warning is its own kind of trap.
-    """
-    import os
-    import shutil
-
-    for variable in ("VISUAL", "EDITOR"):
-        value = os.environ.get(variable, "").strip()
-        if value:
-            return value.split()
-    for candidate in ("nano", "vim", "vi"):
-        if shutil.which(candidate):
-            return [candidate]
-    return None
-
-
-def _edit_in_editor(initial: str) -> str | None:
-    """Open the text pre-filled. None if no editor, or the editor failed."""
-    import subprocess
-    import tempfile
-
-    editor = _find_editor()
-    if editor is None:
-        return None
-    with tempfile.NamedTemporaryFile("w+", suffix=".md", delete=False) as handle:
-        handle.write(initial)
-        path = handle.name
-    try:
-        # stderr: the brief owns stdout (see `_err`).
-        _err.print(f"[dim]opening {editor[0]}…[/]")
-        result = subprocess.run([*editor, path], check=False)  # noqa: S603
-        if result.returncode != 0:
-            return None
-        return Path(path).read_text(encoding="utf-8")
-    except OSError:
-        return None
-    finally:
-        Path(path).unlink(missing_ok=True)
-
-
-def _read_multiline(current: str) -> str:
-    """Last resort when no editor exists at all.
-
-    A one-line `prompt` was the first version of this and it was bad twice
-    over: retyping a paragraph into a single line is miserable, and with no
-    default an empty Enter re-asked forever. Empty input now KEEPS the text,
-    because "I changed my mind about editing" is the likeliest reason someone
-    submits nothing.
-    """
-    console.print(
-        "[dim]No editor found. Paste the replacement brief, then a line containing only '.'[/]"
-    )
-    console.print("[dim]Submit nothing to keep the text above unchanged.[/]")
-    lines: list[str] = []
-    while True:
-        try:
-            line = input()
-        except EOFError:
-            break
-        if line.strip() == ".":
-            break
-        lines.append(line)
-    return "\n".join(lines).strip() or current
-
-
-def _edit_text(initial: str) -> str:
-    """Always returns usable text. Never loops, never returns empty."""
-    edited = _edit_in_editor(initial)
-    if edited is None:
-        return _read_multiline(initial)
-    return edited.strip() or initial
-
-
 def _ask(c: Console, question: str, default: str) -> str:
     """Ask on `c`, read from stdin, and put NOTHING on stdout.
 
@@ -423,7 +346,7 @@ def _ask_gate(payload: dict[str, Any], out: Console | None = None) -> dict[str, 
         return {"decision": "reject"}
     if choice == "e":
         original = payload.get("enhanced", "")
-        edited = _edit_text(original)
+        edited = edit_text(original)
         if edited == original:
             c.print("[dim]unchanged — treating as approve[/]")
             return {"decision": "approve"}

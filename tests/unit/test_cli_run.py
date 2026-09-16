@@ -143,7 +143,7 @@ def test_resume_on_an_unknown_thread_fails_loudly(isolated: FakeGateway) -> None
 def test_no_editor_falls_back_to_multiline_and_never_loops(
     isolated: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("dynaflows.cli._find_editor", lambda: None)
+    monkeypatch.setattr("dynaflows.editing.find_editor", lambda: None)
     result = CliRunner().invoke(
         app,
         ["run", "audit auth", "--thread", "e1", "--yes-plan"],
@@ -157,7 +157,7 @@ def test_submitting_nothing_keeps_the_text_instead_of_re_asking(
     isolated: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The loop. Empty input used to re-prompt forever with no way out."""
-    monkeypatch.setattr("dynaflows.cli._find_editor", lambda: None)
+    monkeypatch.setattr("dynaflows.editing.find_editor", lambda: None)
     result = CliRunner().invoke(
         app, ["run", "audit auth", "--thread", "e2", "--yes-plan"], input="e\n.\n"
     )
@@ -168,13 +168,13 @@ def test_submitting_nothing_keeps_the_text_instead_of_re_asking(
 def test_an_explicit_editor_variable_wins_over_a_discovered_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from dynaflows.cli import _find_editor
+    from dynaflows.editing import find_editor
 
     monkeypatch.setenv("VISUAL", "")
     monkeypatch.setenv("EDITOR", "my-editor --wait")
-    assert _find_editor() == ["my-editor", "--wait"]
+    assert find_editor() == ["my-editor", "--wait"]
     monkeypatch.setenv("VISUAL", "visual-editor")
-    assert _find_editor() == ["visual-editor"]
+    assert find_editor() == ["visual-editor"]
 
 
 def test_without_an_editor_variable_a_friendly_one_is_preferred(
@@ -182,18 +182,18 @@ def test_without_an_editor_variable_a_friendly_one_is_preferred(
 ) -> None:
     """Someone who never set $EDITOR is unlikely to be a vi user, and dropping
     them into modal editing unannounced is its own trap."""
-    from dynaflows.cli import _find_editor
+    from dynaflows.editing import find_editor
 
     monkeypatch.delenv("VISUAL", raising=False)
     monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-    assert _find_editor() == ["nano"]
+    assert find_editor() == ["nano"]
 
 
 def test_the_edited_text_reaches_the_workflow(
     isolated: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("dynaflows.cli._find_editor", lambda: None)
+    monkeypatch.setattr("dynaflows.editing.find_editor", lambda: None)
     result = CliRunner().invoke(
         app, ["run", "audit auth", "--thread", "e3", "--yes-plan"], input="e\nREPLACED BRIEF\n.\n"
     )
