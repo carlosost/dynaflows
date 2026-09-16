@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from dynaflows.contracts.state import SuiteRun
 from dynaflows.executor import verify
-from dynaflows.executor.verify import SuiteRun, Verdict
 
 pytestmark = pytest.mark.deterministic
 
@@ -27,9 +27,9 @@ def _run(
     exit_code: int = 1,
 ) -> SuiteRun:
     return SuiteRun(
-        command=("fake",),
+        command=["fake"],
         exit_code=exit_code,
-        failing=frozenset(failing),
+        failing=sorted(failing),
         parsed=parsed,
         duration_s=0.0,
         timed_out=False,
@@ -48,13 +48,13 @@ def test_the_same_number_of_failures_can_be_a_different_set() -> None:
     A count-based oracle reports 'no change' here. It is the exact case this
     module exists for.
     """
-    verdict = Verdict(
+    verdict = verify.compare(
         before=_run(failing={"a", "b", "c"}),
         after=_run(failing={"a", "b", "d"}),
     )
-    assert verdict.newly_failing == {"d"}
-    assert verdict.newly_passing == {"c"}
-    assert verdict.still_failing == {"a", "b"}
+    assert verdict.newly_failing == ["d"]
+    assert verdict.newly_passing == ["c"]
+    assert verdict.still_failing == ["a", "b"]
     assert verdict.clean is False
 
 
@@ -65,20 +65,22 @@ def test_a_suite_that_was_already_red_does_not_block_a_clean_change() -> None:
     any change at all, and a gate nobody can pass is a gate people route
     around (playbook 5.2, Pattern 5).
     """
-    verdict = Verdict(before=_run(failing={"a", "b"}), after=_run(failing={"a", "b"}))
+    verdict = verify.compare(before=_run(failing={"a", "b"}), after=_run(failing={"a", "b"}))
     assert verdict.clean is True
-    assert verdict.newly_failing == frozenset()
-    assert verdict.still_failing == {"a", "b"}
+    assert verdict.newly_failing == []
+    assert verdict.still_failing == ["a", "b"]
 
 
 def test_a_fix_shows_up_as_newly_passing() -> None:
-    verdict = Verdict(
-        before=_run(failing={"test_the_bug"}),
-        after=_run(failing=set(), exit_code=0),
-    )
-    assert verdict.newly_passing == {"test_the_bug"}
+    after = _run(failing=set(), exit_code=0)
+    verdict = verify.compare(before=_run(failing={"test_the_bug"}), after=after)
+    assert verdict.newly_passing == ["test_the_bug"]
     assert verdict.clean is True
-    assert verdict.after.green is True
+    # `green` is a fact about the RUN, not about the comparison. The verdict
+    # deliberately does not carry the two runs it was computed from: state
+    # would then hold them twice, which is the payload-in-state rule (ADR-008)
+    # broken by a convenience property.
+    assert after.green is True
 
 
 def test_an_unreadable_run_is_not_a_clean_one() -> None:
@@ -88,16 +90,16 @@ def test_an_unreadable_run_is_not_a_clean_one() -> None:
     indistinguishable from a clean change unless `comparable` is checked, so
     `clean` checks it.
     """
-    verdict = Verdict(before=_run(failing=set()), after=_run(failing=set(), parsed=False))
+    verdict = verify.compare(before=_run(failing=set()), after=_run(failing=set(), parsed=False))
     assert verdict.comparable is False
     assert verdict.clean is False
-    assert verdict.newly_failing == frozenset()
-    assert verdict.newly_passing == frozenset()
-    assert verdict.still_failing == frozenset()
+    assert verdict.newly_failing == []
+    assert verdict.newly_passing == []
+    assert verdict.still_failing == []
 
 
 def test_an_unreadable_baseline_is_not_comparable_either() -> None:
-    verdict = Verdict(before=_run(failing=set(), parsed=False), after=_run(failing={"a"}))
+    verdict = verify.compare(before=_run(failing=set(), parsed=False), after=_run(failing={"a"}))
     assert verdict.comparable is False
     assert verdict.clean is False
 
@@ -127,7 +129,7 @@ def test_a_passing_command_parses_as_green(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert result.parsed is True
     assert result.green is True
-    assert result.failing == frozenset()
+    assert result.failing == []
 
 
 def test_failed_lines_are_read_as_test_identities(tmp_path: Path) -> None:
@@ -141,11 +143,11 @@ def test_failed_lines_are_read_as_test_identities(tmp_path: Path) -> None:
     result = verify.run_tests(_Space(tmp_path), (sys.executable, "-c", script))  # type: ignore[arg-type]
 
     assert result.parsed is True
-    assert result.failing == {
+    assert result.failing == [
         "tests/unit/test_a.py::test_one",
         "tests/unit/test_b.py::test_two",
         "tests/unit/test_c.py",
-    }
+    ]
     assert result.green is False
 
 
@@ -177,7 +179,7 @@ def test_a_missing_command_is_a_configuration_problem_not_a_red_suite(
     )
     assert result.parsed is False
     assert result.timed_out is False
-    assert result.failing == frozenset()
+    assert result.failing == []
     assert result.tail
 
 
@@ -195,7 +197,7 @@ def test_a_hanging_suite_times_out_rather_than_hanging_the_run(tmp_path: Path) -
 def test_stderr_is_read_too_because_pytest_crashes_there(tmp_path: Path) -> None:
     script = "import sys; print('FAILED tests/x.py::t', file=sys.stderr); raise SystemExit(1)"
     result = verify.run_tests(_Space(tmp_path), (sys.executable, "-c", script))  # type: ignore[arg-type]
-    assert result.failing == {"tests/x.py::t"}
+    assert result.failing == ["tests/x.py::t"]
 
 
 def test_the_command_runs_in_the_worktree_not_the_users_tree(tmp_path: Path) -> None:

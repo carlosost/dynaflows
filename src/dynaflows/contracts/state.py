@@ -264,6 +264,119 @@ def merge_cost(current: CostLedger, update: CostLedger) -> CostLedger:
     )
 
 
+# ---------------------------------------------------------------------------
+# The change shape. ADR-023, ADR-025, ADR-026.
+# ---------------------------------------------------------------------------
+
+
+class WorkspaceRef(BaseModel):
+    """The worktree, as state can hold it.
+
+    A projection of `executor.workspace.Workspace` rather than the object
+    itself: state is checkpointed, `Path` is not a contract, and `adopt()` on
+    resume needs exactly these fields to re-attach. Keeping the projection
+    explicit means a future field on `Workspace` cannot silently become part
+    of the checkpoint format.
+    """
+
+    path: str
+    branch: str
+    base: str
+    dirty_paths: list[str] = Field(default_factory=list)
+    # AP-20: an empty `dirty_paths` after a resume means "not re-measured",
+    # not "clean". See ADR-025 -- `adopt()` cannot honestly answer a question
+    # about the moment of creation.
+    dirty_checked: bool = True
+
+
+class SuiteRun(BaseModel):
+    """One run of the project's tests, before or after the change."""
+
+    command: list[str] = Field(default_factory=list)
+    exit_code: int = 0
+    # Sorted, because a checkpoint that differs only in set iteration order
+    # makes two identical runs look different in a diff.
+    failing: list[str] = Field(default_factory=list)
+    # Whether `failing` is an answer at all. False after a crash, a usage
+    # error or an empty collection, where an empty list would otherwise read
+    # as "nothing is broken".
+    parsed: bool = False
+    timed_out: bool = False
+    duration_s: float = 0.0
+    tail: str = Field(default="", max_length=4000)
+
+    @property
+    def green(self) -> bool:
+        """Passed, and the result is readable. An unparsed run is never green."""
+        return self.parsed and self.exit_code == 0
+
+
+class AgentOutcome(BaseModel):
+    """What the coding agent reported about its own run.
+
+    `cost_usd_equivalent` is named for what it is. Under subscription auth the
+    agent reports a dollar figure that is an ESTIMATE of equivalent API spend,
+    not a charge, and the run consumes quota instead. Adding it to the
+    `CostLedger`'s real OpenRouter dollars would sum two currencies -- AP-20
+    in a cost line -- so it is carried separately and rendered separately.
+    """
+
+    session_id: str = ""
+    exit_code: int = 0
+    # Ran to completion and did not report failing at its own task. Says
+    # NOTHING about whether the change is correct; that is `verified`.
+    usable: bool = False
+    # Could not be used at all: not installed, not logged in, timed out.
+    # A configuration problem, not a failed change (ADR-025 amendment).
+    unavailable: bool = False
+    timed_out: bool = False
+    duration_s: float = 0.0
+    cost_usd_equivalent: float | None = None
+    num_turns: int | None = None
+    result_text: str = Field(default="", max_length=2000)
+
+
+class ChangeSet(BaseModel):
+    """What the agent did to the worktree.
+
+    The patch itself is an `ArtifactRef` (ADR-008): a diff can be megabytes,
+    LangGraph re-serialises the whole state at every superstep, and a large
+    payload in state is the failure that ADR made a rule about.
+    """
+
+    files: list[str] = Field(default_factory=list)
+    stat: str = Field(default="", max_length=4000)
+    patch: ArtifactRef | None = None
+    # Whether the diff was read at all. Distinct from an empty `files`,
+    # because "the agent changed nothing" is a legitimate outcome -- measured
+    # live: `acceptEdits` exits 0 having silently refused a command -- and
+    # "we never looked" must not render the same way.
+    captured: bool = False
+
+    @property
+    def is_empty(self) -> bool:
+        return self.captured and not self.files
+
+
+class Verdict(BaseModel):
+    """What the change did to the suite. ADR-025's three facts, kept apart."""
+
+    comparable: bool = False
+    newly_failing: list[str] = Field(default_factory=list)
+    newly_passing: list[str] = Field(default_factory=list)
+    still_failing: list[str] = Field(default_factory=list)
+
+    @property
+    def clean(self) -> bool:
+        """Nothing that passed before fails now.
+
+        Deliberately not "the suite is green": a project already red could
+        then accept no change at all, and a gate nobody can pass is a gate
+        people route around (playbook 5.2, Pattern 5).
+        """
+        return self.comparable and not self.newly_failing
+
+
 class WorkflowState(TypedDict, total=False):
     """PMA §2.1. `total=False` because the graph fills it in stages."""
 
@@ -327,6 +440,21 @@ class WorkflowState(TypedDict, total=False):
     degraded: bool
     synthesis: ArtifactRef | None
     halted: str | None
+
+    # --- the change shape (ADR-023). Absent on a read run. ----------------
+    workspace: WorkspaceRef | None
+    baseline: SuiteRun | None
+    agent: AgentOutcome | None
+    changes: ChangeSet | None
+    after: SuiteRun | None
+    verdict: Verdict | None
+    change_gate: GateOutcome | None
+    # Whether the approved diff reached the user's tree, and what happened
+    # if it did not. ADR-026: `git apply` can fail because the tree moved
+    # under a paused run, and that is a reported outcome rather than an
+    # exception -- the branch still exists either way.
+    applied: bool
+    apply_error: str | None
 
 
 def initial_state(

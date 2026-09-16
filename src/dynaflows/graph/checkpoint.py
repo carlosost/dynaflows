@@ -37,6 +37,16 @@ ALLOWED_STATE_TYPES = (
     state.Plan,
     state.PlanTask,
     state.WorkerResult,
+    # The change shape (ADR-023/025/026). Listed the moment the types existed,
+    # because the gate that caught their absence is the only thing standing
+    # between a new state field and every existing checkpoint becoming
+    # unreadable -- and it catches it at the type, not at the run that fails
+    # to resume three days later.
+    state.AgentOutcome,
+    state.ChangeSet,
+    state.SuiteRun,
+    state.Verdict,
+    state.WorkspaceRef,
     calls.CostLedger,
     errors.ErrorCode,
     errors.ErrorEnvelope,

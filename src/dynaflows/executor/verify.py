@@ -37,12 +37,18 @@ from __future__ import annotations
 import re
 import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
+from dynaflows.contracts.state import SuiteRun, Verdict
 from dynaflows.executor.workspace import Workspace
 
-__all__ = ["SuiteRun", "Verdict", "compare", "prepare", "run_tests"]
+__all__ = ["compare", "prepare", "run_tests"]
+
+# `SuiteRun` and `Verdict` are the contract types (contracts/state.py), not
+# copies of them. They are checkpointed, so there can be exactly one shape for
+# each: a live dataclass here and a serialisable twin there would be two
+# hand-written lists of the same fields, and this project has already paid for
+# that mistake once (`merge_cost` and `_merge_delta` drifting apart).
 
 # pytest's short summary, which `-q` still prints. Matched rather than the
 # progress line because a node id is a stable, comparable identity and a dot
@@ -58,81 +64,6 @@ _TRUSTWORTHY_EXITS = frozenset({0, 1})
 DEFAULT_COMMAND = ("uv", "run", "pytest", "-q", "--tb=no")
 DEFAULT_TIMEOUT_S = 900
 _TAIL_LINES = 40
-
-
-@dataclass(frozen=True, slots=True)
-class SuiteRun:
-    """One execution of the suite, with its identity-bearing result.
-
-    Not `TestRun`: pytest collects any class whose name starts with `Test`,
-    fails to instantiate this one, and emits a PytestCollectionWarning on
-    every run of the suite. A warning that fires on correct work is a warning
-    people learn to scroll past, which is the same failure mode as a gate
-    that fires on ordinary work (playbook 5.2, Pattern 5) -- just quieter.
-    """
-
-    command: tuple[str, ...]
-    exit_code: int
-    failing: frozenset[str]
-    # Whether `failing` is a real answer. False after a crash, a usage error,
-    # or an empty collection -- cases where an empty set would otherwise read
-    # as "nothing is broken".
-    parsed: bool
-    duration_s: float
-    timed_out: bool
-    tail: str
-
-    @property
-    def green(self) -> bool:
-        return self.parsed and self.exit_code == 0
-
-
-@dataclass(frozen=True, slots=True)
-class Verdict:
-    """What the change did to the suite, or why that cannot be said."""
-
-    before: SuiteRun
-    after: SuiteRun
-
-    @property
-    def comparable(self) -> bool:
-        """Both runs produced a trustworthy set of test ids.
-
-        Read this before reading anything else. The three sets below are all
-        empty when it is False, and empty means 'unknown' there, not 'clean'.
-        """
-        return self.before.parsed and self.after.parsed
-
-    @property
-    def newly_failing(self) -> frozenset[str]:
-        """Broken by the change. The only set that should block a merge."""
-        if not self.comparable:
-            return frozenset()
-        return self.after.failing - self.before.failing
-
-    @property
-    def newly_passing(self) -> frozenset[str]:
-        """Fixed by the change -- which for a bug fix is the point of it."""
-        if not self.comparable:
-            return frozenset()
-        return self.before.failing - self.after.failing
-
-    @property
-    def still_failing(self) -> frozenset[str]:
-        """Red before, red after. Not this change's doing, and not hidden."""
-        if not self.comparable:
-            return frozenset()
-        return self.after.failing & self.before.failing
-
-    @property
-    def clean(self) -> bool:
-        """Nothing that passed before fails now.
-
-        Deliberately NOT 'the suite is green': a project whose suite was
-        already red would then be unable to accept any change at all, and the
-        gate would be one people route around.
-        """
-        return self.comparable and not self.newly_failing
 
 
 def _tail(text: str) -> str:
@@ -173,9 +104,9 @@ def _execute(cwd: Path, command: tuple[str, ...], *, timeout_s: int) -> SuiteRun
         )
     except subprocess.TimeoutExpired as expired:
         return SuiteRun(
-            command=command,
+            command=list(command),
             exit_code=-1,
-            failing=frozenset(),
+            failing=[],
             parsed=False,
             duration_s=time.monotonic() - started,
             timed_out=True,
@@ -185,9 +116,9 @@ def _execute(cwd: Path, command: tuple[str, ...], *, timeout_s: int) -> SuiteRun
         # The command does not exist. A missing `uv` is a configuration
         # problem, not a red suite, and must not read as one.
         return SuiteRun(
-            command=command,
+            command=list(command),
             exit_code=-1,
-            failing=frozenset(),
+            failing=[],
             parsed=False,
             duration_s=time.monotonic() - started,
             timed_out=False,
@@ -196,9 +127,9 @@ def _execute(cwd: Path, command: tuple[str, ...], *, timeout_s: int) -> SuiteRun
 
     output = completed.stdout + completed.stderr
     return SuiteRun(
-        command=command,
+        command=list(command),
         exit_code=completed.returncode,
-        failing=frozenset(_OUTCOME.findall(output)),
+        failing=sorted(set(_OUTCOME.findall(output))),
         parsed=completed.returncode in _TRUSTWORTHY_EXITS,
         duration_s=time.monotonic() - started,
         timed_out=False,
@@ -207,4 +138,24 @@ def _execute(cwd: Path, command: tuple[str, ...], *, timeout_s: int) -> SuiteRun
 
 
 def compare(before: SuiteRun, after: SuiteRun) -> Verdict:
-    return Verdict(before=before, after=after)
+    """The three facts, computed once, in the shape state will hold.
+
+    Computed here rather than as properties on `Verdict` because the verdict
+    is checkpointed and read back by the gate and the CLI: a property would
+    recompute from `before`/`after` that state does not carry, and carrying
+    them twice to keep the property working is how the payload-in-state rule
+    gets broken by accident (ADR-008).
+    """
+    comparable = before.parsed and after.parsed
+    if not comparable:
+        # Every set empty AND comparable False. An empty `newly_failing` from
+        # a run that collected nothing is indistinguishable from a clean
+        # change unless the caller checks `comparable`, so `clean` checks it.
+        return Verdict(comparable=False)
+    was, now = set(before.failing), set(after.failing)
+    return Verdict(
+        comparable=True,
+        newly_failing=sorted(now - was),
+        newly_passing=sorted(was - now),
+        still_failing=sorted(now & was),
+    )
