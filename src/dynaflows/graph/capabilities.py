@@ -108,13 +108,21 @@ def capabilities_for(pipeline: str) -> tuple[Capability, ...]:
     return tuple(c for c in CAPABILITIES if c.pipeline == pipeline)
 
 
-def render_capabilities(pipeline: str = "read") -> str:
+def render_capabilities(pipeline: str) -> str:
     """What the planner is shown. Compact: it is paid for on every plan call.
 
     Filtered by pipeline, so the READ planner is never offered a capability
     that writes and the WRITE planner is never offered one that only reads.
     A planner cannot choose something it was not shown, which is cheaper and
     more reliable than a prompt asking it not to.
+
+    `pipeline` has NO DEFAULT, and that is the point. It had one -- "read" --
+    for exactly as long as it took the first WRITE run to reach the planner:
+    `nodes.plan` called this with no argument, got the read catalogue, could
+    not see `implement`, and planned four analysis tasks that the WRITE
+    pipeline has no node to run. A default is a decision made for every caller
+    that forgets to decide, and the caller who forgets is the one who needed
+    to think about it. If you can enforce it, do not ask for it.
     """
     return "\n".join(
         f"- {c.id}: {c.summary} Produces: {c.produces}" for c in capabilities_for(pipeline)

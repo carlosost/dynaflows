@@ -453,3 +453,186 @@ async def test_no_paths_means_no_context_rather_than_an_empty_heading(
     await write_nodes.execute(state, config)
 
     assert agent.context == ""
+
+
+# --------------------------------------------------------------------------
+# The planner must plan a CHANGE. Found on the first live `change` run.
+# --------------------------------------------------------------------------
+
+
+def test_the_write_planner_is_shown_implement_and_not_the_read_capabilities() -> None:
+    """The bug: `nodes.plan` called `render_capabilities()` with no argument,
+    which defaults to the read catalogue. The write planner could not see
+    `implement`, so it planned four `analyse` tasks -- and the WRITE pipeline
+    has no worker node to run them."""
+    from dynaflows.graph.capabilities import render_capabilities
+
+    assert "implement" in render_capabilities("write")
+    assert "analyse" not in render_capabilities("write")
+
+
+def test_every_caller_of_render_capabilities_names_a_pipeline() -> None:
+    """A test on `render_capabilities` proves nothing about its CALLERS.
+
+    The suite already asserted `"implement" not in render_capabilities("read")`
+    and passed while `nodes.plan` ignored the parameter entirely, so the write
+    planner was shown the read catalogue and planned four analysis tasks.
+
+    Checked by PARSING, not by searching text. The first version of this test
+    asserted `"render_capabilities()" not in source` and failed on a COMMENT
+    that quoted the bug it was describing. That is the fifth matcher in two
+    days to look at the wrong thing -- an anchored grep that could not see an
+    indented import, a column parse fed stripped output, a phrase rule that
+    could not cross a line wrap, a quoted word that matched any docstring, and
+    now this. **The AST knows what a call is; a substring does not.**
+    """
+    import ast
+
+    root = Path(__file__).resolve().parents[2] / "src"
+    bare: list[str] = []
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "render_capabilities"
+                and not node.args
+                and not node.keywords
+            ):
+                bare.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert bare == [], (
+        "render_capabilities() without a pipeline defaults to the READ catalogue; "
+        f"a WRITE run planned with it cannot see `implement`: {bare}"
+    )
+
+
+def test_a_write_plan_with_several_tasks_is_rejected() -> None:
+    from dynaflows.graph.nodes import _write_plan_violation
+
+    class _Task:
+        capability = "implement"
+
+    class _Draft:
+        tasks = [_Task(), _Task()]
+
+    reason = _write_plan_violation(_Draft())
+    assert "ONE task" in reason
+    assert "2" in reason
+
+
+def test_a_write_plan_that_reads_instead_of_writing_is_rejected() -> None:
+    from dynaflows.graph.nodes import _write_plan_violation
+
+    class _Task:
+        capability = "analyse"
+
+    class _Draft:
+        tasks = [_Task()]
+
+    assert "implement" in _write_plan_violation(_Draft())
+
+
+def test_one_implement_task_is_accepted() -> None:
+    from dynaflows.graph.nodes import _write_plan_violation
+
+    class _Task:
+        capability = "implement"
+
+    class _Draft:
+        tasks = [_Task()]
+
+    assert _write_plan_violation(_Draft()) == ""
+
+
+# --------------------------------------------------------------------------
+# The planner's anchors reach the agent. This is what it is FOR.
+# --------------------------------------------------------------------------
+
+
+class _Chunk:
+    def __init__(self, heading_path: str, body: str) -> None:
+        self.heading_path = heading_path
+        self.body = body
+
+
+class _Playbook:
+    def __init__(self, chunks: list[_Chunk] | None = None) -> None:
+        self.chunks = chunks or []
+        self.asked: list[str] = []
+
+    def by_anchor(self, anchors: list[str]) -> list[_Chunk]:
+        self.asked = list(anchors)
+        return self.chunks
+
+
+def _planned(anchors: list[str]) -> Any:
+    from dynaflows.contracts.state import Plan, PlanTask
+
+    return Plan(
+        tasks=[
+            PlanTask(
+                task_id="t", capability="implement", objective="o", playbook_anchors=anchors
+            )
+        ]
+    )
+
+
+async def test_the_playbook_sections_the_planner_chose_reach_the_agent(
+    repo: Path, oracle: FakeOracle
+) -> None:
+    """The planner's one irreplaceable contribution in the WRITE pipeline.
+
+    The agent reads files better than any plan can describe them, but it
+    cannot know which of this project's decisions govern the change it is
+    about to make -- that is not discoverable from the code.
+    """
+    agent = RecordingAgent()
+    config = _config(repo, agent)
+    config["configurable"]["playbook"] = _Playbook(
+        [_Chunk("Playbook > AP-20", "two facts, two counters")]
+    )
+    state = _state(plan=_planned(["AP-20"]))
+    state.update(await write_nodes.prepare(state, config))
+
+    await write_nodes.execute(state, config)
+
+    assert "two facts, two counters" in agent.context
+    assert "AP-20" in agent.context
+
+
+async def test_a_broken_playbook_costs_context_not_the_change(
+    repo: Path, oracle: FakeOracle
+) -> None:
+    """Degraded, not dead: the agent loses context it would have liked and
+    still makes the change."""
+
+    class _Broken:
+        def by_anchor(self, anchors: list[str]) -> list[_Chunk]:
+            raise RuntimeError("index unavailable")
+
+    agent = RecordingAgent()
+    config = _config(repo, agent)
+    config["configurable"]["playbook"] = _Broken()
+    state = _state(plan=_planned(["AP-20"]), relevant_paths=["src/a.py"])
+    state.update(await write_nodes.prepare(state, config))
+
+    update = await write_nodes.execute(state, config)
+
+    assert "halted" not in update
+    assert update["changes"].files == ["module.py"]
+    assert "src/a.py" in agent.context
+
+
+async def test_no_anchors_means_no_playbook_section_in_the_context(
+    repo: Path, oracle: FakeOracle
+) -> None:
+    agent = RecordingAgent()
+    config = _config(repo, agent)
+    config["configurable"]["playbook"] = _Playbook([])
+    state = _state(plan=_planned([]))
+    state.update(await write_nodes.prepare(state, config))
+
+    await write_nodes.execute(state, config)
+
+    assert "govern the change" not in agent.context

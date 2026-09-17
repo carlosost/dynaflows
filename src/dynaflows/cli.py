@@ -215,6 +215,32 @@ def _render_plan_gate(payload: dict[str, Any], out: Console | None = None) -> No
             Text(size),
         )
     c.print(table)
+
+    # The WRITE pipeline has no worker node and no fan-out: `execute` hands
+    # the brief to a coding agent. Saying "1 parallel worker" here would be
+    # describing machinery that does not run -- and the first live `change`
+    # run showed a user four workers, a 68,806-token total and a budget
+    # warning for a fan-out this pipeline cannot perform. A gate that
+    # describes work which will not happen is worse than a gate with less
+    # detail on it.
+    if payload.get("pipeline") == "write":
+        c.print(
+            "[yellow]1 change[/], handed to a coding agent in an isolated worktree "
+            f"[dim]· plan {payload.get('plan_hash', '?')}[/]"
+        )
+        anchors = tasks[0].get("anchors") if tasks else None
+        if anchors:
+            c.print(
+                f"[dim]the agent will be shown {len(anchors)} playbook section(s) "
+                "verbatim, chosen for this change[/]"
+            )
+        else:
+            # AP-20: "the planner chose none" is a different fact from "the
+            # planner was not asked", and this is the one thing the planner
+            # contributes here that the agent cannot do for itself.
+            c.print("[yellow]no playbook sections were selected for this change[/]")
+        return
+
     c.print(
         f"[yellow]{len(tasks)} parallel worker(s)[/], "
         f"[dim]{payload.get('estimated_tokens', 0):,} context tokens measured · "
@@ -1042,7 +1068,10 @@ def diagnose(
         repository = get_playbook_repository()
         system = PLANNER_SYSTEM.format(
             max_fanout=MAX_FANOUT,
-            capabilities=render_capabilities(),
+            # `diagnose` reproduces a READ planner call. Named rather than
+            # defaulted: this line was a silent bare caller until the
+            # default was removed.
+            capabilities=render_capabilities("read"),
             section_map=repository.section_map(),
         )
         schema = PlanDraft

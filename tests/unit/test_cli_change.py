@@ -167,3 +167,80 @@ def test_a_missing_patch_is_a_loud_failure_not_a_silent_success(
     cli._finish_change(values, tmp_path)
 
     assert "no patch was recorded" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# G2 must not describe a fan-out the WRITE pipeline cannot perform.
+# --------------------------------------------------------------------------
+
+
+def _plan_payload(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "gate": "plan",
+        "pipeline": "write",
+        "rationale": "one change",
+        "plan_hash": "abc123",
+        "estimated_tokens": 10_000,
+        "context_budget": 21_000,
+        "over_budget": [],
+        "tasks": [
+            {
+                "task_id": "section-map-budget",
+                "capability": "implement",
+                "objective": "cap the catalogue",
+                "inputs": ["src/dynaflows/playbook/repository.py"],
+                "anchors": ["ADR-009", "AP-20"],
+                "context_tokens": 10_000,
+            }
+        ],
+    }
+    base.update(over)
+    return base
+
+
+def _render_plan(payload: dict[str, Any]) -> str:
+    buffer = Console(record=True, width=120)
+    cli._render_plan_gate(payload, out=buffer)
+    return buffer.export_text()
+
+
+def test_a_write_plan_is_not_described_as_parallel_workers() -> None:
+    """The first live `change` run showed four workers, 68,806 context tokens
+    and a worker-budget warning -- for a pipeline with no worker node."""
+    text = _render_plan(_plan_payload())
+
+    assert "parallel worker" not in text
+    assert "1 change" in text
+    assert "isolated worktree" in text
+
+
+def test_a_write_plan_says_how_many_playbook_sections_the_agent_will_see() -> None:
+    """The planner's one irreplaceable contribution here, so the gate names it."""
+    assert "2 playbook section(s)" in _render_plan(_plan_payload())
+
+
+def test_a_write_plan_with_no_anchors_says_so_rather_than_saying_nothing() -> None:
+    """AP-20: 'the planner chose none' and 'the planner was not asked' are two
+    facts, and the first one means the agent arrives without the rules."""
+    payload = _plan_payload()
+    payload["tasks"][0]["anchors"] = []
+    text = _render_plan(payload)
+
+    assert "no playbook sections were selected" in text
+
+
+def test_a_read_plan_still_describes_its_fan_out() -> None:
+    payload = _plan_payload(pipeline="read")
+    payload["tasks"][0]["capability"] = "analyse"
+    text = _render_plan(payload)
+
+    assert "1 parallel worker(s)" in text
+    assert "isolated worktree" not in text
+
+
+def test_a_read_plan_still_warns_about_over_budget_tasks() -> None:
+    payload = _plan_payload(pipeline="read", over_budget=["section-map-budget"])
+    text = _render_plan(payload)
+
+    assert "worker" in text
+    assert "budget" in text

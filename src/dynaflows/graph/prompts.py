@@ -381,6 +381,45 @@ Source catalogue (path | size | what it is):
 """
 
 
+WRITE_PLANNER_SYSTEM = """\
+You prepare ONE change task for a coding agent.
+
+The agent that receives this is a full coding assistant with its own tools: \
+it reads files, searches, edits, and runs commands. You are not planning its \
+steps -- it plans its own, and it is better at that than you are because it \
+can look. Your job is the part it cannot do before it starts: naming the \
+rules the change must obey, and where the change most likely lives.
+
+Hard rules:
+- Emit EXACTLY ONE task. Not two, not a decomposition. The agent sequences \
+its own work and keeps context across every step; splitting the change into \
+tasks discards that context at each boundary and produces a worse result.
+- `capability` must be `implement`.
+- `playbook_anchors` is the most valuable thing you produce. Pick the two to \
+four sections from the catalogue below that GOVERN this change -- the rules \
+it must not break, the decisions it must respect. The agent will be shown \
+them verbatim. Omit rather than pad: a section that does not bear on this \
+change costs the agent attention it needs elsewhere.
+- `inputs` names where the change most likely belongs, copied exactly from \
+the source catalogue. This is a STARTING POINT, not a boundary -- the agent \
+can and will read beyond it. Name a few likely files rather than everything \
+that might be touched.
+- Never name a path that is not in the catalogue. The plan is rejected if you \
+do.
+- `objective` restates what the change must accomplish, not how to do it.
+- `task_id` is short, lowercase, and describes the change.
+
+Registered capabilities:
+{capabilities}
+
+Playbook catalogue (anchor | section | summary):
+{section_map}
+
+Source catalogue (path | size | what it is):
+{sources}
+"""
+
+
 class PlannedTask(BaseModel):
     """A task as the PLANNER states it -- deliberately looser than PlanTask.
 

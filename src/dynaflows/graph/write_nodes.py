@@ -57,6 +57,7 @@ from dynaflows.graph.deps import (
     agent_from,
     auto_approved,
     home_from,
+    playbook_from,
     source_root_from,
     store_from,
 )
@@ -76,6 +77,45 @@ def _ref(space: ws.Workspace) -> WorkspaceRef:
         base=space.base,
         dirty_paths=list(space.dirty_paths),
         dirty_checked=space.dirty_checked,
+    )
+
+
+def _governing_rules(state: WorkflowState, config: RunnableConfig | None) -> str:
+    """The playbook sections the planner said govern this change. ADR-009.
+
+    This is the planner earning its cost in the WRITE pipeline. The coding
+    agent reads files better than any plan can describe them, so naming its
+    steps is worthless -- but it starts with no idea which of this project's
+    decisions bear on the change it is about to make, and it cannot find that
+    out by reading code. Routing retrieval is the one thing the planner does
+    that the agent cannot do for itself.
+
+    Failure here is not fatal. An anchor the planner named that no longer
+    exists, or a repository that cannot be reached, costs the agent context
+    it would have liked -- it does not cost it the change. Returning "" and
+    proceeding is right; raising would turn a degraded run into no run.
+    """
+    plan = state.get("plan")
+    if plan is None or not plan.tasks:
+        return ""
+    anchors = list(plan.tasks[0].playbook_anchors)
+    if not anchors:
+        return ""
+    try:
+        chunks = playbook_from(config).by_anchor(anchors)
+    except Exception:  # noqa: BLE001 - see the docstring: context is optional
+        return ""
+    if not chunks:
+        return ""
+    sections = "\n\n".join(
+        f"### {chunk.heading_path}\n{chunk.body}" for chunk in chunks
+    )
+    return (
+        "These sections of this project's engineering playbook govern the change "
+        "you are about to make. They were selected for this specific request. "
+        "Follow them; where one conflicts with the brief, say so rather than "
+        "silently picking one.\n\n"
+        f"{sections}"
     )
 
 
@@ -181,7 +221,12 @@ async def execute(state: WorkflowState, config: RunnableConfig | None = None) ->
     if not brief:
         return {"halted": "no approved brief to hand the agent"}
 
-    result = agent.run(space, brief, context=_context(state))
+    # Two kinds of context, joined, and both optional. The paths say where to
+    # look; the playbook sections say what the change must not break.
+    context = "\n\n".join(
+        part for part in (_context(state), _governing_rules(state, config)) if part
+    )
+    result = agent.run(space, brief, context=context)
     outcome = AgentOutcome(
         session_id=result.session_id,
         exit_code=result.exit_code,

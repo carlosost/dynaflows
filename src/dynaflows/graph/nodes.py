@@ -59,10 +59,11 @@ from dynaflows.graph.deps import (
     store_from,
 )
 from dynaflows.graph.grounding import Grounding
-from dynaflows.graph.prompts import (
+from dynaflows.graph.prompts import (  # noqa: I001
     ANSWER_SYSTEM,
     ENHANCER_SYSTEM,
     PLANNER_SYSTEM,
+    WRITE_PLANNER_SYSTEM,
     SYNTHESIZER_SYSTEM,
     WORKER_SYSTEM,
     AnswerReport,
@@ -240,9 +241,26 @@ async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> di
     # this it saw the playbook and nothing else, so `inputs` was guesswork --
     # right by luck on one run, abandoned entirely on the next.
     catalogue = build_source_map(Path(source_root_from(config)))
-    system = PLANNER_SYSTEM.format(
+
+    # ADR-023. Which pipeline this thread is decides BOTH the instructions and
+    # the capability catalogue, and getting the second one wrong was silent.
+    # This call used to omit the pipeline while the parameter defaulted to
+    # "read", so a WRITE run was planned against the READ catalogue, could not
+    # see `implement`, and did the only thing left to it: it planned an
+    # analysis. Four of them, shown to a user at G2 with a fan-out count and a
+    # worker budget for a pipeline that has no worker node. First live
+    # `change` run, 2026-09-17.
+    #
+    # The default is gone, so this is now a TypeError rather than a wrong
+    # catalogue. The suite missed it because the only test asserted
+    # `"implement" not in render_capabilities("read")` -- true, and silent
+    # about what THIS caller passes. **A test on a function's behaviour is not
+    # a test that its callers use it correctly.**
+    pipeline = state.get("pipeline", "read")
+    template = WRITE_PLANNER_SYSTEM if pipeline == "write" else PLANNER_SYSTEM
+    system = template.format(
         max_fanout=MAX_FANOUT,
-        capabilities=render_capabilities(),
+        capabilities=render_capabilities(pipeline),
         section_map=repository.section_map(),
         sources=catalogue.render(),
     )
@@ -279,6 +297,14 @@ async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> di
         ledger = _merge_delta(ledger, result)
         draft: PlanDraft = result.payload
         correction = planning.violation_of(draft, catalogue) or ""
+        if not correction and pipeline == "write":
+            # Enforced, not requested. The prompt says "exactly one task with
+            # capability implement"; this is what happens when it does not.
+            # A write plan with four analysis tasks reached gate G2 on the
+            # first live run and showed the user a fan-out, a context total
+            # and a budget warning for workers that the WRITE pipeline has no
+            # node to run -- numbers describing work that could not happen.
+            correction = _write_plan_violation(draft)
         if not correction:
             plan_obj = planning.draft_to_plan(draft)
             plan_obj = planning.measure_context(
@@ -296,6 +322,25 @@ async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> di
     # Both attempts failed. The human sees the reason at G2 rather than a
     # trimmed plan that looks fine.
     return {"plan": None, "plan_rejected_reason": correction, "cost": ledger}
+
+
+def _write_plan_violation(draft: Any) -> str:
+    """Why this draft is not a usable WRITE plan, or "" when it is."""
+    tasks = list(getattr(draft, "tasks", ()) or ())
+    if len(tasks) != 1:
+        return (
+            f"a change is ONE task and you emitted {len(tasks)}. The coding agent "
+            "sequences its own work and keeps context across every step; splitting "
+            "the change discards that context at each boundary. Emit exactly one."
+        )
+    capability = getattr(tasks[0], "capability", "")
+    if capability != "implement":
+        return (
+            f"capability must be `implement` for a change and you emitted "
+            f"{capability!r}. This pipeline has no worker to run a read capability; "
+            "the task is handed to a coding agent that edits files."
+        )
+    return ""
 
 
 def _models_version(gateway: Any) -> str:
@@ -374,6 +419,8 @@ async def approve_plan(
     answer = interrupt(
         {
             "gate": "plan",
+            # Which pipeline, so the gate can describe what will actually run.
+            "pipeline": state.get("pipeline", "read"),
             "rationale": plan_obj.rationale,
             "plan_hash": state.get("plan_hash"),
             "estimated_tokens": plan_obj.estimated_tokens,
