@@ -79,6 +79,40 @@ def _ref(space: ws.Workspace) -> WorkspaceRef:
     )
 
 
+def _context(state: WorkflowState) -> str:
+    """What the run knows that the brief does not say.
+
+    G1 produces the files it believes the request concerns, checked against
+    the source catalogue (ADR-023). Until now that list stopped at the gate:
+    the agent was handed the brief alone and began file discovery from
+    nothing, which made a `change` run close to `claude -p` with a lightly
+    edited prompt -- and the paths are the most useful thing G1 produces.
+
+    It travels as system context rather than appended to the brief, because
+    the brief is the exact string a human approved and editing it would hand
+    the agent something nobody read.
+
+    Framed as a STARTING POINT and not a boundary, deliberately. A wrong
+    path list would otherwise cripple a capable agent, and this project has
+    already recorded that narrowing rules fire on legitimate work
+    (ADR-018's empty-inputs rule, §7). The agent is asked to say so when the
+    list is wrong, which turns a bad enhancer into a visible outcome instead
+    of a quietly worse change.
+    """
+    paths = [p for p in (state.get("relevant_paths") or []) if p]
+    if not paths:
+        return ""
+    listed = "\n".join(f"  - {path}" for path in paths)
+    return (
+        "Before you were invoked, the request was read against this repository "
+        "and these files were identified as the ones it concerns:\n"
+        f"{listed}\n"
+        "Treat this as a starting point, not a boundary: read whatever else the "
+        "change requires. If one of these turns out to be irrelevant, or the list "
+        "misses the real subject, say so explicitly in your final message."
+    )
+
+
 def _attached(state: WorkflowState, config: RunnableConfig | None) -> ws.Workspace:
     """Re-attach to the worktree this run already cut.
 
@@ -147,7 +181,7 @@ async def execute(state: WorkflowState, config: RunnableConfig | None = None) ->
     if not brief:
         return {"halted": "no approved brief to hand the agent"}
 
-    result = agent.run(space, brief)
+    result = agent.run(space, brief, context=_context(state))
     outcome = AgentOutcome(
         session_id=result.session_id,
         exit_code=result.exit_code,

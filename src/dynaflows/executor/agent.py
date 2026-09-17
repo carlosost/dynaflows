@@ -37,7 +37,7 @@ import re
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from dynaflows.executor.workspace import Workspace
@@ -175,7 +175,7 @@ class AgentRun:
 class Agent(Protocol):
     """The seam. An SDK adapter or a recorded transcript satisfies this too."""
 
-    def run(self, workspace: Workspace, brief: str) -> AgentRun: ...
+    def run(self, workspace: Workspace, brief: str, *, context: str = "") -> AgentRun: ...
 
 
 def session_id_for(run_id: str) -> str:
@@ -261,9 +261,23 @@ class ClaudeCodeAgent:
     def __init__(self, options: AgentOptions) -> None:
         self._options = options
 
-    def run(self, workspace: Workspace, brief: str) -> AgentRun:
+    def run(self, workspace: Workspace, brief: str, *, context: str = "") -> AgentRun:
+        """`context` goes to --append-system-prompt, NOT into the brief.
+
+        The brief is the exact string a human approved at G1, and appending
+        to it would hand the agent something nobody read. Everything the run
+        knows but did not put in front of the human at that gate travels in
+        the system prompt instead, where it is additional context rather than
+        an edited instruction.
+        """
+        options = self._options
+        if context:
+            joined = "\n\n".join(
+                part for part in (options.append_system_prompt, context) if part
+            )
+            options = replace(options, append_system_prompt=joined)
         session = session_id_for(workspace.run_id)
-        command = build_command(brief, self._options, session)
+        command = build_command(brief, options, session)
         started = time.monotonic()
         try:
             completed = subprocess.run(  # noqa: S603
@@ -272,7 +286,7 @@ class ClaudeCodeAgent:
                 capture_output=True,
                 text=True,
                 check=False,
-                timeout=self._options.timeout_s,
+                timeout=options.timeout_s,
             )
         except subprocess.TimeoutExpired:
             return AgentRun(
@@ -280,7 +294,7 @@ class ClaudeCodeAgent:
                 exit_code=-1,
                 timed_out=True,
                 duration_s=time.monotonic() - started,
-                raw=f"timed out after {self._options.timeout_s}s",
+                raw=f"timed out after {options.timeout_s}s",
             )
         except OSError as error:
             return AgentRun(
@@ -288,7 +302,7 @@ class ClaudeCodeAgent:
                 exit_code=-1,
                 timed_out=False,
                 duration_s=time.monotonic() - started,
-                raw=f"could not start {self._options.binary!r}: {error}",
+                raw=f"could not start {options.binary!r}: {error}",
             )
 
         payload = _parse(completed.stdout)

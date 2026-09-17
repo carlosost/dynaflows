@@ -55,11 +55,13 @@ class FakeAgent:
         self.edit = edit
         self.brief: str | None = None
         self.cwd: Path | None = None
+        self.context: str = ""
         self._run = run
 
-    def run(self, workspace: Any, brief: str) -> AgentRun:
+    def run(self, workspace: Any, brief: str, *, context: str = "") -> AgentRun:
         self.brief = brief
         self.cwd = workspace.path
+        self.context = context
         if self.edit is not None:
             (workspace.path / "module.py").write_text(self.edit, encoding="utf-8")
         return self._run or AgentRun(
@@ -369,3 +371,85 @@ def test_the_write_graph_shares_the_read_pipelines_front_half() -> None:
     assert write_nodes.prepare is not nodes.worker
     for name in ("enhance_prompt", "approve_prompt", "plan", "approve_plan"):
         assert getattr(nodes, name) is not None
+
+
+# --------------------------------------------------------------------------
+# G1's paths reach the agent. They used to stop at the gate.
+# --------------------------------------------------------------------------
+
+
+class RecordingAgent(FakeAgent):
+    """`FakeAgent` records `context` itself now.
+
+    It did not when these tests were written, and widening the `Agent`
+    Protocol broke every implementation of it at once -- caught only because
+    a fake exists. Nothing static checks that an implementation still
+    satisfies the Protocol, because the agent travels through config as
+    `Any`. Worth knowing: the seam's shape is guarded by tests, not by types.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(edit="VALUE = 2\n")
+
+
+async def test_the_files_g1_identified_are_given_to_the_agent(
+    repo: Path, oracle: FakeOracle
+) -> None:
+    """Measured on the first live run: the agent got the brief and nothing
+    else, so it began file discovery from zero -- which made a `change` run
+    close to `claude -p` with a lightly edited prompt."""
+    agent = RecordingAgent()
+    config = _config(repo, agent)
+    state = _state(relevant_paths=["src/a.py", "src/b.py"])
+    state.update(await write_nodes.prepare(state, config))
+
+    await write_nodes.execute(state, config)
+
+    assert "src/a.py" in agent.context
+    assert "src/b.py" in agent.context
+
+
+async def test_the_paths_never_change_the_brief_the_human_approved(
+    repo: Path, oracle: FakeOracle
+) -> None:
+    """They travel as system context. Appending them to the brief would hand
+    the agent a string nobody read at G1."""
+    agent = RecordingAgent()
+    config = _config(repo, agent)
+    state = _state(relevant_paths=["src/a.py"])
+    state.update(await write_nodes.prepare(state, config))
+
+    await write_nodes.execute(state, config)
+
+    assert agent.brief == "THE APPROVED BRIEF"
+    assert "src/a.py" not in (agent.brief or "")
+
+
+async def test_the_paths_are_a_starting_point_not_a_boundary(
+    repo: Path, oracle: FakeOracle
+) -> None:
+    """A wrong list must not cripple a capable agent, and a wrong list should
+    become a visible outcome rather than a quietly worse change (§7: ADR-018's
+    narrowing rule fires on legitimate work)."""
+    agent = RecordingAgent()
+    config = _config(repo, agent)
+    state = _state(relevant_paths=["src/a.py"])
+    state.update(await write_nodes.prepare(state, config))
+
+    await write_nodes.execute(state, config)
+
+    assert "not a boundary" in agent.context
+    assert "say so" in agent.context
+
+
+async def test_no_paths_means_no_context_rather_than_an_empty_heading(
+    repo: Path, oracle: FakeOracle
+) -> None:
+    agent = RecordingAgent()
+    config = _config(repo, agent)
+    state = _state(relevant_paths=[])
+    state.update(await write_nodes.prepare(state, config))
+
+    await write_nodes.execute(state, config)
+
+    assert agent.context == ""

@@ -309,3 +309,44 @@ def test_the_measured_mode_is_the_deterministic_one() -> None:
     from dynaflows.executor.agent import MEASURED_PERMISSION_MODE
 
     assert MEASURED_PERMISSION_MODE == "bypassPermissions"
+
+
+def test_context_reaches_the_system_prompt_and_not_the_brief(tmp_path: Path) -> None:
+    """ADR-025: the brief is the exact string a human approved at G1."""
+    binary = _fake_claude(
+        tmp_path, body="print(json.dumps({'result': ' '.join(sys.argv[1:])}))"
+    )
+    run = ClaudeCodeAgent(AgentOptions(permission_mode="acceptEdits", binary=binary)).run(
+        _Space(tmp_path), "THE BRIEF", context="these files matter"  # type: ignore[arg-type]
+    )
+    assert "--append-system-prompt these files matter" in run.result_text
+    assert run.result_text.endswith("THE BRIEF")
+
+
+def test_context_is_appended_to_a_configured_system_prompt_not_replacing_it(
+    tmp_path: Path,
+) -> None:
+    binary = _fake_claude(
+        tmp_path, body="print(json.dumps({'result': ' '.join(sys.argv[1:])}))"
+    )
+    options = AgentOptions(
+        permission_mode="acceptEdits", binary=binary, append_system_prompt="follow the playbook"
+    )
+    run = ClaudeCodeAgent(options).run(_Space(tmp_path), "b", context="and these files")  # type: ignore[arg-type]
+
+    assert "follow the playbook" in run.result_text
+    assert "and these files" in run.result_text
+
+
+def test_per_run_context_does_not_mutate_the_shared_options(tmp_path: Path) -> None:
+    """The agent is constructed once and used for every task in a run. An
+    options object edited in place would accumulate every previous task's
+    context."""
+    binary = _fake_claude(tmp_path, body="print(json.dumps({'result': 'ok'}))")
+    options = AgentOptions(permission_mode="acceptEdits", binary=binary)
+    agent = ClaudeCodeAgent(options)
+
+    agent.run(_Space(tmp_path), "b", context="first")  # type: ignore[arg-type]
+    agent.run(_Space(tmp_path), "b", context="second")  # type: ignore[arg-type]
+
+    assert options.append_system_prompt is None
