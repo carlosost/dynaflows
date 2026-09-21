@@ -417,6 +417,11 @@ class WorkflowState(TypedDict, total=False):
     # X work" as a work order and one that reads it correctly are different
     # facts, and only the pair shows which you have.
     enhancer_intent_claimed: str
+    # What the brief appears to have dropped from the request. Evidence for
+    # the human at G1, never a verdict: the enhancer has been told to preserve
+    # intent since it was written and a model ignored it anyway, so this is
+    # the check that replaces the asking.
+    fidelity_concerns: list[str]
     prompt_gate: GateOutcome | None
 
     plan: Plan | None
@@ -488,6 +493,7 @@ def initial_state(
         enhancer_model="",
         enhancer_intent="question",
         enhancer_intent_claimed="question",
+        fidelity_concerns=[],
         prompt_gate=None,
         plan=None,
         plan_hash=None,

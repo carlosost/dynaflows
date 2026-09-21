@@ -50,9 +50,11 @@ from dynaflows.graph import planner as planning
 from dynaflows.graph import synthesis as synth
 from dynaflows.graph.budgets import worker_context_budget
 from dynaflows.graph.capabilities import render_capabilities
+from dynaflows.graph.fidelity import concerns_about
 from dynaflows.graph.gates import gate_outcome
 from dynaflows.graph.deps import (
     auto_approved,
+    enhancement_wanted,
     gateway_from,
     playbook_from,
     source_root_from,
@@ -131,6 +133,27 @@ async def enhance_prompt(
     resume -- and could show the human different text than the text they were
     approving.
     """
+    # --no-enhance. Two live `change` runs in a row produced their best
+    # outcome when the enhancer changed nothing, and a third silently deleted
+    # four of the request's constraints -- the difference being which model
+    # the SMALL chain fell through to. When the user has already written a
+    # brief, paying a call for the chance of a worse one is a gamble with no
+    # upside. The raw prompt becomes the brief verbatim; `relevant_paths` is
+    # empty, which is honest rather than guessed.
+    if not enhancement_wanted(config):
+        raw = state.get("raw_prompt", "")
+        return {
+            "enhanced_prompt": raw,
+            "enhancer_model": "(not enhanced)",
+            "enhancer_intent": _settled_intent(raw, "work"),
+            "enhancer_intent_claimed": "(not enhanced)",
+            "relevant_paths": [],
+            "invented_paths": [],
+            "enhancer_assumptions": [],
+            "fidelity_concerns": [],
+            "cost": cost_delta(),
+        }
+
     gateway = gateway_from(config)
     # ADR-023 step A: the enhancer was blind to the codebase. The PLANNER got
     # the source catalogue in ADR-018 and the enhancer never did, so "fix the
@@ -183,6 +206,9 @@ async def enhance_prompt(
         "relevant_paths": grounded,
         "invented_paths": invented,
         "enhancer_assumptions": list(payload.assumptions),
+        # Measured against the RAW prompt, not against the previous brief:
+        # an edited brief is compared to what the user actually asked for.
+        "fidelity_concerns": concerns_about(state.get("raw_prompt", ""), payload.enhanced),
         "cost": delta_for(result),
     }
 
@@ -211,6 +237,7 @@ async def approve_prompt(
             "model": state.get("enhancer_model", ""),
             "intent": state.get("enhancer_intent", ""),
             "intent_claimed": state.get("enhancer_intent_claimed", ""),
+            "fidelity_concerns": list(state.get("fidelity_concerns") or []),
         }
     )
     outcome = gate_outcome(answer)

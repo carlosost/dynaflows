@@ -389,6 +389,18 @@ def _render_gate(payload: dict[str, Any], out: Console | None = None) -> None:
             padding=(0, 1),
         )
     )
+    # FIRST, above the paths and the assumptions. A brief that dropped a
+    # constraint still reads as a good brief -- that is exactly what made the
+    # 2026-09-17 run dangerous: one clean imperative sentence, and "do not
+    # choose a budget value" gone from it. Anything printed above this would
+    # be read before the reason not to trust what is above it.
+    concerns = payload.get("fidelity_concerns") or []
+    if concerns:
+        c.print(f"[red]{len(concerns)} thing(s) your request said may not have survived:[/]")
+        for item in concerns:
+            c.print(Text(f"  · {item}"), markup=False)
+        c.print("[dim]  Press e to restore them, or r to reject.[/]")
+
     paths = payload.get("relevant_paths") or []
     if paths:
         # What it thinks the request is ABOUT, checked against the catalogue.
@@ -531,6 +543,7 @@ def _graph_config(
     auto_approve: list[str],
     root: Path | None = None,
     agent: Any = None,
+    enhance: bool = True,
 ) -> dict[str, Any]:
     """Every dependency a node can ask for, built in ONE place.
 
@@ -565,6 +578,7 @@ def _graph_config(
             # stop, not quietly acquire a coding agent.
             **({"agent": agent} if agent is not None else {}),
             "auto_approve": auto_approve,
+            "enhance": enhance,
         }
     }
 
@@ -673,6 +687,13 @@ def run(
     yes_plan: Annotated[
         bool, typer.Option("--yes-plan", help="Skip gate G2. The fan-out runs unreviewed.")
     ] = False,
+    no_enhance: Annotated[
+        bool,
+        typer.Option(
+            "--no-enhance",
+            help="Use your prompt verbatim as the brief. Skips the rewrite and its call.",
+        ),
+    ] = False,
     root: Annotated[
         Path | None,
         typer.Option(help="Directory to analyse. Defaults to the project root."),
@@ -708,6 +729,7 @@ def run(
                 thread_id,
                 auto_approve=(["prompt"] if yes_prompt else []) + (["plan"] if yes_plan else []),
                 root=root,
+                enhance=not no_enhance,
             )
             state = initial_state(
                 uuid.uuid4().hex[:8],
@@ -791,6 +813,13 @@ def change(
             help="Skip gate G3. The diff is applied to your tree unreviewed.",
         ),
     ] = False,
+    no_enhance: Annotated[
+        bool,
+        typer.Option(
+            "--no-enhance",
+            help="Use your prompt verbatim as the brief. Skips the rewrite and its call.",
+        ),
+    ] = False,
     root: Annotated[
         Path | None, typer.Option(help="Repository to change. Defaults to the project root.")
     ] = None,
@@ -831,6 +860,7 @@ def change(
                 + (["change"] if yes_change else []),
                 root=root,
                 agent=agent,
+                enhance=not no_enhance,
             )
             state = initial_state(
                 uuid.uuid4().hex[:8],

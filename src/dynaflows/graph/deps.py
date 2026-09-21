@@ -18,6 +18,7 @@ SOURCE_ROOT_KEY = "source_root"
 # The WRITE pipeline only (ADR-023). Injected like every other dependency so a
 # test hands the graph a fake agent and a tmp_path home, rather than cutting a
 # real worktree and spending a real agent turn.
+ENHANCE_KEY = "enhance"
 AGENT_KEY = "agent"
 HOME_KEY = "home"
 
@@ -101,3 +102,13 @@ def home_from(config: Any) -> Any:
             "no home directory in config['configurable']",
         )
     return home
+
+
+def enhancement_wanted(config: Any) -> bool:
+    """False when the caller passed --no-enhance.
+
+    Default True: skipping the rewrite must be a choice the user makes, not
+    something that happens because a key was absent from a config somewhere.
+    """
+    value = configurable(config).get(ENHANCE_KEY)
+    return True if value is None else bool(value)
