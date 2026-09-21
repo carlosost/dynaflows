@@ -277,6 +277,13 @@ def test_an_agent_that_tried_and_failed_is_not_unavailable(tmp_path: Path) -> No
     """The distinction that matters: this one DID work, and could not do it.
 
     The user should read what it said, not be told to log in.
+
+    This payload carries NO `usage` key, which is the case that caught the
+    first structural check: it counted a missing field as proof no model ran.
+    A missing `usage` and a `usage` reporting zeros are two facts (AP-20), and
+    only the second is evidence. Kept as-is rather than "fixed" to carry
+    usage, because a payload that omits the field is a real shape and this is
+    the test that says what we do with it.
     """
     binary = _fake_claude(
         tmp_path,
@@ -350,3 +357,106 @@ def test_per_run_context_does_not_mutate_the_shared_options(tmp_path: Path) -> N
     agent.run(_Space(tmp_path), "b", context="second")  # type: ignore[arg-type]
 
     assert options.append_system_prompt is None
+
+
+# --------------------------------------------------------------------------
+# Unavailable, detected structurally. The prose version failed in production.
+# --------------------------------------------------------------------------
+
+
+def test_the_real_oauth_expiry_payload_is_unavailable(tmp_path: Path) -> None:
+    """Live run, 2026-09-21. The old regex matched none of this wording and
+    the user was told "the agent changed nothing" -- true, uninformative, and
+    pointing at the wrong fix."""
+    binary = _fake_claude(
+        tmp_path,
+        body=(
+            "print(json.dumps({'type':'result','subtype':'success','is_error':True,"
+            "'result':'Failed to authenticate: OAuth session expired and could not be refreshed',"
+            "'num_turns':1,'total_cost_usd':0,'usage':{'input_tokens':0,'output_tokens':0},"
+            "'modelUsage':{},'terminal_reason':'api_error'}))\n"
+            "sys.exit(1)"
+        ),
+    )
+    run = ClaudeCodeAgent(AgentOptions(permission_mode="acceptEdits", binary=binary)).run(
+        _Space(tmp_path), "fix it"  # type: ignore[arg-type]
+    )
+    assert run.unavailable is True
+    assert run.usable is False
+
+
+def test_an_auth_failure_with_unfamiliar_wording_is_still_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The point of the structural check: no text pattern is consulted here."""
+    binary = _fake_claude(
+        tmp_path,
+        body=(
+            "print(json.dumps({'is_error':True,'result':'credential handshake rejected',"
+            "'usage':{'input_tokens':0,'output_tokens':0},'modelUsage':{}}))\n"
+            "sys.exit(1)"
+        ),
+    )
+    run = ClaudeCodeAgent(AgentOptions(permission_mode="acceptEdits", binary=binary)).run(
+        _Space(tmp_path), "fix it"  # type: ignore[arg-type]
+    )
+    assert run.spent_nothing is True
+    assert run.unavailable is True
+
+
+def test_an_agent_that_burned_tokens_and_failed_is_not_unavailable(
+    tmp_path: Path,
+) -> None:
+    """It ran. The user should read what it said, not be told to log in."""
+    binary = _fake_claude(
+        tmp_path,
+        body=(
+            "print(json.dumps({'is_error':True,'result':'the module does not exist',"
+            "'usage':{'input_tokens':4200,'output_tokens':310},"
+            "'modelUsage':{'claude':{'inputTokens':4200}}}))\n"
+            "sys.exit(1)"
+        ),
+    )
+    run = ClaudeCodeAgent(AgentOptions(permission_mode="acceptEdits", binary=binary)).run(
+        _Space(tmp_path), "fix it"  # type: ignore[arg-type]
+    )
+    assert run.spent_nothing is False
+    assert run.unavailable is False
+    assert run.usable is False
+
+
+def test_a_turn_spent_before_hitting_an_auth_wall_is_still_unavailable(
+    tmp_path: Path,
+) -> None:
+    """Why the text patterns are KEPT as a second signal: structure alone
+    misses an agent that worked, then lost its session."""
+    binary = _fake_claude(
+        tmp_path,
+        body=(
+            "print(json.dumps({'is_error':True,"
+            "'result':'Failed to authenticate: session expired',"
+            "'usage':{'input_tokens':5000,'output_tokens':40},"
+            "'modelUsage':{'claude':{'inputTokens':5000}}}))\n"
+            "sys.exit(1)"
+        ),
+    )
+    run = ClaudeCodeAgent(AgentOptions(permission_mode="acceptEdits", binary=binary)).run(
+        _Space(tmp_path), "fix it"  # type: ignore[arg-type]
+    )
+    assert run.spent_nothing is False
+    assert run.unavailable is True
+
+
+def test_a_successful_run_is_never_unavailable(tmp_path: Path) -> None:
+    binary = _fake_claude(
+        tmp_path,
+        body=(
+            "print(json.dumps({'is_error':False,'result':'done',"
+            "'usage':{'input_tokens':900,'output_tokens':120}}))"
+        ),
+    )
+    run = ClaudeCodeAgent(AgentOptions(permission_mode="acceptEdits", binary=binary)).run(
+        _Space(tmp_path), "b"  # type: ignore[arg-type]
+    )
+    assert run.unavailable is False
+    assert run.usable is True

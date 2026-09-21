@@ -21,6 +21,7 @@ from dynaflows import __version__
 from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 from dynaflows.contracts.tiers import Tier
 from dynaflows.doctor import Status, run_checks
+from dynaflows.graph.prompts import NOT_ENHANCED
 from dynaflows.editing import edit_text
 from dynaflows.settings import get_settings
 from dynaflows.store.run_store import get_run_store
@@ -426,7 +427,12 @@ def _render_gate(payload: dict[str, Any], out: Console | None = None) -> None:
         else:
             c.print(f"[dim]read as a {intent}[/]")
     model = payload.get("model")
-    if model:
+    if model == NOT_ENHANCED:
+        # Not "written by (not enhanced)". The line exists to tell the reader
+        # who wrote what they are about to approve; when the answer is "you
+        # did", say that.
+        c.print("[dim]not enhanced — this is your text, verbatim[/]")
+    elif model:
         # At the gate, because it is the single best predictor of whether this
         # brief is any good, and the human is about to judge it.
         c.print(f"[dim]written by {model}[/]")

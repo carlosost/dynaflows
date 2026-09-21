@@ -64,6 +64,7 @@ from dynaflows.graph.grounding import Grounding
 from dynaflows.graph.prompts import (  # noqa: I001
     ANSWER_SYSTEM,
     ENHANCER_SYSTEM,
+    NOT_ENHANCED,
     PLANNER_SYSTEM,
     WRITE_PLANNER_SYSTEM,
     SYNTHESIZER_SYSTEM,
@@ -142,11 +143,19 @@ async def enhance_prompt(
     # empty, which is honest rather than guessed.
     if not enhancement_wanted(config):
         raw = state.get("raw_prompt", "")
+        settled = _settled_intent(raw, "work")
         return {
             "enhanced_prompt": raw,
-            "enhancer_model": "(not enhanced)",
-            "enhancer_intent": _settled_intent(raw, "work"),
-            "enhancer_intent_claimed": "(not enhanced)",
+            "enhancer_model": NOT_ENHANCED,
+            "enhancer_intent": settled,
+            # The SAME value, not a sentinel. `intent_claimed` exists to hold
+            # what a MODEL said so the gate can shout when grammar had to
+            # correct it. With no model there is no claim, and putting a
+            # sentinel here made the gate print "read as a work (the model
+            # said (not enhanced))" -- reporting a disagreement that never
+            # happened. AP-20: "the model was wrong" and "there was no model"
+            # are two facts, and only one of them belongs in that line.
+            "enhancer_intent_claimed": settled,
             "relevant_paths": [],
             "invented_paths": [],
             "enhancer_assumptions": [],

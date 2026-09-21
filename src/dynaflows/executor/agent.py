@@ -64,7 +64,14 @@ _SESSION_NAMESPACE = uuid.UUID("6f1b6c6e-0a2f-4f1a-9a3e-0b5c9d2a7e41")
 # `"is_error":true`. Anything keyed on `subtype` would have read that as a
 # successful change. Recorded because the trap is in the agent's contract,
 # not in ours.
-_NOT_AUTHENTICATED = re.compile(r"not logged in|please run /login|invalid api key", re.IGNORECASE)
+# A SECOND signal, not the first. See `unavailable`: the primary test is
+# whether a model was called at all. These catch the case where a turn WAS
+# spent before the agent hit an auth wall, which structure alone misses.
+_NOT_AUTHENTICATED = re.compile(
+    r"not logged in|please run /login|invalid api key|failed to authenticate"
+    r"|session expired|could not be refreshed|unauthor(?:ised|ized)",
+    re.IGNORECASE,
+)
 
 # Measured 2026-09-16, two tasks per mode: one benign (`git rev-parse`, very
 # likely auto-allowed) and one arbitrary (`python3 -c ...`, which no allowlist
@@ -155,21 +162,71 @@ class AgentRun:
         return self.exit_code == 0 and not self.timed_out and not self.reported_error
 
     @property
+    def spent_nothing(self) -> bool:
+        """The agent REPORTED calling no model. Structural, and narrow.
+
+        An agent that tried the task and failed has token usage: it read
+        files, it reasoned, it gave up. An agent that could not start has
+        none. That difference is a fact in the payload, where "not logged in"
+        is a sentence someone can rephrase between versions -- and did.
+
+        **False when the payload says nothing about usage at all.** A missing
+        `usage` key and a `usage` reporting zeros are two different facts
+        (AP-20), and the first version of this collapsed them -- so a payload
+        that simply omitted the field was read as proof no model ran. That is
+        absence of evidence used as evidence of absence, and it fails in the
+        expensive direction: a genuine task failure reported to the user as
+        "log in", sending them to fix a session that was never broken.
+
+        So this claims `True` only on positive evidence: the payload carried
+        usage, and the usage was zero.
+        """
+        usage = self.fields.get("usage")
+        model_usage = self.fields.get("modelUsage")
+        reported_usage = isinstance(usage, dict)
+        reported_models = isinstance(model_usage, dict)
+        if not reported_usage and not reported_models:
+            return False
+
+        counted = sum(
+            value
+            for key, value in (usage or {}).items()
+            if key.endswith("_tokens") and isinstance(value, int | float)
+        ) if reported_usage else 0
+        used_a_model = bool(model_usage) if reported_models else False
+        return counted <= 0 and not used_a_model
+
+    @property
     def unavailable(self) -> bool:
         """The agent could not be used at all, as opposed to trying and failing.
 
-        Met on the first live probe: every permission mode returned in under
-        two seconds at $0.0000 with `terminal_reason: api_error`, and the
-        cause was `Not logged in`. Without this distinction the write pipeline
-        would tell the user their change failed -- sending them to read a
-        diff that does not exist -- when what it needed to say was "log in".
-        The same shape as ADR-025's missing-binary case, and the same rule
-        the gateway learned about 402s: a configuration problem wearing an
-        error code is still a configuration problem.
+        Without this distinction the write pipeline tells the user their
+        change failed -- sending them to read a diff that does not exist --
+        when what it needed to say was "log in". Same rule the gateway learned
+        about 402s: a configuration problem wearing an error code is still a
+        configuration problem.
+
+        **Detected structurally, after prose detection failed in production.**
+        The first version matched `not logged in|please run /login|invalid api
+        key`, written from the one sample seen on 2026-09-16. On 2026-09-21 a
+        live run returned "Failed to authenticate: OAuth session expired and
+        could not be refreshed", matched nothing, and reached the user as
+        "the agent changed nothing" -- true, uninformative, and pointing at
+        the wrong fix.
+
+        A pattern written to fit an observed instance describes that instance,
+        not the class. What separates the two cases is whether a model was
+        ever called, and the payload says so. The text patterns are kept as a
+        SECOND signal, because an agent can burn a turn and then hit an auth
+        wall -- but they are no longer the only thing between a configuration
+        problem and a misleading gate.
         """
-        return self.exit_code != 0 and (
-            not self.parsed or _NOT_AUTHENTICATED.search(self.result_text) is not None
-        )
+        if not self.parsed:
+            return True
+        if _NOT_AUTHENTICATED.search(self.result_text):
+            return True
+        failed = self.exit_code != 0 or self.reported_error
+        return failed and self.spent_nothing
 
 
 class Agent(Protocol):

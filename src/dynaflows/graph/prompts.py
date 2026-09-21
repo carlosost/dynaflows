@@ -11,6 +11,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+# What `enhancer_model` says when --no-enhance was used. A constant rather
+# than a literal in two files, because the CLI has to recognise it to render
+# the gate honestly -- and a sentinel that only one side knows is a sentinel
+# is just a string that happens to match today.
+NOT_ENHANCED = "(not enhanced)"
+
 ENHANCER_SYSTEM = """\
 You rewrite a developer's request into a precise, self-contained brief. You do \
 not answer the request or start the work.

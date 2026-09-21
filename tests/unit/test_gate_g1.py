@@ -282,3 +282,66 @@ async def test_an_invented_path_does_not_stop_the_run(tmp_path: Path, cfg: Any) 
 
     # Still halts at G1 for approval rather than failing the run.
     assert "__interrupt__" in out
+
+
+# --------------------------------------------------------------------------
+# --no-enhance. The gate must not report a model that never ran.
+# --------------------------------------------------------------------------
+
+
+def test_an_unenhanced_brief_reports_no_intent_correction() -> None:
+    """`intent_claimed` holds what a MODEL said, so the gate can shout when
+    grammar had to correct it. With no model there is no claim, and a sentinel
+    there made the gate print "read as a work (the model said (not
+    enhanced))" -- a disagreement that never happened.
+
+    AP-20: "the model was wrong" and "there was no model" are two facts.
+    """
+    from rich.console import Console
+
+    from dynaflows import cli
+    from dynaflows.graph.prompts import NOT_ENHANCED
+
+    buffer = Console(record=True, width=100)
+    cli._render_gate(
+        {
+            "gate": "prompt",
+            "original": "do the thing",
+            "enhanced": "do the thing",
+            "model": NOT_ENHANCED,
+            "intent": "work",
+            "intent_claimed": "work",
+        },
+        out=buffer,
+    )
+    text = buffer.export_text()
+
+    assert "the model said" not in text
+    assert "written by" not in text
+    assert "your text, verbatim" in text
+
+
+def test_a_real_intent_correction_is_still_loud() -> None:
+    """The line this protects: silently fixing a bad reading hides a bad
+    enhancer, and the correction is the most useful thing on the gate when it
+    happens."""
+    from rich.console import Console
+
+    from dynaflows import cli
+
+    buffer = Console(record=True, width=100)
+    cli._render_gate(
+        {
+            "gate": "prompt",
+            "original": "how does X work",
+            "enhanced": "Explain how X works.",
+            "model": "some/model",
+            "intent": "question",
+            "intent_claimed": "work",
+        },
+        out=buffer,
+    )
+    text = buffer.export_text()
+
+    assert "the model said work" in text
+    assert "written by some/model" in text
