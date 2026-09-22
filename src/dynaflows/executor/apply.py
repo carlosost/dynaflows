@@ -54,6 +54,9 @@ class Applied:
     ok: bool
     reason: str = ""
     files: tuple[str, ...] = ()
+    # Applied, but not by this call. A separate fact from `ok` because the
+    # advice differs: nothing was written, and nothing needed to be.
+    already: bool = False
 
     @property
     def refused(self) -> bool:
@@ -90,6 +93,24 @@ def apply_to_working_tree(
     # pipeline was built to avoid -- arriving at the last step.
     checked = _run(repo_root, ["apply", "--check", "-"], patch)
     if checked.returncode != 0:
+        # git says "patch does not apply" for two opposite situations, and
+        # the first version of this reported both as the second:
+        #
+        #   - the tree moved and the change now conflicts
+        #   - the change is ALREADY THERE, so the old text git is hunting for
+        #     is gone -- because this patch put the new text in its place
+        #
+        # On 2026-09-22 a user was told their work was stranded on a branch
+        # while all eight files already carried it. A reverse --check
+        # separates them: a patch that applies backwards is a patch already
+        # applied forwards.
+        if _run(repo_root, ["apply", "--reverse", "--check", "-"], patch).returncode == 0:
+            return Applied(
+                ok=True,
+                already=True,
+                reason="this change is already in your working tree; nothing to do",
+                files=_touched(repo_root, patch),
+            )
         return Applied(
             ok=False,
             reason=(
@@ -109,13 +130,17 @@ def apply_to_working_tree(
             reason=f"the patch passed --check and then failed to apply: {_tail(applied)}",
         )
 
+    return Applied(ok=True, files=_touched(repo_root, patch))
+
+
+def _touched(repo_root: Path, patch: str) -> tuple[str, ...]:
+    """The paths the patch names, read from git rather than parsed by us."""
     listed = _run(repo_root, ["apply", "--numstat", "-"], patch)
-    files = tuple(
+    return tuple(
         line.split("\t")[-1]
         for line in listed.stdout.splitlines()
         if line.strip() and "\t" in line
     )
-    return Applied(ok=True, files=files)
 
 
 def _run(repo_root: Path, args: list[str], patch: str) -> subprocess.CompletedProcess[str]:

@@ -213,3 +213,50 @@ def test_git_returns_the_answer_when_check_is_off_and_the_command_fails(
     repo: Path,
 ) -> None:
     assert ws.git(repo, "rev-parse", "--verify", "no-such-branch", check=False) == ""
+
+
+def test_the_captured_patch_ends_with_a_newline_and_git_apply_accepts_it(
+    repo: Path, home: Path, tmp_path: Path
+) -> None:
+    """The bug that stranded a real change on a branch.
+
+    `capture()` read the patch through `git()`, which strips -- so the diff
+    lost its trailing newline and `git apply` rejected 505 lines with
+    "corrupt patch at line 506", naming the line that should have existed.
+
+    Asserted by APPLYING it, not by inspecting it: "ends with \\n" is a
+    property of the string, and what actually matters is whether git takes it.
+    """
+    space = ws.create(repo, home, "r1")
+    (space.path / "module.py").write_text("VALUE = 2\n", encoding="utf-8")
+    (space.path / "added.py").write_text("NEW = True\n", encoding="utf-8")
+    patch = space.capture().patch
+
+    assert patch.endswith("\n")
+
+    target = tmp_path / "target"
+    target.mkdir()
+    _run(target, "init", "--quiet", "--initial-branch=main")
+    _run(target, "config", "user.email", "t@example.invalid")
+    _run(target, "config", "user.name", "t")
+    (target / "module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _run(target, "add", "-A")
+    _run(target, "commit", "--quiet", "-m", "first")
+
+    applied = subprocess.run(
+        ["git", "-C", str(target), "apply", "-"],
+        input=patch,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert applied.returncode == 0, applied.stderr
+    assert (target / "module.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert (target / "added.py").read_text(encoding="utf-8") == "NEW = True\n"
+
+
+def test_git_raw_keeps_what_git_strips(repo: Path) -> None:
+    """The distinction the helper split exists for: a value versus a document."""
+    assert ws.git(repo, "rev-parse", "HEAD") == ws.git_raw(repo, "rev-parse", "HEAD").strip()
+    assert ws.git_raw(repo, "rev-parse", "HEAD").endswith("\n")
+    assert not ws.git(repo, "rev-parse", "HEAD").endswith("\n")

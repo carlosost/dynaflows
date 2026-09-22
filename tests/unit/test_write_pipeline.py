@@ -636,3 +636,45 @@ async def test_no_anchors_means_no_playbook_section_in_the_context(
     await write_nodes.execute(state, config)
 
     assert "govern the change" not in agent.context
+
+
+async def test_an_agent_that_never_started_leaves_no_worktree_behind(
+    repo: Path, oracle: FakeOracle
+) -> None:
+    """An `execute` halt normally KEEPS the worktree -- an agent that ran and
+    failed may have left work worth looking at. One that never started cannot
+    have, and two such runs left empty worktrees and branches on disk in
+    September with nothing to clean them up."""
+    unavailable = AgentRun(
+        session_id="s1", exit_code=1, timed_out=False, duration_s=0.1, raw="",
+        parsed=True, result_text="Failed to authenticate: OAuth session expired",
+        fields={"usage": {"input_tokens": 0}, "modelUsage": {}},
+    )
+    config = _config(repo, FakeAgent(run=unavailable))
+    state = _state(**await write_nodes.prepare(_state(), config))
+    path = Path(state["workspace"].path)
+    assert path.is_dir()
+
+    update = await write_nodes.execute(state, config)
+
+    assert "halted" in update
+    assert not path.exists(), "an agent that never ran leaves nothing worth keeping"
+    assert "dynaflows/r1" not in ws.git(repo, "branch", "--list")
+
+
+async def test_an_agent_that_ran_and_failed_keeps_its_worktree(
+    repo: Path, oracle: FakeOracle
+) -> None:
+    """The other half of the rule: work that exists is not thrown away."""
+    failed = AgentRun(
+        session_id="s1", exit_code=1, timed_out=False, duration_s=0.1, raw="",
+        parsed=True, result_text="hit the spend limit",
+        fields={"usage": {"input_tokens": 5000, "output_tokens": 200}},
+    )
+    config = _config(repo, FakeAgent(edit="VALUE = 2\n", run=failed))
+    state = _state(**await write_nodes.prepare(_state(), config))
+    path = Path(state["workspace"].path)
+
+    await write_nodes.execute(state, config)
+
+    assert path.is_dir(), "an agent that produced work keeps its worktree"

@@ -169,3 +169,39 @@ def test_git_apply_lives_in_exactly_one_module() -> None:
         "a git apply outside executor/apply.py writes to the user's tree "
         "without passing G3; see ADR-026"
     )
+
+
+def test_an_already_applied_patch_is_reported_as_such_not_as_a_conflict(
+    repo: Path, patch: str
+) -> None:
+    """git says "patch does not apply" for two opposite situations.
+
+    Live, 2026-09-22: a user was told their work was stranded on a branch
+    while all eight files already carried it. The forward --check fails
+    identically in both cases; a REVERSE check separates them, because a
+    patch that applies backwards is a patch already applied forwards.
+    """
+    first = apply_to_working_tree(repo, patch, APPROVED)
+    assert first.ok is True
+    assert first.already is False
+
+    second = apply_to_working_tree(repo, patch, APPROVED)
+    assert second.ok is True
+    assert second.already is True
+    assert second.files == ("module.py",)
+    assert (repo / "module.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+def test_a_genuine_conflict_is_still_a_conflict_not_already_applied(
+    repo: Path, patch: str
+) -> None:
+    """The distinction only helps if it still calls a conflict a conflict."""
+    (repo / "module.py").write_text("SOMETHING = 'else'\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "--quiet", "-m", "moved")
+
+    result = apply_to_working_tree(repo, patch, APPROVED)
+
+    assert result.ok is False
+    assert result.already is False
+    assert "no longer applies" in result.reason

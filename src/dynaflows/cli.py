@@ -280,6 +280,20 @@ def _render_change_gate(payload: dict[str, Any], out: Console | None = None) -> 
         c.print("[dim]Approving applies nothing. Reject and rerun with a sharper brief.[/]")
         return
 
+    # ABOVE the diffstat, for the same reason `empty` is above everything:
+    # a cut-off change looks exactly like a finished one. It compiles, the
+    # suite passes, the diffstat is substantial -- and half the work is
+    # missing. Measured 2026-09-22: 80 turns, a spend limit, and a change
+    # whose second half (the G2 rendering it was asked for) was never
+    # written. The gate said nothing.
+    if not payload.get("finished", True):
+        c.print("[red]The agent did not report finishing. Treat this diff as PARTIAL.[/]")
+        because = payload.get("agent_stopped_because")
+        if because:
+            c.print(Text(f"  it stopped because: {because[:400]}"), markup=False)
+        c.print("[dim]  What is here may be correct and still be half the change.[/]")
+        c.print()
+
     files = payload.get("files") or []
     c.print(f"[bold]{len(files)} file(s) changed[/] [dim]on {payload.get('branch') or '?'}[/]")
     stat = payload.get("stat")
@@ -792,6 +806,13 @@ def _finish_change(values: dict[str, Any], root: Path) -> None:
 
     patch = Path(changes.patch.path).read_text(encoding="utf-8")
     result = apply_to_working_tree(root, patch, gate)
+    if result.already:
+        # Not a failure and not work done: the run was resumed, or applied
+        # once already. Saying "applied" would claim a write that did not
+        # happen; saying "not applied" would send the user hunting for work
+        # that is sitting in their tree.
+        console.print(f"[green]Already in your working tree[/] [dim]({len(result.files)} file(s))[/]")
+        return
     if result.ok:
         console.print(f"[green]Applied {len(result.files)} file(s) to your working tree[/], unstaged.")
         console.print("[dim]Review and stage the hunks you want, then commit when you are ready.[/]")
@@ -1085,6 +1106,7 @@ def diagnose(
     from dynaflows.contracts.state import MAX_FANOUT
     from dynaflows.gateway.invoker import langchain_response_format, raw_completion
     from dynaflows.gateway.probe import call_through_gateway
+    from dynaflows.graph.budgets import SECTION_MAP_BUDGET_TOKENS
     from dynaflows.graph.capabilities import render_capabilities
     from dynaflows.graph.prompts import (
         ENHANCER_SYSTEM,
@@ -1108,7 +1130,7 @@ def diagnose(
             # defaulted: this line was a silent bare caller until the
             # default was removed.
             capabilities=render_capabilities("read"),
-            section_map=repository.section_map(),
+            section_map=repository.section_map(SECTION_MAP_BUDGET_TOKENS).render(),
         )
         schema = PlanDraft
         tier = Tier.FRONTIER

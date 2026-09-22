@@ -40,7 +40,16 @@ from pathlib import Path
 
 from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 
-__all__ = ["Changes", "Workspace", "WorkspaceError", "adopt", "create", "discard", "git"]
+__all__ = [
+    "Changes",
+    "Workspace",
+    "WorkspaceError",
+    "adopt",
+    "create",
+    "discard",
+    "git",
+    "git_raw",
+]
 
 # Both derived from the run id, so a worktree and its branch can never be
 # paired with the wrong run, and an orphan of either is traceable to the run
@@ -53,8 +62,46 @@ class WorkspaceError(DynaflowsError):
     """A git operation the run cannot continue without."""
 
 
+def git_raw(repo: Path, *args: str) -> str:
+    """git's stdout, VERBATIM. For content, where every byte matters.
+
+    Separate from `git()` because that one strips, and stripping is right for
+    a value and wrong for a document. This helper exists because the same
+    strip has now caused two bugs a week apart:
+
+      - `status --porcelain` puts the path at a fixed column behind two
+        status characters; stripping removed the leading space of an unstaged
+        modification and every path on the first line shifted by one. The
+        test read `odule.py`.
+      - a patch must end with a newline. Stripping removed it, and
+        `git apply` rejected a 505-line diff with "corrupt patch at line
+        506" -- naming the line that should have existed. An hour of real
+        agent work sat on a branch because of one absent byte.
+
+    The second happened AFTER the first was fixed and commented, because the
+    fix was made at the call site rather than at the helper. **A helper that
+    is wrong for a class of caller keeps finding new members of that class.**
+    """
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise WorkspaceError.of(
+            ErrorCode.UNKNOWN,
+            f"git {' '.join(args)} failed ({completed.returncode}): "
+            f"{completed.stderr.strip() or completed.stdout.strip()}",
+        )
+    return completed.stdout
+
+
 def git(repo: Path, *args: str, check: bool = True) -> str:
     """Run one git command and return its stdout, stripped.
+
+    Stripped, so this is for VALUES -- a sha, a branch name, a list of paths.
+    Never for content: see `git_raw`.
 
     `check` is a real parameter rather than a flag to be avoided (AP-10):
     several callers ask git a QUESTION whose "no" is a non-zero exit --
@@ -136,7 +183,9 @@ class Workspace:
         """
         git(self.path, "add", "-A")
         return Changes(
-            patch=git(self.path, "diff", "--cached", "--patch", self.base),
+            # `git_raw`, not `git`: a patch is content and its trailing
+            # newline is load-bearing. `git apply` rejects a diff without one.
+            patch=git_raw(self.path, "diff", "--cached", "--patch", self.base),
             stat=git(self.path, "diff", "--cached", "--stat", self.base),
             files=[
                 line

@@ -243,6 +243,13 @@ async def execute(state: WorkflowState, config: RunnableConfig | None = None) ->
         # A configuration problem, not a failed change (ADR-025 amendment).
         # Telling the user their change failed would send them to read a diff
         # that was never produced.
+        #
+        # The worktree goes with it. A halt in `execute` normally KEEPS the
+        # worktree, because an agent that ran and failed may still have left
+        # work worth looking at -- but an agent that never started cannot
+        # have. Two runs in September left empty worktrees and branches on
+        # disk for exactly this reason, and nothing ever cleaned them up.
+        ws.discard(space)
         return {
             "agent": outcome,
             "halted": f"the coding agent could not be used: {result.result_text or result.raw[-300:]}",
@@ -340,6 +347,15 @@ async def approve_change(
         {
             "gate": "change",
             "empty": changes.is_empty,
+            # Whether the agent said it FINISHED. Live run of 2026-09-22: it
+            # hit a spend limit at turn 80, having done most of the work, and
+            # its final message was an error. The gate showed a diffstat and
+            # "nothing that passed before fails now" -- both true -- and never
+            # said the run was cut off. A partial change is internally
+            # coherent and passes the suite, which is exactly why the verdict
+            # cannot carry this fact and a separate field must.
+            "finished": False if agent is None else agent.usable,
+            "agent_stopped_because": "" if agent is None else agent.result_text,
             "files": list(changes.files),
             "stat": changes.stat,
             "patch": None if changes.patch is None else changes.patch.path,

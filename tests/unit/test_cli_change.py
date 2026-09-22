@@ -244,3 +244,37 @@ def test_a_read_plan_still_warns_about_over_budget_tasks() -> None:
 
     assert "worker" in text
     assert "budget" in text
+
+
+# --------------------------------------------------------------------------
+# A cut-off change looks exactly like a finished one.
+# --------------------------------------------------------------------------
+
+
+def test_an_unfinished_change_says_so_above_the_diffstat() -> None:
+    """Live, 2026-09-22: the agent hit a spend limit at turn 80 having done
+    most of the work, and its final message was an error. The gate showed a
+    diffstat and a green verdict -- both true -- and never said the run was
+    cut off. A partial change compiles and passes the suite, which is why the
+    verdict cannot carry this and a separate field must."""
+    text = _render(
+        _payload(finished=False, agent_stopped_because="You've hit your monthly spend limit")
+    )
+
+    assert "PARTIAL" in text
+    assert "monthly spend limit" in text
+    position = text.index("PARTIAL")
+    assert position < text.index("file(s) changed"), "the warning must come first"
+
+
+def test_a_finished_change_carries_no_partial_warning() -> None:
+    assert "PARTIAL" not in _render(_payload(finished=True))
+
+
+def test_a_payload_without_the_field_does_not_cry_wolf() -> None:
+    """Older checkpoints have no `finished` key. Defaulting to "unfinished"
+    would fire the loudest warning on every resumed run (playbook 5.2,
+    Pattern 5: a gate that fires on ordinary work gets ignored)."""
+    payload = _payload()
+    payload.pop("finished", None)
+    assert "PARTIAL" not in _render(payload)
