@@ -278,3 +278,41 @@ def test_a_payload_without_the_field_does_not_cry_wolf() -> None:
     payload = _payload()
     payload.pop("finished", None)
     assert "PARTIAL" not in _render(payload)
+
+
+def test_a_truncated_playbook_catalogue_is_shown_at_g2() -> None:
+    """ADR-009: the planner picks anchors from this catalogue, so one it was
+    shown only part of is a planner routing work against sections it could not
+    see. The 2026-09-22 agent run carried these fields into the payload and
+    was cut off before rendering them -- a fact nobody displays is a fact
+    nobody has."""
+    text = _render_plan(
+        _plan_payload(
+            section_map_truncated=True, section_map_listed=97, section_map_total=105
+        )
+    )
+    assert "97 of 105" in text
+    assert "could not cite the rest" in text
+
+
+def test_an_untruncated_catalogue_says_nothing() -> None:
+    """It is the normal case. A line on every gate is a line people stop
+    reading (playbook 5.2, Pattern 5).
+
+    Asserted on the phrase unique to the truncation line, not on "playbook
+    section(s)" -- the WRITE gate has its own line saying how many sections
+    the agent will be shown, and the first version of this test matched that
+    one instead. A substring chosen because it appears in the string you are
+    looking at will also appear in strings you are not.
+    """
+    assert "could not cite the rest" not in _render_plan(_plan_payload())
+
+
+def test_the_count_is_shown_for_the_read_pipeline_too() -> None:
+    """Both pipelines plan from the same catalogue."""
+    payload = _plan_payload(
+        pipeline="read", section_map_truncated=True,
+        section_map_listed=50, section_map_total=105,
+    )
+    payload["tasks"][0]["capability"] = "analyse"
+    assert "50 of 105" in _render_plan(payload)

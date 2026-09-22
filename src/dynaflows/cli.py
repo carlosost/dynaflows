@@ -217,6 +217,24 @@ def _render_plan_gate(payload: dict[str, Any], out: Console | None = None) -> No
         )
     c.print(table)
 
+    # ADR-009. The planner picks `playbook_anchors` from a catalogue, so a
+    # catalogue it was shown only part of is a planner routing work against
+    # sections it could not see. Shown for BOTH pipelines, because both plan
+    # from the same catalogue, and shown as a count rather than a flag: "97 of
+    # 105" tells you how bad it is, "truncated" does not.
+    #
+    # This is the half of the 2026-09-22 change the agent was cut off before
+    # writing: it carried these three fields into the payload and nothing
+    # rendered them. A fact in a payload that no one displays is a fact nobody
+    # has.
+    if payload.get("section_map_truncated"):
+        listed = int(payload.get("section_map_listed") or 0)
+        total = int(payload.get("section_map_total") or 0)
+        c.print(
+            f"[yellow]the planner saw {listed} of {total} playbook section(s)[/] "
+            f"[dim]-- the catalogue hit its budget, so it could not cite the rest[/]"
+        )
+
     # The WRITE pipeline has no worker node and no fan-out: `execute` hands
     # the brief to a coding agent. Saying "1 parallel worker" here would be
     # describing machinery that does not run -- and the first live `change`
