@@ -1563,6 +1563,31 @@ for being easy to verify, and that is exactly why it proved nothing — it never
 under test. **A probe that cannot fail is not a measurement.** Same shape as AP-11's green-but-never-
 runs test, and as the counters that read zero because nothing incremented them.
 
+**Amendment 2026-09-21 — "could not be used" is detected structurally, after prose detection failed
+in production.** The executor distinguishes an agent that COULD NOT RUN from one that ran and failed,
+because the first needs "log in" and the second needs the agent's own words. The first version matched
+`not logged in|please run /login|invalid api key`, written from the one sample seen on 2026-09-16. On
+2026-09-21 a live run returned *"Failed to authenticate: OAuth session expired and could not be
+refreshed"*, matched nothing, and reached the user as "the agent changed nothing" — true,
+uninformative, and pointing at the wrong fix.
+
+The test now asks **whether a model was called at all** (`usage` totals, `modelUsage`): an agent that
+tried the task has token usage, one that could not start has none. That is a fact in the payload,
+where the wording is a sentence a vendor reworks between versions. The text patterns are kept as a
+SECOND signal, because an agent can burn a turn and then hit an auth wall, which structure alone
+misses.
+
+One further correction the same day: `spent_nothing` first treated a MISSING `usage` key and a
+`usage` reporting zeros as the same fact — AP-20 — so a payload that simply omitted the field was read
+as proof no model ran. It now claims `True` only on positive evidence. Absence of evidence used as
+evidence of absence fails in the expensive direction: a real task failure reported as "log in", sending
+the user to fix a session that was never broken. See AP-23 in the playbook.
+
+**Amendment 2026-09-22 — a run whose agent never started discards its worktree.** An `execute` halt
+normally KEEPS the worktree: an agent that ran and failed may have left work worth reading. One that
+never started cannot have, and two September runs left empty worktrees and branches on disk with
+nothing to clean them up.
+
 **Reversal condition:** a change that must be verified against the user's uncommitted state, where
 branching from HEAD loses the thing being fixed.
 
@@ -1605,8 +1630,88 @@ the same reason: **an exception should be the size of the need.**
   HEAD, applied onto a tree with uncommitted edits to the same files, is the conflict case, and G2
   is where it is visible.
 
+**Amendment 2026-09-22 — "already applied" is a third outcome, not a failure.** `git apply --check`
+fails identically for two opposite situations: the tree moved and the change now conflicts, or the
+change is ALREADY THERE, so the old text git is hunting for is gone — because this patch put the new
+text in its place. The first version reported both as the second, and told a user their work was
+stranded on a branch while all eight files already carried it.
+
+A REVERSE `--check` separates them: a patch that applies backwards is a patch already applied
+forwards. `Applied` therefore carries `already` alongside `ok`, because the advice differs — nothing
+was written, and nothing needed to be. Two facts, two fields.
+
+**Also recorded, because the cause was a helper and not this module.** The first live G3 apply failed
+with "corrupt patch at line 506" on a 505-line diff. `workspace.git()` strips its output; a patch must
+end with a newline, and a blank context line in a diff is a single space — so the strip removed the
+trailing newline AND the last blank context lines. `git_raw()` now exists for content. See AP-24.
+
 **Reversal condition:** a user who consistently rejects at G3 and re-runs, which would mean the
 review belongs before the apply rather than after it.
+---
+---
+
+### ADR-027: the brief is checked, not trusted, and a good prompt may pass through untouched
+
+**Date:** 2026-09-21
+**Status:** Accepted
+
+**Context.** `ENHANCER_SYSTEM` has said "Preserve the user's intent exactly" and "if the request is
+already precise, return it close to unchanged" since it was written. On 2026-09-17 a 200-word request
+carrying four explicit constraints came back as one sentence:
+
+> Modify repository.section_map() to enforce a token budget for the planner prompt.
+
+Gone: which levers to use, which not to, the precedent to follow, and — the dangerous one — *"do not
+choose a budget value."* Some of it survived into `assumptions`, which is the field that reaches the
+HUMAN at G1 and not the agent, so the constraints landed where they did the least good.
+
+The model that did it was a different model from the one that had returned the same class of prompt
+byte-identical an hour earlier. **Brief quality tracks model identity, and asking more firmly does not
+change that** — which the A/B run of 2026-09-15 had already measured and which this confirmed at cost.
+
+**Decision, two parts.**
+
+**1. A check, not another rule.** `graph/fidelity.py` compares the brief against the RAW prompt and
+reports what appears to have been dropped: a large shrink ratio, identifiers/constants/anchors/figures
+named in the request and absent from the brief, and sentences carrying a prohibition whose markers did
+not survive. The concerns render at G1 **above** the brief, because a brief that dropped a constraint
+still reads as a good brief — that is exactly what made the 09-17 run dangerous.
+
+It does NOT reject. A brief that drops something may still be right, and this reads tokens, not
+meaning. "Nothing detected" is not "nothing lost". It is evidence for a human, never a verdict.
+
+Deliberately dumb: no model call, no embedding, no similarity score. It runs on every enhancement and
+its job is to be a tripwire. A fuzzy check that is usually right is a check nobody believes when it
+fires.
+
+**2. `--no-enhance`.** When the user has already written a brief, paying a call for the chance of a
+worse one is a gamble with no upside. Three of the five live briefs in September were byte-identical
+to the prompt; one was destroyed. The raw prompt becomes the brief verbatim, `relevant_paths` is empty
+— honest rather than guessed — and `enhancer_model` is `NOT_ENHANCED`.
+
+**Why no new instruction was added to the prompt.** The prompt already said both things that were
+violated. Adding a third sentence asking harder is the move this project keeps proving does not work:
+**if you can enforce it, do not ask for it.**
+
+**Consequences.**
+- `fidelity_concerns` joins state and the G1 payload; it is `list[str]`, so no checkpoint registration
+  is needed.
+- The G1 gate gained an ordering constraint: concerns print before paths, assumptions and the model
+  line. Anything above them would be read before the reason not to trust what is above it.
+- `NOT_ENHANCED` is a named constant in `prompts.py` rather than a literal, because the CLI has to
+  recognise it to render the gate honestly — a sentinel only one side knows is a sentinel is a string
+  that happens to match today. With no model there is no claimed intent either, so
+  `enhancer_intent_claimed` holds the settled value and the gate does not report a disagreement that
+  never happened (AP-20).
+
+**Still open.** The `assumptions` field is degrading into process narration — "The request is a work
+request, not a question" is not an assumption, it is the enhancer describing its own steps. §7 already
+carries "a hedge is accepted as an assumption"; this is a step past it, and it trains the reader to
+skip the one field meant to surface real judgement calls.
+
+**Reversal condition:** a fidelity check that fires on briefs a human then approves unchanged, which
+would mean it is measuring rewriting rather than deletion.
+
 ---
 
 ## 2. Data Contracts
@@ -2846,6 +2951,70 @@ honestly under a real failure: `2 call(s) after 2 that returned nothing usable`,
 no hint that the chain had fallen through to an unmeasured model. The counters are now load-bearing
 rather than decorative, which is what let this failure be diagnosed from one line of output.
 
+### The first live `change` runs, 2026-09-16 to 2026-09-22
+
+Six attempts before one completed. Recorded in order, because the ORDER is the finding: only two of
+the six failures were dynaflows' fault, and every one of them was caught at a gate before it could
+write anything.
+
+- **Attempt 1 — 402 at G2.** `repository.section_map()` was 54% of the planner prompt and uncapped.
+  §7 had predicted it "grows until the provider rejects the request"; it did, at 9,342 tokens against
+  a 3,340 ceiling. **The tool could not plan the fix to its own planner cost.** Measured again the
+  next day: the same prompt had grown 131 tokens overnight from ordinary documentation work.
+
+- **Attempt 2 — the WRITE planner was shown the READ catalogue.** `nodes.plan` called
+  `render_capabilities()` with no argument; the parameter defaulted to `"read"`; the planner could not
+  see `implement` and planned four `analyse` tasks. G2 showed the user four workers, 68,806 context
+  tokens and a worker-budget warning **for a pipeline with no worker node**. The suite missed it
+  because the only test asserted `"implement" not in render_capabilities("read")` — true, and silent
+  about what the CALLER passes. *A test on a function's behaviour is not a test that its callers use
+  it correctly.* The default is now gone: a bare call is a TypeError.
+
+- **Attempt 3 — the enhancer deleted the brief.** See ADR-027.
+
+- **Attempts 4 and 5 — the coding agent's OAuth session had expired.** Not dynaflows, and confirmed by
+  running the executor's exact command by hand with no dynaflows in the picture. The misclassification
+  WAS dynaflows: see ADR-025's amendment.
+
+- **Attempt 6 — completed.** G1 → G2 → worktree → `uv sync` → 712-test baseline → agent → suite →
+  G3 → applied. The agent produced 8 files and 236 insertions, and the verdict read "nothing that
+  passed before fails now".
+
+**And the finding inside the success, which is the one worth keeping.** The agent hit its monthly
+spend limit at turn 80. Its final message was an error, not a summary, and **half the change was
+missing** — it had carried truncation metadata into the G2 payload and was cut off before writing the
+code that renders it. G3 showed a substantial diffstat and a green verdict, both true, and never said
+the run was cut off.
+
+A partial change compiles, passes the suite, and looks finished. The test verdict cannot carry that
+fact, so a separate field must: G3 now prints *"The agent did not report finishing. Treat this diff as
+PARTIAL"* above the diffstat, in the same position and for the same reason as the empty-diff warning.
+**Every line below a warning reads as success when the warning is true.**
+
+- **`--permission-mode` was measured, and the first measurement was worthless.** Round one gave each
+  mode a read-only `git` command; three passed; it proved only that they did not need to ask. Round
+  two used a command no allowlist covers and separated them at once: `acceptEdits` **exits 0 in seven
+  seconds having silently refused**, with the refusal only in the result text. A run that reports
+  success with an empty diff is worse than one that blocks. `auto` passed both and is still rejected
+  for non-determinism (a classifier can answer differently on identical runs). `bypassPermissions` is
+  chosen for determinism, NOT safety — the boundary is the worktree, `disallowed_tools`, and the human
+  at G2. See AP-25.
+
+- **`CHARS_PER_TOKEN_ESTIMATE = 3.6` is no longer a guess.** Load-bearing since Phase 0 and never
+  checked. Two independent measurements: the real 402 (~8% conservative against the provider's own
+  count) and a SMALL-tier calibration (3.49–4.08, mean 3.82, spanning the constant). Roughly right,
+  erring in the safe direction. An earlier claim of "~21% high" was a bug in the measuring script —
+  it called `str()` on the `SourceMap` dataclass, whose repr carries the rendered text AND a frozenset
+  of every path. **Measure what goes on the wire, not what `print()` produces.**
+
+- **The section-map budget is frozen at the measured value, not chosen.** `SECTION_MAP_BUDGET_TOKENS
+  = 5_191` is this repository's catalogue as measured on 2026-09-21. Nothing truncates today; growth
+  past today's size truncates and is reported at G2. This satisfies §4.5 — it is a measurement, not an
+  opinion — and it means **the truncation path is tested but never exercised in this repository**,
+  which is worth remembering before trusting it under pressure.
+
+---
+
 ## 7. Known Gaps in This Document
 
 Listed explicitly, per AP-19 — a design document that quietly asserts more than it has is worse than
@@ -2872,7 +3041,13 @@ one that names its holes.
   runtime graph path goes through `by_anchor`. The BM25 layer ADR-009 argues for hardest has never
   run in a real graph execution, which is how it carried a corrupt index undetected. Until the graph
   calls it, its behaviour under load, its ranking quality and its failure modes are all unmeasured.
-- **`repository.catalog()` is O(corpus), paid on every planner call, and has NO BUDGET.** Measured:
+- **CLOSED 2026-09-22: `repository.section_map()` has a budget and reports its own truncation.**
+  It grew until a provider rejected the prompt (9,342 against a 3,340 ceiling, and +131 tokens in the
+  following 24 hours of ordinary documentation work). `SECTION_MAP_BUDGET_TOKENS` freezes it at the
+  measured 5,191; `SectionMap.truncated/listed/total` reach G2, which prints "the planner saw 97 of
+  105 playbook section(s)" -- a count, because "truncated" does not say how bad it is. Built by the
+  tool itself, in the first completed `change` run. The superseded note follows.
+- ~~**`repository.catalog()` is O(corpus), paid on every planner call, and has NO BUDGET.**~~ Measured:
   49.2 tokens per chunk. At 12 chunks a document that is ~59k tokens in the prompt at 100 documents,
   ~591k at a thousand, ~1.8M at three thousand. There is no truncation, no cap and no error — it
   grows until the provider rejects the request.
@@ -3383,3 +3558,26 @@ never seen a real 429, 401 or timeout.
   of the whole retrieval design, and was unverified when written. Now checked: `sqlite3` 3.53.1,
   `CREATE VIRTUAL TABLE … USING fts5` succeeds.
 - *"The intended dependency tree installs on Python 3.14"* — see ADR-012.
+
+### Opened or sharpened by the first live `change` runs, 2026-09-22
+
+- **The `assumptions` field is filling with process narration.** "The request is a work request, not
+  a question" and "The relevant files are in the catalogue" are the enhancer describing its own steps,
+  not judgement calls made on the user's behalf. A step past the existing "a hedge is accepted as an
+  assumption" gap, and it trains the reader to skip the one field meant to surface real assumptions.
+- **`build_source_map()` is at 72% of its 6,000-token budget and grows with the source tree.** Unlike
+  the section map it will not 402 -- it truncates, and `SourceMap.render()` says so in the prompt, but
+  nothing surfaces it at G2 the way the section map now does. The quieter failure of the two.
+- **The section map's truncation path is tested and never exercised.** The budget equals the current
+  corpus size, so no production run has truncated. The tests are the only evidence it behaves.
+- **G2's plan table still shows `context_tokens` and an over-budget warning for a WRITE plan.**
+  Leftover read-pipeline machinery: no worker receives a context budget in that pipeline, so the
+  number describes nothing. A number on a gate that means nothing is the thing §6 keeps finding.
+- **Nothing lists or cleans up dead threads.** A halted run leaves a checkpoint row in `state.db`
+  forever. Worktrees are discarded when the agent never started (ADR-025 amendment), but there is no
+  `dynaflows threads` to show what is outstanding.
+- **STILL THE LARGEST GAP: the tool's central claim is unmeasured.** Five live briefs in September --
+  three byte-identical to the prompt, one destroyed by a free model, one untested. `calibrate
+  --capability answer` has had a fixture and a scorer and NO CALLER since Phase 0 (AP-11). Nothing
+  anywhere shows that a sharpened brief makes a coding agent do better work, and that is what the
+  whole design rests on.

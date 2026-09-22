@@ -1621,6 +1621,139 @@ security boundary" is the difference between a useful filter and a false guarant
 
 ---
 
+#### AP-23: The Matcher That Looks at Layout Instead of Structure
+
+**Shape.** You need to find something in text — an import, a call, a path, a
+constant — and you write a pattern from the one example in front of you. The
+pattern encodes how that example happened to be *laid out*: which column, which
+line, which quoting, which wording. It passes when written. It fails on the
+second instance, silently, by matching nothing or by matching too much.
+
+**Seven instances in one project week**, all the same mistake wearing different
+clothes:
+
+| what was matched | what it missed or caught wrongly |
+|---|---|
+| `^import subprocess` | a function-local `    import subprocess` |
+| `line[3:]` on `git status --porcelain` | output had been `.strip()`ed; every path shifted one column (`odule.py`) |
+| `"Each shape is a separate graph"` | the phrase straddled a hard line-wrap in markdown |
+| `'"apply"' in source` | any docstring containing the word |
+| `"render_capabilities()" not in source` | a **comment** quoting the bug it described |
+| `not logged in\|please run /login` | `Failed to authenticate: OAuth session expired` |
+| `"playbook section(s)" not in text` | a different, correct line using the same words |
+
+**Why it keeps happening.** A matcher written from a sample is testable
+immediately and passes immediately, which feels like verification. Nothing
+distinguishes "this pattern describes the class" from "this pattern describes
+the instance I copied it from" until an instance outside the copy arrives.
+
+**The rule.** *A substring chosen because it appears in the string you are
+looking at will also appear in strings you are not.*
+
+**What to do instead — ask the system what something IS, not what it looks
+like:**
+- parse it: an AST knows what a function call is; a substring does not
+- import the project's own predicate rather than re-deriving one that resembles
+  it (a lookalike for `_FORMAL_RE` disagreed with it by a factor of two)
+- prefer the tool's structured output (`git diff --name-only`) over its
+  human-formatted one (`git status --porcelain` + column arithmetic)
+- for classification, prefer a structural fact in the payload (was a model
+  called? token usage) over prose that a vendor can reword between versions
+
+**Detection.** Before shipping a matcher, write down the second instance you
+have not seen and ask whether the pattern covers it. If you cannot name one,
+the pattern is probably fitted to the sample.
+
+---
+
+#### AP-24: The Helper That Is Wrong for a Class of Caller
+
+**Shape.** A utility does something slightly wrong for one caller. You fix it
+**at the call site**, write a comment explaining the hazard, and leave the
+utility alone. The utility keeps finding new members of the class it is wrong
+for.
+
+**Concrete case.** A `git()` helper returned `stdout.strip()`. That is right
+for a *value* — a sha, a branch name — and wrong for a *document*:
+
+- **First bug:** `status --porcelain` puts the path behind two status
+  characters; stripping ate the leading space and shifted every path on the
+  first line by one. Fixed at the call site, with a comment naming the hazard.
+- **Second bug, a week later:** a patch must end with a newline, and a *blank
+  context line in a diff is a single space*. Stripping deleted the trailing
+  newline **and the last blank context lines**. `git apply` rejected a 505-line
+  diff as "corrupt patch at line 506", and an hour of agent work sat stranded
+  on a branch.
+
+**The rule.** *A fix at the call site does not fix the class.* If a helper is
+wrong for a kind of caller, either the helper changes or the kinds get separate
+names.
+
+**What to do instead.** Split it: `git()` returns a stripped value, `git_raw()`
+returns stdout verbatim. Two names cost less than the second bug did. Name the
+split in the docstring with both failures, so nobody re-merges them for
+elegance.
+
+**Detection.** When you write "careful, X does Y" in a comment at a call site,
+that comment is evidence the helper is wrong, not documentation that it is
+fine.
+
+---
+
+#### AP-25: The Probe That Cannot Fail
+
+**Shape.** You build a diagnostic to decide between options, and you choose the
+test task for being easy to verify. Easy to verify often means it does not
+exercise the thing under test. Every option passes; you conclude they are
+equivalent; you were measuring nothing.
+
+**Concrete case.** Four permission modes of a coding agent, tested with: *run
+`git rev-parse --short HEAD` and write the output to a file.* Three passed. But
+a read-only `git` command is very likely on an auto-allow list, so "the mode
+completed" meant "the mode did not need to ask" — which is not the question.
+
+A second round added a task no allowlist covers (`python3 -c ...`) and
+separated them immediately: one mode **exited 0 having silently refused the
+command**, producing a coherent run with an empty result. That is worse than
+hanging — a hang is loud after a timeout; this reports success.
+
+**The rule.** *A probe that cannot fail is not a measurement.* Same family as a
+test that never runs and a counter that is never incremented.
+
+**What to do instead.** Before running a probe, state what result would make you
+choose differently. If no observable outcome would, the probe has no
+discriminating power and the task needs to be harder.
+
+**Detection.** All options passing is a red flag, not a green one — especially
+when the options are supposed to differ.
+
+---
+
+#### AP-26: The Exception Larger Than the Need
+
+**Shape.** An architectural rule is enforced by a check with a named allowlist.
+A legitimate need arises. You add the *module* — or the package — to the
+allowlist, because that is where the need happens to live. The exemption now
+covers everything else in that module forever.
+
+**Concrete case.** A linter banned importing `subprocess` outside one package.
+A thousand-line CLI needed to launch the user's `$EDITOR` — about seventy lines
+of it. Exempting the CLI would have granted a module that was *about to grow a
+code-writing command* the right to spawn anything. Instead the seventy lines
+moved to their own module, and that file is the exemption.
+
+**The rule.** *An exception should be the size of the need.* An allowlist whose
+entries are larger than their reasons is a pattern wearing a list of names.
+
+**What to do instead.** Move the need to where the exemption can be small. Then
+assert the exemption against reality — a test that the exempt file still
+contains the thing it was exempted for, so the entry cannot outlive its reason.
+
+**Detection.** If you can describe the need in one sentence and the exemption in
+one noun, and the noun is much bigger than the sentence, split it.
+
+---
+
 ### 4.5 Numeric Thresholds That Require Empirical Tuning
 
 The following parameters are commonly set to "reasonable" defaults and left untouched.
