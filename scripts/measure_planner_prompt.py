@@ -1,4 +1,4 @@
-"""What the planner prompt is made of, and which part has no budget. §7.
+"""What the planner prompt is made of, and how close each part is to its budget. §7.
 
 Run this whenever a 402 says the prompt is too large, instead of guessing:
 
@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from dynaflows.graph.budgets import SECTION_MAP_BUDGET_TOKENS  # noqa: E402
 from dynaflows.graph.capabilities import render_capabilities  # noqa: E402
 from dynaflows.playbook import get_playbook_repository  # noqa: E402
 from dynaflows.playbook.repository import _FORMAL_RE  # noqa: E402
@@ -33,18 +34,23 @@ def main() -> int:
     settings = get_settings()
     repository = get_playbook_repository()
 
-    sections = repository.section_map()
+    section_map = repository.section_map(SECTION_MAP_BUDGET_TOKENS)
     # `.render()`, NOT `str()`. The first version of this used `str()` on a
     # dataclass whose repr contains the rendered text AND a frozenset of
     # every path AND the field names -- roughly the prompt text twice over.
     # It reported the source map at 5,488 tokens and 91% of its budget, and
     # both figures were of an object the planner never sends. Measure what
     # goes on the wire, not what `print()` happens to produce.
+    sections = section_map.render()
     source_map = build_source_map(settings.project_root)
     capabilities = render_capabilities("read")
 
     rows = [
-        ("repository.section_map()", estimate_tokens(sections), "NONE"),
+        (
+            "repository.section_map()",
+            estimate_tokens(sections),
+            f"{SECTION_MAP_BUDGET_TOKENS:,}",
+        ),
         ("build_source_map()", estimate_tokens(source_map.render()), f"{SOURCE_MAP_BUDGET_TOKENS:,}"),
         ("render_capabilities()", estimate_tokens(capabilities), "n/a"),
     ]
@@ -64,9 +70,15 @@ def main() -> int:
     # `repository.section_line` itself uses to decide, so this now asks the
     # same question the code asks. **When the codebase already owns the
     # predicate, importing it beats re-deriving something that resembles it.**
-    lines = [line for line in sections.splitlines() if line.strip()]
+    # `.text`, not `.render()` -- the TRUNCATED banner is not a row and would
+    # inflate both the row count and the anchor count if split on newlines.
+    lines = [line for line in section_map.text.splitlines() if line.strip()]
     anchored = sum(1 for line in lines if _FORMAL_RE.match(line.split(" | ", 1)[0].strip()))
     print(f"\n  section map: {len(lines)} row(s), {anchored} with a formal anchor (AP-/ADR-/§)")
+    print(
+        f"  section map: {section_map.listed} of {section_map.total} rows listed"
+        + (" -- TRUNCATED" if section_map.truncated else "")
+    )
 
     used = estimate_tokens(source_map.render())
     print(
@@ -74,9 +86,12 @@ def main() -> int:
         f"({100 * used / SOURCE_MAP_BUDGET_TOKENS:.0f}% of its budget)"
     )
     print(
-        "\n  Two different failures, and the budgeted one is the quieter:\n"
-        "  the section map has no cap and ends a run with a 402 you can read;\n"
-        "  the source map has a cap and will TRUNCATE, silently, saying nothing.\n"
+        "\n  Both catalogues are budgeted and both truncate the same way:\n"
+        "  deterministically, formal-anchor rows (or the SourceMap's own\n"
+        "  ordering) surviving first, with the cut stated in the rendered text\n"
+        "  rather than left for the reader to infer from a shorter list. The\n"
+        "  section map's cut also reaches gate G2 (`SectionMap.truncated`);\n"
+        "  the source map's does not yet -- it still truncates silently there.\n"
         "\n  A cap on either is not free. ADR-009's premise is that the planner\n"
         "  names anchors from the section map, so truncation blinds the primary\n"
         "  retrieval path and has to reach the gate rather than the log.\n"

@@ -42,7 +42,13 @@ from dynaflows.store.source_map import build_source_map  # noqa: E402
 
 
 def _samples(settings: object, repository: object) -> list[tuple[str, str]]:
-    sections = repository.section_map()  # type: ignore[attr-defined]
+    # `section_map` takes a budget since 2026-09-22. This call was missed when
+    # the signature changed -- the sibling script was updated and this one was
+    # not, and nothing caught it because a script has no test. The budget here
+    # is deliberately large: this measures TOKEN DENSITY of catalogue text, so
+    # truncating the sample would measure a shorter sample, not a different
+    # density.
+    sections = repository.section_map(1_000_000).text  # type: ignore[attr-defined]
     source_map = build_source_map(settings.project_root).render()  # type: ignore[attr-defined]
     code = (
         Path(__file__).resolve().parents[1] / "src" / "dynaflows" / "executor" / "workspace.py"

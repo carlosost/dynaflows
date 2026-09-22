@@ -153,28 +153,73 @@ def test_search_with_no_usable_terms_returns_nothing(repo) -> None:  # noqa: ANN
 
 # --- catalogue -----------------------------------------------------------
 
+# Comfortably above anything this small corpus can produce, so these tests
+# exercise the unbudgeted case -- `budget_tokens` is required, not optional,
+# specifically so nothing in `repository.py` can pick this number quietly.
+_UNLIMITED = 100_000
+
 
 def test_the_catalogue_lists_every_chunk_once(repo) -> None:  # noqa: ANN001
-    assert len(repo.section_map().splitlines()) == repo.count()
+    section_map = repo.section_map(_UNLIMITED)
+    assert len(section_map.text.splitlines()) == repo.count()
+    assert not section_map.truncated
+    assert section_map.listed == section_map.total == repo.count()
 
 
 def test_a_catalogue_row_prefers_formal_anchors_over_the_slug(repo) -> None:  # noqa: ANN001
     """Every byte is paid for on every planner call; a slug restates the
     heading printed two columns over."""
-    row = next(r for r in repo.section_map().splitlines() if r.startswith("AP-11"))
+    row = next(r for r in repo.section_map(_UNLIMITED).text.splitlines() if r.startswith("AP-11"))
     assert "parallel-abstraction" not in row
 
 
 def test_a_catalogue_row_falls_back_to_the_slug_when_there_is_no_formal_anchor(
     repo,  # noqa: ANN001
 ) -> None:
-    assert any(r.startswith("overview |") for r in repo.section_map().splitlines())
+    rows = repo.section_map(_UNLIMITED).text.splitlines()
+    assert any(r.startswith("overview |") for r in rows)
 
 
 def test_catalogue_rows_are_trimmed_to_the_last_two_heading_levels(repo) -> None:  # noqa: ANN001
     chunk = repo.by_anchor(["AP-11"])[0]
     assert chunk.heading_path.count(" > ") >= 2
     assert section_line(chunk).split(" | ")[1].count(" > ") == 1
+
+
+def test_a_tight_budget_truncates_and_says_so(repo) -> None:  # noqa: ANN001
+    """`SectionMap.truncated` and `.render()` mirror `SourceMap`: truncation
+    is stated in the rendered text, not left for the reader to infer."""
+    full = repo.section_map(_UNLIMITED)
+    # Room for two of this corpus's five rows.
+    tight = repo.section_map(100)
+    assert tight.truncated
+    assert tight.listed == 2
+    assert tight.total == full.total == 5
+    assert "TRUNCATED" in tight.render()
+    assert f"{tight.listed} of {tight.total}" in tight.render()
+
+
+def test_a_budget_that_fits_everything_does_not_truncate(repo) -> None:  # noqa: ANN001
+    section_map = repo.section_map(_UNLIMITED)
+    assert not section_map.truncated
+    assert section_map.render() == section_map.text
+    assert "TRUNCATED" not in section_map.render()
+
+
+def test_truncation_keeps_formal_anchor_rows_first(repo) -> None:  # noqa: ANN001
+    """notes.md's 'Overview' section has no formal anchor and sorts before
+    playbook.md's alphabetically, so a naive first-fit-in-document-order
+    truncation would keep it (it is the smallest row in the corpus). A budget
+    too tight for everything must keep the formal-anchor row instead, because
+    ADR-009's planner can only cite an anchor this catalogue prints."""
+    # Fits exactly one row: the smallest formal-anchor row, but not the
+    # smallest row overall (`overview`, which is non-formal).
+    tiny = repo.section_map(40)
+    assert tiny.listed == 1
+    assert tiny.total == 5
+    survivor = tiny.text.splitlines()[0]
+    assert survivor.startswith("§3.3")
+    assert "overview" not in tiny.text
 
 
 # --- drift ---------------------------------------------------------------

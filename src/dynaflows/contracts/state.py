@@ -430,6 +430,13 @@ class WorkflowState(TypedDict, total=False):
     # plan that looks fine (ADR-014).
     plan_rejected_reason: str | None
     plan_gate: GateOutcome | None
+    # Whether the playbook catalogue the planner was actually shown got cut to
+    # fit SECTION_MAP_BUDGET_TOKENS, and how much of it survived. This used to
+    # be neither budgeted nor visible; surfaced at G2 rather than folded
+    # silently into the prompt (ADR-009).
+    section_map_truncated: bool
+    section_map_listed: int
+    section_map_total: int
 
     # --- concurrent keys: reducers are mandatory (see FAN_OUT_KEYS) --------
     results: Annotated[list[WorkerResult], operator.add]

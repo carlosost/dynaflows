@@ -44,3 +44,32 @@ def worker_context_budget(registry: object) -> int:
     # A floor small enough to make this negative is a misconfiguration doctor
     # reports; here it must still produce a working, if tiny, budget.
     return max(usable, 2_000)
+
+
+# The planner's playbook catalogue (`repository.section_map()`, ADR-009).
+# Unlike the budget above, this one is NOT derived from `min_context_tokens`:
+# `min_context_tokens` is 32,000, and the request that actually failed --
+# 2026-09-16, a real provider rejection, not an estimate -- was rejected at
+# 9,342 tokens against a 3,340-token ceiling. That ceiling belonged to
+# whichever model in the chain answered the call; deriving from the
+# registry's floor would not have caught the failure it is named after, so
+# "derived, not chosen" does not apply here the way it does above.
+#
+# scripts/measure_planner_prompt.py measured this repository's catalogue at
+# exactly 5,191 tokens (105 rows, 90 carrying a formal AP-/ADR-/§ anchor) on
+# 2026-09-21. This constant freezes the budget at that figure rather than
+# asserting an opinion about what the right size is: it stops the unbounded
+# growth ADR-009's amendment 2 already named as "the threshold to watch"
+# (the catalogue grows with the PMA, which is append-only), without deciding
+# whether 5,191 is itself safe for every model in the chain.
+#
+# The trade-off that number trades off, for whoever changes it: more rows
+# (and longer per-row summaries) make the planner's `playbook_anchors` choices
+# better-informed; fewer, shorter rows make the whole prompt safer against a
+# provider that rejects it outright. `repository._FORMAL_RE` decides which
+# rows SURVIVE a cut, not how big the cut is -- filtering to formal anchors
+# alone only removes ~14% of rows, nowhere near enough to be the lever.
+#
+# Surfaced at gate G2 (`SectionMap.truncated`) rather than left silent, so a
+# human watching a run sees this number bite before it becomes a rejection.
+SECTION_MAP_BUDGET_TOKENS = 5_191

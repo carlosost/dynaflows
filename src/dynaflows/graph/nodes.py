@@ -48,7 +48,7 @@ from dynaflows.contracts.tiers import Tier
 from dynaflows.graph import grounding as grounding_check
 from dynaflows.graph import planner as planning
 from dynaflows.graph import synthesis as synth
-from dynaflows.graph.budgets import worker_context_budget
+from dynaflows.graph.budgets import SECTION_MAP_BUDGET_TOKENS, worker_context_budget
 from dynaflows.graph.capabilities import render_capabilities
 from dynaflows.graph.fidelity import concerns_about
 from dynaflows.graph.gates import gate_outcome
@@ -294,10 +294,16 @@ async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> di
     # a test that its callers use it correctly.**
     pipeline = state.get("pipeline", "read")
     template = WRITE_PLANNER_SYSTEM if pipeline == "write" else PLANNER_SYSTEM
+    # The playbook catalogue used to be sent whole -- no budget, no truncation,
+    # no error, until the PMA's growth made it large enough that a provider
+    # rejected the prompt outright (SECTION_MAP_BUDGET_TOKENS' docstring).
+    # Truncation is reported alongside the plan at G2 rather than folded
+    # silently into the prompt, the way `SourceMap.truncated` is not today.
+    section_catalogue = repository.section_map(SECTION_MAP_BUDGET_TOKENS)
     system = template.format(
         max_fanout=MAX_FANOUT,
         capabilities=render_capabilities(pipeline),
-        section_map=repository.section_map(),
+        section_map=section_catalogue.render(),
         sources=catalogue.render(),
     )
 
@@ -353,11 +359,21 @@ async def plan(state: WorkflowState, config: RunnableConfig | None = None) -> di
                 "plan": plan_obj,
                 "plan_hash": planning.plan_hash(plan_obj, _models_version(gateway)),
                 "cost": ledger,
+                "section_map_truncated": section_catalogue.truncated,
+                "section_map_listed": section_catalogue.listed,
+                "section_map_total": section_catalogue.total,
             }
 
     # Both attempts failed. The human sees the reason at G2 rather than a
     # trimmed plan that looks fine.
-    return {"plan": None, "plan_rejected_reason": correction, "cost": ledger}
+    return {
+        "plan": None,
+        "plan_rejected_reason": correction,
+        "cost": ledger,
+        "section_map_truncated": section_catalogue.truncated,
+        "section_map_listed": section_catalogue.listed,
+        "section_map_total": section_catalogue.total,
+    }
 
 
 def _write_plan_violation(draft: Any) -> str:
@@ -462,6 +478,11 @@ async def approve_plan(
             "estimated_tokens": plan_obj.estimated_tokens,
             "context_budget": plan_obj.context_budget,
             "over_budget": planning.over_budget(plan_obj),
+            # ADR-009's catalogue used to truncate silently or not at all.
+            # This is what the planner call itself was actually shown.
+            "section_map_truncated": state.get("section_map_truncated", False),
+            "section_map_listed": state.get("section_map_listed", 0),
+            "section_map_total": state.get("section_map_total", 0),
             "tasks": [
                 {
                     "task_id": t.task_id,

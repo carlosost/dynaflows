@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -17,6 +19,7 @@ from dynaflows.contracts.errors import DynaflowsError, ErrorCode
 from dynaflows.contracts.playbook import Chunk, DriftReport
 from dynaflows.playbook import store
 from dynaflows.playbook.chunker import chunk_markdown
+from dynaflows.playbook.tokens import estimate_tokens
 
 # FTS5 has its own query syntax: bare `-`, `"` or `*` in a planner's phrase is
 # a syntax error, not a search. Everything from outside is reduced to quoted
@@ -28,7 +31,7 @@ _SUMMARY_RE = re.compile(r"\s+")
 class PlaybookRepository(Protocol):
     def by_anchor(self, anchors: list[str]) -> list[Chunk]: ...
     def search(self, query: str, k: int = 5) -> list[Chunk]: ...
-    def section_map(self) -> str: ...
+    def section_map(self, budget_tokens: int) -> "SectionMap": ...
     def drift(self) -> DriftReport: ...
     def count(self) -> int: ...
 
@@ -59,6 +62,79 @@ def section_line(chunk: Chunk) -> str:
     names = " ".join(formal) if formal else chunk.anchors[0] if chunk.anchors else "-"
     path = " > ".join(chunk.heading_path.split(" > ")[-2:])
     return f"{names} | {path} | {_summary(chunk)}"
+
+
+def _has_formal_anchor(chunk: Chunk) -> bool:
+    return any(_FORMAL_RE.match(a) for a in chunk.anchors)
+
+
+@dataclass(frozen=True, slots=True)
+class SectionMap:
+    """The playbook catalogue actually sent, and how much of it that is.
+
+    Mirrors `store.source_map.SourceMap` on purpose: same shape, same reason.
+    A planner shown a partial catalogue that looks complete will cite an
+    anchor it cannot see and route work against a section that was dropped.
+    """
+
+    text: str
+    listed: int
+    total: int
+
+    @property
+    def truncated(self) -> bool:
+        return self.listed < self.total
+
+    def render(self) -> str:
+        """What goes in the prompt. Truncation is stated, not implied."""
+        if not self.total:
+            return "(no playbook sections indexed)"
+        if not self.truncated:
+            return self.text
+        return (
+            f"{self.text}\n\n"
+            f"... TRUNCATED: {self.listed} of {self.total} sections listed. The rest "
+            f"were omitted for space. Do NOT assume a section is absent because it is "
+            f"missing from this list; cite only anchors you can see here."
+        )
+
+
+def _pack_section_map(chunks: Sequence[Chunk], budget_tokens: int) -> SectionMap:
+    """Fill `budget_tokens` with catalogue rows.
+
+    Filtering to formal anchors alone only removes ~14% of rows (90 of 105 on
+    this corpus) -- not enough to be the lever that gets a catalogue under a
+    cap. It is used here only to decide WHICH rows survive a cut: ADR-009's
+    planner can only cite an anchor this catalogue still prints, so a row with
+    one is worth more than a row without when something has to go. The actual
+    size is set by row COUNT and row LENGTH (`_summary`'s 90-character cap),
+    and both are paid on every planner call regardless of which rows survive.
+
+    Deterministic, like `store.source_map.build_source_map`: once a row does
+    not fit, nothing after it is considered, even a smaller one further down.
+    Survivors are then rendered back in their original document order.
+    """
+    total = len(chunks)
+    order = sorted(range(total), key=lambda i: 0 if _has_formal_anchor(chunks[i]) else 1)
+    survive: list[int] = []
+    used = 0
+    exhausted = False
+    for i in order:
+        if exhausted:
+            continue
+        line = section_line(chunks[i])
+        cost = estimate_tokens(line) + 1
+        if used + cost > budget_tokens:
+            exhausted = True
+            continue
+        used += cost
+        survive.append(i)
+    kept = sorted(survive)
+    return SectionMap(
+        text="\n".join(section_line(chunks[i]) for i in kept),
+        listed=len(kept),
+        total=total,
+    )
 
 
 class SqlitePlaybookRepository:
@@ -106,7 +182,7 @@ class SqlitePlaybookRepository:
         ).fetchall()
         return [store.row_to_chunk(row) for row in rows]
 
-    def section_map(self) -> str:
+    def section_map(self, budget_tokens: int) -> SectionMap:
         """The compact map the planner reads instead of the corpus.
 
         MEASURED 2026-09-13: **48.9 tokens per section**, 4,840 for 99 chunks
@@ -115,27 +191,30 @@ class SqlitePlaybookRepository:
         grammar of a measurement, and ADR-009's argument that the catalogue is
         cheap enough to send on every planner call rests on it.
 
-        At twice the assumed size the argument still holds today, and the
-        headroom is half what the ADR implies.
+        **This used to be unbudgeted.** `catalog()` rendered every chunk in
+        the corpus into the planner's system prompt on every run, with no
+        truncation, no cap, no error -- exactly what §7 predicted: it grew
+        with the PMA (append-only by design) until a provider rejected the
+        request outright. On this repository the catalogue reached 5,191
+        tokens, 54% of the planner's system prompt, before that happened on
+        2026-09-16 at 9,342 total against a 3,340-token ceiling.
 
-        **This is not budgeted.** `SOURCE_MAP_BUDGET_TOKENS` governs
-        `store/source_map.py`'s SOURCE FILE catalogue, a different object; an
-        earlier version of this docstring divided one by the other and
-        reported a ceiling of "about 10 documents", which was two unrelated
-        numbers multiplied together. There is no ceiling. No truncation, no
-        cap, no error -- `catalog()` renders every chunk in the corpus into
-        the planner's system prompt on every run and grows until the provider
-        rejects the request. Measured at 49.2 tokens per chunk: 12 chunks a
-        document puts ~59k tokens in the prompt at 100 documents, ~591k at a
-        thousand, ~1.8M at three thousand.
+        `budget_tokens` is now required, with no module-level default here:
+        which number is safe depends on which model answered that request and
+        how the rest of the prompt is composed, neither of which this file
+        can see. See `graph.budgets.SECTION_MAP_BUDGET_TOKENS` for the current
+        call-site value and the trade-off it is standing in for -- more rows
+        make `playbook_anchors` better informed, fewer rows make the prompt
+        safer against rejection -- which is deliberately not settled here.
 
-        Also a full scan: `SELECT *` materialises every chunk's body to build
+        Still a full scan: `SELECT *` materialises every chunk's body to build
         a line that uses four columns.
         """
         rows = self._connection.execute(
             "SELECT * FROM chunks ORDER BY source_path, ordinal"
         ).fetchall()
-        return "\n".join(section_line(store.row_to_chunk(row)) for row in rows)
+        chunks = [store.row_to_chunk(row) for row in rows]
+        return _pack_section_map(chunks, budget_tokens)
 
     def drift(self) -> DriftReport:
         return store.drift(self._connection, self._root)
@@ -173,8 +252,8 @@ class InMemoryPlaybookRepository:
         ]
         return [c for score, _, c in sorted(scored, key=lambda s: (-s[0], s[1])) if score][:k]
 
-    def section_map(self) -> str:
-        return "\n".join(section_line(c) for c in self._chunks)
+    def section_map(self, budget_tokens: int) -> SectionMap:
+        return _pack_section_map(self._chunks, budget_tokens)
 
     def drift(self) -> DriftReport:
         return DriftReport()

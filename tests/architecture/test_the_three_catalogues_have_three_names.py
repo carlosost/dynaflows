@@ -2,7 +2,9 @@
 
   - the CAPABILITY list      (analyse, answer)      -> hashed into plan_hash
   - the SOURCE FILE list     (every file in a repo) -> budgeted at 6,000 tokens
-  - the PLAYBOOK SECTION list (every indexed chunk) -> not budgeted at all
+  - the PLAYBOOK SECTION list (every indexed chunk) -> budgeted, at whatever
+                                                        graph.budgets.SECTION_MAP_BUDGET_TOKENS
+                                                        currently says
 
 All three were "catalogue". Within one week, two independent readers of this
 codebase borrowed one's constant for another's argument:
@@ -56,12 +58,14 @@ def test_no_identifier_is_merely_called_catalogue() -> None:
 
 
 def test_the_three_lists_are_importable_under_three_distinct_names() -> None:
+    from dynaflows.graph.budgets import SECTION_MAP_BUDGET_TOKENS
     from dynaflows.graph.capabilities import CAPABILITIES_VERSION
     from dynaflows.playbook.repository import SqlitePlaybookRepository
     from dynaflows.store.source_map import SOURCE_MAP_BUDGET_TOKENS
 
     assert CAPABILITIES_VERSION
     assert SOURCE_MAP_BUDGET_TOKENS
+    assert SECTION_MAP_BUDGET_TOKENS
     assert hasattr(SqlitePlaybookRepository, "section_map")
 
 
